@@ -42,3 +42,8 @@ Deterministic tests: python -m compileall -q lite;
 python -m pytest tests/lite -q.
 Live gate: scripts/benchmark-gguf-lite.ps1 -VoiceId <actual-ID>
 -Repetitions 3 (Windows host only).
+
+Native build isolation: use scripts/build-gguf-lite-vulkan.ps1. It stages pinned source
+and native compilation under D:, fails if the Vulkan DLL is missing, and refuses
+to overwrite an existing Lite runtime. It never modifies original repo bin/.
+The Lite launcher resolves D:\VoiceStudioBuild\lite\runtime\bin.
