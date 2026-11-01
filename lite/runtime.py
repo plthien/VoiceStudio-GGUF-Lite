@@ -46,6 +46,10 @@ def _manifest(bin_dir: Path) -> dict[str, str]:
 
 def native_files(settings: Settings) -> tuple[Path, Path]:
     exe, dll = settings.bin_dir / NATIVE_NAME, settings.bin_dir / VULKAN_NAME
+    root = settings.bin_dir.resolve(strict=True)
+    for candidate in (exe, dll):
+        if not candidate.resolve().is_relative_to(root):
+            raise RuntimeErrorLite("Native binary symlink escapes bin directory")
     checksums = _manifest(settings.bin_dir)
     for p in (exe, dll):
         if p.name not in checksums or not p.is_file() or p.stat().st_size < 64:
@@ -56,6 +60,11 @@ def native_files(settings: Settings) -> tuple[Path, Path]:
         raise RuntimeErrorLite("Native executable is not a Windows PE file")
     if dll.open("rb").read(2) != b"MZ":
         raise RuntimeErrorLite("Vulkan library is not a Windows PE DLL")
+    # Shared GGML dependencies are part of the executable trust boundary.
+    for lib in settings.bin_dir.iterdir():
+        if lib.is_file() and lib.name.lower().startswith("ggml") and lib.suffix.lower() == ".dll":
+            if lib.name not in checksums or sha256(lib) != checksums[lib.name]:
+                raise RuntimeErrorLite("Untrusted GGML runtime dependency")
     return exe, dll
 
 def _expected_quantmap() -> None:
