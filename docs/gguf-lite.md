@@ -47,3 +47,32 @@ Native build isolation: use scripts/build-gguf-lite-vulkan.ps1. It stages pinned
 and native compilation under D:, fails if the Vulkan DLL is missing, and refuses
 to overwrite an existing Lite runtime. It never modifies original repo bin/.
 The Lite launcher resolves D:\VoiceStudioBuild\lite\runtime\bin.
+
+## Manually reviewed model provenance receipt (no auto-clearance)
+
+Do **not** invent evidence or simply change the legacy registry revision.
+The source registry remains unchanged. A human who has inspected the *exact*
+pinned revision and the component terms can place the fetched full model-card
+bytes into D:\VoiceStudioBuild\lite\data\provenance\README.md and a
+D:\VoiceStudioBuild\lite\data\provenance\review.json record:
+
+    {
+      "repo_id": "Serveurperso/OmniVoice-GGUF",
+      "model_revision": "361609388ae572a820d085185bbbe2a2aac4b30e",
+      "evidence_url": "https://huggingface.co/Serveurperso/OmniVoice-GGUF/blob/361609388ae572a820d085185bbbe2a2aac4b30e/README.md",
+      "model_licence": "CC-BY-NC-4.0",
+      "commercial_inference": "restricted",
+      "document_sha256": "<SHA-256 of downloaded exact README bytes>",
+      "reviewed_by": "<actual reviewer>",
+      "reviewed_at": "<actual review date>"
+    }
+
+Review the full linked components/attribution obligations before writing
+the receipt. The service verifies file SHA-256, model revision, exact
+evidence URL and explicit fields; it does not fetch from HF or independently
+verify that a human review was sound. The receipt changes the acceptance
+fingerprint: retrieve GET /models/licenses/acceptance/Serveurperso/OmniVoice-GGUF,
+inspect GET /models/licenses/details/Serveurperso/OmniVoice-GGUF,
+then POST /models/licenses/accept with repo_id, fingerprint and accepted:true.
+Any later local receipt or document change invalidates the old acceptance.
+Commercial rights remain restricted/uncleared regardless of acknowledgement.
