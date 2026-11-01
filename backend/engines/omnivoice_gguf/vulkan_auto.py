@@ -52,7 +52,7 @@ logger = logging.getLogger("omnivoice.gguf.vulkan")
 DeviceType = Literal["DISCRETE_GPU", "INTEGRATED_GPU"]
 
 _GIB = 1024 ** 3
-_VULKANINFO_TIMEOUT_S = 10.0
+_VULKANINFO_TIMEOUT_S = 60.0
 #: An integrated GPU on a host with at least this much RAM is budgeted on
 #: shared memory (half the RAM), not on its BIOS frame buffer.
 APU_MIN_SYSTEM_RAM_GB = 16.0
@@ -303,7 +303,7 @@ def _run_vulkaninfo() -> Optional[str]:
         return None
     try:
         proc = subprocess.run(  # nosec B603 -- fixed argv
-            [exe],
+            [exe, "--summary"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=_VULKANINFO_TIMEOUT_S, check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -345,6 +345,57 @@ def _probe() -> VulkanProfile:
     text = _run_vulkaninfo()
     if text is not None:
         adapters = adapters_from_vulkaninfo(parse_vulkaninfo(text), ram)
+
+        # --summary verifies Vulkan devices but omits memory heaps.
+        # Enrich only missing VRAM from the OS inventory.
+        if any(a.dedicated_vram_gb <= 0 for a in adapters):
+            try:
+                from dataclasses import replace
+                from core.gpu_inventory import detect_host_gpus
+
+                os_gpus = detect_host_gpus()
+                enriched = []
+
+                for adapter in adapters:
+                    if adapter.dedicated_vram_gb > 0:
+                        enriched.append(adapter)
+                        continue
+
+                    matches = [
+                        g for g in os_gpus
+                        if g.vram_gb > 0
+                        and g.vendor == adapter.vendor
+                        and g.name.strip().casefold()
+                            == adapter.name.strip().casefold()
+                    ]
+
+                    # Safe fallback only when exactly one GPU
+                    # from this vendor has known VRAM.
+                    if not matches:
+                        matches = [
+                            g for g in os_gpus
+                            if g.vram_gb > 0
+                            and g.vendor == adapter.vendor
+                        ]
+
+                    if len(matches) == 1:
+                        dedicated = float(matches[0].vram_gb)
+                        effective, shared = effective_vram(
+                            adapter.device_type, dedicated, ram
+                        )
+                        adapter = replace(
+                            adapter,
+                            dedicated_vram_gb=dedicated,
+                            effective_vram_gb=effective,
+                            shared_memory=shared,
+                        )
+
+                    enriched.append(adapter)
+
+                adapters = tuple(enriched)
+            except Exception:
+                logger.debug("OS VRAM enrichment failed", exc_info=True)
+
         return VulkanProfile(
             verified=bool(adapters), source="vulkaninfo", system_ram_gb=ram, adapters=adapters,
         )

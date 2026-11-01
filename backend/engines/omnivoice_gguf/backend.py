@@ -901,6 +901,7 @@ def _make_backend_class():
             os.close(fd)
             out_path = Path(out_name)
             transcript_path: Optional[Path] = None
+            converted_ref_path: Optional[Path] = None
             try:
                 if ref_audio and ref_text:
                     # A file keeps arbitrary transcript text out of argv.
@@ -923,10 +924,54 @@ def _make_backend_class():
                     chunk_duration=kw.get("chunk_duration"),
                     chunk_threshold=kw.get("chunk_threshold"),
                 )
+                # Native GGUF CLI accepts WAV reference audio,
+                # while saved VoiceStudio profiles may contain MP3.
+                # _build_argv has already validated the original path.
+                if ref_audio and Path(ref_audio).suffix.lower() != ".wav":
+                    import shutil
+
+                    ffmpeg = shutil.which("ffmpeg")
+                    if not ffmpeg:
+                        raise RuntimeError(
+                            "GGUF MP3 reference requires ffmpeg on backend PATH"
+                        )
+
+                    fd, temp_ref = tempfile.mkstemp(suffix=".wav")
+                    os.close(fd)
+                    converted_ref_path = Path(temp_ref)
+
+                    converted = subprocess.run(
+                        [
+                            ffmpeg, "-hide_banner", "-loglevel", "error",
+                            "-nostdin", "-y", "-i", str(ref_audio),
+                            "-ar", "24000", "-ac", "1",
+                            "-c:a", "pcm_s16le", str(converted_ref_path),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        errors="replace",
+                        timeout=60,
+                        check=False,
+                    )
+
+                    if (
+                        converted.returncode != 0
+                        or converted_ref_path.stat().st_size <= 44
+                    ):
+                        raise RuntimeError(
+                            "GGUF reference conversion to PCM16 WAV failed"
+                        )
+
+                    argv[argv.index("--ref-wav") + 1] = str(
+                        converted_ref_path
+                    )
+
                 self._run_subprocess(argv, stdin_text=text)
                 samples, _rate = sf.read(str(out_path), dtype="float32")
             finally:
-                for leftover in (out_path, transcript_path):
+                for leftover in (
+                    out_path, transcript_path, converted_ref_path
+                ):
                     if leftover is None:
                         continue
                     try:
