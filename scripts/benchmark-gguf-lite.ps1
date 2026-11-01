@@ -16,8 +16,15 @@ for ($i=1; $i -le $Repetitions; $i++) {
   $sampleRate = [BitConverter]::ToInt32($bytes,24)
   if ($sampleRate -ne 24000) { throw "Unexpected native sample rate" }
   # Standard PCM16 WAV output; use Python wav_info for final audio duration/RTF.
-  $results += @{run=$i;elapsed_seconds=$elapsed;bytes=$bytes.Length;wav=$dest}
+  $python = Join-Path "D:\VoiceStudioBuild\lite" ".venv-lite\Scripts\python.exe"
+  if (!(Test-Path $python)) { throw "Missing isolated Lite Python for PCM16 metrics" }
+  $metricsText = & $python -m lite.audio_metrics $dest
+  if ($LASTEXITCODE -ne 0) { throw "WAV metrics failed" }
+  $metrics = $metricsText | ConvertFrom-Json
+  $rtf = $elapsed / $metrics.duration_s
+  $results += @{run=$i;elapsed_seconds=$elapsed;bytes=$bytes.Length;wav=$dest;audio_seconds=$metrics.duration_s;rtf=$rtf;metrics=$metrics}
 }
-$report = @{preflight=$ready;voice_id=$VoiceId;runs=$results;repetitions=$Repetitions;baseline_rtf=3.291}
+$meanRTF = ($results | Measure-Object -Property rtf -Average).Average
+$report = @{preflight=$ready;voice_id=$VoiceId;runs=$results;repetitions=$Repetitions;mean_rtf=$meanRTF;baseline_rtf=3.291;baseline_source="Prior full VoiceStudio Q8_0 3 runs; NOT Lite"}
 $report | ConvertTo-Json -Depth 12 | Set-Content -Encoding utf8 (Join-Path $Output "benchmark.json")
 Write-Host "Generated $Repetitions WAV(s). Results are private under $Output."
