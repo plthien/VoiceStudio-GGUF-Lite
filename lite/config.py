@@ -14,6 +14,7 @@ TOKENIZER_NAME = "omnivoice-tokenizer-Q8_0.gguf"
 NATIVE_NAME = "omnivoice-tts-windows-x86_64.exe"
 VULKAN_NAME = "ggml-vulkan.dll"
 DATA_DEFAULT = r"D:\VoiceStudioBuild\lite\data"
+BIN_DEFAULT = r"D:\VoiceStudioBuild\lite\runtime\bin"
 CACHE_DEFAULT = r"D:\VoiceStudioBuild\models"
 
 @dataclass(frozen=True)
@@ -34,7 +35,7 @@ class Settings:
         return cls(
             data_dir=Path(os.environ.get("GGUF_LITE_DATA_DIR", DATA_DEFAULT)).expanduser().resolve(),
             cache_dir=Path(os.environ.get("OMNIVOICE_CACHE_DIR", CACHE_DEFAULT)).expanduser().resolve(),
-            bin_dir=Path(os.environ.get("GGUF_LITE_BIN_DIR", str(ROOT / "bin"))).expanduser().resolve(),
+            bin_dir=Path(os.environ.get("GGUF_LITE_BIN_DIR", BIN_DEFAULT)).expanduser().resolve(),
             timeout=timeout,
         )
 
