@@ -145,7 +145,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         payload = await ref_audio.read(settings.max_ref_bytes + 1)
         if len(payload) > settings.max_ref_bytes:
             return failure(413, "AUDIO_TOO_LARGE", "Reference is too large")
-        if profile_id == app.state.runner.active_id:
+        if profile_id is not None and profile_id == app.state.runner.active_id:
             return failure(409, "PROFILE_ACTIVE", "Voice in active inference")
         try:
             return await asyncio.to_thread(app.state.store.import_audio,
