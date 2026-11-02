@@ -19,8 +19,16 @@ Confirm ggml-vulkan.dll, EXE and checksum manifest on Windows.
 Preinstall exactly Q8_0 base/tokenizer at the pinned HF revision under
 D:\VoiceStudioBuild\models; no Generate-time downloads.
 NVIDIA Vulkan0 (GTX 1650) must be independently verified.
-On some host configs VK_LOADER_LAYERS_DISABLE can disable AMD
-switchable_graphics layers, but validate before enabling host-specifically.
+On a Windows host with both NVIDIA GTX 1650 (GPU0) and AMD integrated
+graphics (GPU1), vulkaninfo may fail with
+`vkEnumeratePhysicalDevices failed with INCOMPLETE` because of
+`VK_LAYER_AMD_switchable_graphics`. Verify this first using
+`$env:VK_LOADER_LAYERS_DISABLE="VK_LAYER_AMD_switchable_graphics*"`
+in the same PowerShell session, then run `vulkaninfo --summary` and
+`scripts/run-gguf-lite.ps1 -Preflight`. Only proceed if GPU0 is the
+NVIDIA GTX 1650 and the probe exits successfully. Do not disable all
+implicit layers as a default, alter system-wide Vulkan configuration,
+or bypass the existing NVIDIA/VRAM/backend attestation checks.
 
 Known legal blocker: lite/resources/model_notice.json cites revision 0170941...
 but weights use 3616093.... Manual acknowledgement cannot resolve this

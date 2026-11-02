@@ -13,9 +13,11 @@ from .config import (ROOT, REPO_ID, MODEL_REVISION, RUNTIME_REVISION,
 
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 _GPU = re.compile(r"^GPU([0-9]+):$", re.M)
-_NAME = re.compile(r"^deviceName\s*=\s*(.+)$", re.M)
-_VENDOR = re.compile(r"^vendorID\s*=\s*(\S+)", re.M)
-_KIND = re.compile(r"^deviceType\s*=\s*(\S+)", re.M)
+# vulkaninfo --summary indents device properties on Windows. Only allow
+# horizontal whitespace: \s* would also cross newline boundaries.
+_NAME = re.compile(r"^[ \t]*deviceName[ \t]*=[ \t]*(.+)$", re.M)
+_VENDOR = re.compile(r"^[ \t]*vendorID[ \t]*=[ \t]*(\S+)", re.M)
+_KIND = re.compile(r"^[ \t]*deviceType[ \t]*=[ \t]*(\S+)", re.M)
 
 class RuntimeErrorLite(RuntimeError):
     pass
