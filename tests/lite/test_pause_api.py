@@ -189,10 +189,12 @@ def test_cancel_in_second_native_span_reaps_process_and_workspace(system):
             script=script,profile={"id":"owned-voice","ref_text":"EXACT OWNED REFERENCE","language":"en"},
             reference=root/"owned-ref.wav",language="en",seed=42,request_id="pause-cancel"))
         for _ in range(250):
-            if runner.process is not None and runner.process.returncode is None:
+            audit=root/"audit.txt"
+            count=len(audit.read_text().splitlines()) if audit.exists() else 0
+            if count>=2 and runner.process is not None and runner.process.returncode is None:
                 break
             await asyncio.sleep(.02)
-        assert runner.process is not None
+        assert count>=2 and runner.process is not None,"Expected second native child to be running"
         proc=runner.process
         job.cancel()
         with pytest.raises(asyncio.CancelledError):
