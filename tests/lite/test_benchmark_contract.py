@@ -67,6 +67,8 @@ def test_complete_three_run_synthetic_report(tmp_path,monkeypatch):
     monkeypatch.setattr(bench,"_json",lambda url:profile if "/profiles/" in url else readiness)
     calls=[]
     def fake_http(url,body=None):
+        import time
+        time.sleep(0.03)  # Real elapsed time even on coarser Windows clocks.
         calls.append(body)
         return sample_wav(),{"X-Lite-Verified-Backend":"Vulkan0",
             "X-Lite-Observed-Device":"NVIDIA GeForce GTX 1650",
