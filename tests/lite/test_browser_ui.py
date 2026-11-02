@@ -138,6 +138,8 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         page.locator('[data-view="runtime"]').click()
         expect(page.locator("#runtime-summary")).to_contain_text("Not ready",timeout=10000)
         expect(page.locator("#licence-details")).to_contain_text("RESTRICTED / NOT CLEARED")
+        expect(page.locator("#licence-notice")).to_contain_text("CC-BY-NC-4.0")
+        expect(page.locator("#licence-details")).to_contain_text("MISMATCH")
         page.locator("#licence-review").check()
         page.locator("#licence-accept").click()
         expect(page.locator("#licence-accept")).to_be_disabled()
@@ -193,10 +195,13 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#voice-list")).to_contain_text("Renamed voice")
         page.locator("#reference-play").click()
         expect(page.locator("#saved-preview")).to_be_visible()
+        page.locator('#replace-consent').check()
         page.locator('#replace-form input[type=file]').set_input_files({
           "name":"replacement.wav","mimeType":"audio/wav","buffer":audio()})
         page.locator("#replace-submit").click()
         expect(page.locator("#editor-id")).to_contain_text("version 2")
+        expect(page.locator("#editor-consent")).to_contain_text("acknowledged")
+        assert not page.locator("#replace-consent").is_checked()
         page.locator("#migration-preview").click()
         expect(page.locator("#migration-list")).to_contain_text("legacy-ink")
         page.locator("#migration-choice").select_option("legacy-ink")
@@ -210,6 +215,8 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#runtime-summary")).to_contain_text("Q8_0")
         page.locator("#diagnostic-start").click()
         expect(page.locator("#diagnostic-state")).to_contain_text("3/3 verified",timeout=15000)
+        assert page.locator("#diagnostic-rows tr").count()==3
+        expect(page.locator("#diagnostic-rows")).to_contain_text("NVIDIA GeForce GTX 1650")
         assert page.locator("#diagnostic-export").is_enabled()
         with page.expect_download() as exported:
             page.locator("#diagnostic-export").click()
