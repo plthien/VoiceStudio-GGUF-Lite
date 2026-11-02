@@ -34,7 +34,7 @@ export function attest(response){
   if(status!=='verified'||backend!=='Vulkan0'||!device.includes('NVIDIA')||!device.includes('GTX 1650')){
     throw new ApiError(500,'NATIVE_PROOF_MISSING');
   }
-  return {backend,device,status,serverElapsed:h.get('x-lite-elapsed-s'),serverAudio:h.get('x-lite-audio-s'),serverRtf:h.get('x-lite-rtf'),requestedSpeed:h.get('x-lite-requested-speed')};
+  return {backend,device,status,serverElapsed:h.get('x-lite-elapsed-s'),serverAudio:h.get('x-lite-audio-s'),serverRtf:h.get('x-lite-rtf'),requestedSpeed:h.get('x-lite-requested-speed'),effectiveSpeed:h.get('x-lite-effective-speed')};
 }
 export function checkWav(bytes){
   if(bytes.byteLength<46) throw new ApiError(500,'INVALID_WAV');

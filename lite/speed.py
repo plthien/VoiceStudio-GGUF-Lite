@@ -6,8 +6,23 @@ Old installed binaries remain fully supported at speed=1.0.
 import hashlib
 import json
 import subprocess
+import math
+import struct
 from .config import ROOT, RUNTIME_REVISION, Settings
 from .runtime import native_files, native_env
+
+def speed_to_native(requested: float) -> tuple[float,str]:
+    """9 significant digits round-trip the finite IEEE754 float32 passed to strtof.
+
+    Retains arbitrary accepted JSON float precision in Requested header; the
+    Effective header identifies the real C float32 argument.
+    """
+    if not isinstance(requested,(float,int)) or not math.isfinite(requested) or not 0.75 <= requested <= 1.25:
+        raise ValueError("Invalid requested native speed")
+    effective=struct.unpack("<f",struct.pack("<f",requested))[0]
+    if not math.isfinite(effective) or not 0.75 <= effective <= 1.25:
+        raise ValueError("Invalid float32 native speed")
+    return effective, format(effective,".9g")
 
 MARKER="LiteNativeSpeed/v1"
 SCHEMA="lite-native-speed-v1"

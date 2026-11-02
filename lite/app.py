@@ -23,7 +23,7 @@ from .native_runner import Runner, NativeBusy, NativeFailure, NativeTimeout
 from .profiles import Store, ProfileError
 from .runtime import preflight, RuntimeErrorLite
 from .readiness import complete_readiness
-from .speed import native_speed_capability
+from .speed import native_speed_capability, speed_to_native
 
 logger = logging.getLogger("gguf_lite")
 
@@ -419,6 +419,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         if not state.licence.is_ready():
             return failure(403, "LICENCE_NOT_READY", "Model terms require verified provenance and explicit acceptance")
+        effective_speed, speed_arg=speed_to_native(payload.speed)
         if payload.speed!=1.0:
             capability=await asyncio.to_thread(native_speed_capability,settings)
             if not capability["supported"]:
@@ -437,7 +438,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                         language=payload.language,seed=payload.seed,
                         request_id=str(uuid.uuid4()))
             # Default speed preserves every old runner/provider call signature.
-            if payload.speed!=1.0: kwargs["speed"]=payload.speed
+            if payload.speed!=1.0: kwargs["speed"]=effective_speed
             generation=asyncio.create_task(state.runner.generate(**kwargs))
             watcher=asyncio.create_task(detect_disconnect())
             try:
@@ -457,7 +458,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                     return failure(500,"NATIVE_PROOF_MISSING","Native GPU proof was not verified")
                 return Response(data, media_type="audio/wav", headers={
                     "X-Lite-Request-Id": info["request_id"], "Cache-Control": "no-store",
-                    "X-Lite-Requested-Speed":format(payload.speed,".2f"),
+                    "X-Lite-Requested-Speed":repr(payload.speed),
+                    "X-Lite-Effective-Speed":speed_arg,
                     **({"X-Lite-Verified-Backend":info["observed_native_backend"],
                         "X-Lite-Observed-Device":info["observed_device_identity"],
                         "X-Lite-Verification-Status":info["verification_status"],
