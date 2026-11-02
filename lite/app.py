@@ -24,6 +24,21 @@ from .runtime import preflight, RuntimeErrorLite
 
 logger = logging.getLogger("gguf_lite")
 
+async def _finish_owned_write(function, *args, **kwargs):
+    """Cancelled HTTP handlers must not release admission while a DB/FFmpeg
+    worker is still modifying a reference. Never replay a completed write.
+    """
+    task=asyncio.create_task(asyncio.to_thread(function,*args,**kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Ownership survives client disconnect until the one existing worker
+        # finishes; response remains cancelled and no background queue is made.
+        try:
+            await asyncio.shield(task)
+        finally:
+            raise
+
 def failure(status: int, code: str, message: str, retry: bool = False):
     headers = {"Retry-After": "3"} if retry else None
     return JSONResponse(status_code=status, content={"error": {
@@ -222,7 +237,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         try:
             async with app.state.admission:
                 db,voices=legacy_sources()
-                result=await asyncio.to_thread(migration_apply,db,voices,settings,payload.voice_id)
+                result=await _finish_owned_write(migration_apply,db,voices,settings,payload.voice_id)
                 if result["failed"]:
                     return failure(409,"MIGRATION_FAILED","Migration failed; inspect local source and permissions")
                 return result
@@ -274,7 +289,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                     if existing is None:
                         return failure(404,"PROFILE_NOT_FOUND","Unknown voice ID")
                     name,ref_text,language=(existing[k] for k in ("name","ref_text","language"))
-                return await asyncio.to_thread(app.state.store.import_audio,
+                return await _finish_owned_write(app.state.store.import_audio,
                     name=name, ref_text=ref_text, language=language, source=payload,
                     suffix=suffix, profile_id=profile_id, consent=consent)
         except KeyError:
@@ -300,7 +315,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
             return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
             async with app.state.admission:
-                return await asyncio.to_thread(app.state.store.update,profile_id,
+                return await _finish_owned_write(app.state.store.update,profile_id,
                     patch.model_dump(exclude_unset=True))
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
@@ -313,7 +328,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
             return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
             async with app.state.admission:
-                await asyncio.to_thread(app.state.store.delete,profile_id,
+                await _finish_owned_write(app.state.store.delete,profile_id,
                     active_id=app.state.runner.active_id,purge=purge)
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
