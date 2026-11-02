@@ -63,6 +63,25 @@ class FakeNative:
                     "verification_status":"verified","elapsed_s":.025,"audio_s":.25,"rtf":.1}
             finally:
                 self.active_id=None
+    async def generate_paused(self,*,script,profile,reference,language,seed,request_id,speed=1.0):
+        from lite.pause import SpeechPart
+        from lite.pause_audio import assemble_pause_wav
+        from lite.audio import wav_info
+        spans=[p.text for p in script.parts if isinstance(p,SpeechPart)]
+        wavs=[]
+        for index,text in enumerate(spans):
+            wav,_=await self.generate(profile=profile,reference=reference,text=text,
+                language=language,seed=None if seed is None else (seed+index)%2147483648,
+                request_id=request_id,speed=speed)
+            wavs.append(wav)
+        data,meta=assemble_pause_wav(script,wavs)
+        total=meta["audio_frames"]/24000
+        speech=meta["speech_frames"]/24000
+        return data,{"request_id":request_id,"verification_status":"verified",
+            "observed_native_backend":"Vulkan0",
+            "observed_device_identity":"NVIDIA GeForce GTX 1650",
+            "elapsed_s":0.05,"audio_s":total,"rtf":round(.05/total,3),
+            "speech_rtf":round(.05/speech,3),**meta}
     async def stop(self):
         return None
 
@@ -475,4 +494,58 @@ def test_old_binary_disables_native_speed_ui_but_preserves_baseline(ui_server,mo
         page.locator("#tts-submit").click()
         expect(page.locator("#tts-output")).to_be_visible(timeout=15000)
         assert native.observed[-1]["speed"]==1.0
+        browser.close()
+
+@pytest.mark.timeout(90)
+@pytest.mark.parametrize("width",[1280,390],ids=["pause-desktop","pause-mobile"])
+def test_pause_caret_custom_raw_api_and_wpm(ui_server,width,monkeypatch):
+    base,native=ui_server
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        page=browser.new_page(viewport={"width":width,"height":850},accept_downloads=True)
+        requests=[]
+        page.on("request",lambda r:requests.append(r.post_data_json)
+            if r.url.endswith("/v1/audio/speech") and r.method=="POST" else None)
+        page.goto(base+"/ui")
+        page.locator('#clone-form input[name="name"]').fill("Owned pause fixture")
+        page.locator("#clone-file").set_input_files({
+            "name":"owned.wav","mimeType":"audio/wav","buffer":audio()})
+        page.locator('#clone-form textarea[name="ref_text"]').fill("Exact owned reference text")
+        page.locator("#clone-consent").check()
+        page.locator("#clone-submit").click()
+        expect(page.locator("#view-tts")).to_be_visible()
+        page.locator('[data-view="runtime"]').click()
+        page.locator("#licence-review").check()
+        page.locator("#licence-accept").click()
+        expect(page.locator("#licence-details")).to_contain_text("Accepted locally",timeout=12000)
+        page.locator('[data-view="tts"]').click()
+        box=page.locator("#tts-text")
+        box.fill("Alpha Beta")
+        box.evaluate("(el)=>{el.focus();el.setSelectionRange(6,10);}")
+        page.locator("#tts-pause-preset").select_option("custom")
+        page.locator("#tts-pause-custom").fill("800")
+        page.locator("#tts-insert-pause").click()
+        assert box.input_value()=="Alpha [pause 800ms]Beta"
+        assert box.evaluate("(el)=>el.selectionStart")==len("Alpha [pause 800ms]")
+        box.fill("He opened. [pause 800ms] Something waited. [pause 1.5s] It moved.")
+        page.locator("#tts-submit").click()
+        expect(page.locator("#tts-output")).to_be_visible(timeout=15000)
+        assert len(requests)==1 and requests[0]["input"]==box.input_value()
+        expect(page.locator("#tts-timing")).to_contain_text("Explicit pause 2.300 s")
+        expect(page.locator("#tts-timing")).to_contain_text("Approx speech WPM")
+        expect(page.locator("#tts-timing")).to_contain_text("Approx final WPM")
+        expect(page.locator("#tts-timing")).to_contain_text("rough whitespace count")
+        assert page.locator("#tts-player").get_attribute("src").startswith("blob:")
+        with page.expect_download() as download:
+            page.locator("#tts-download").click()
+        assert download.value.suggested_filename.endswith(".wav")
+        assert page.evaluate("document.documentElement.scrollWidth<=innerWidth+2")
+        box.fill("Bad [pause 900ms")
+        page.locator("#tts-submit").click()
+        expect(page.locator("#tts-state")).to_have_text("Failed",timeout=15000)
+        expect(page.locator("#tts-output")).to_be_hidden()
+        page.locator("#tts-pause-preset").select_option("custom")
+        page.locator("#tts-pause-custom").fill("10001")
+        page.locator("#tts-insert-pause").click()
+        expect(page.locator("#notice")).to_contain_text("Pause must be")
         browser.close()
