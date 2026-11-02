@@ -123,3 +123,60 @@ def test_n02_full_readiness_truth_table(tmp_path,monkeypatch):
         result=c.get("/lite/readiness").json()
         assert result["ready"] is False and result["tts_ready"] is True
         assert c.get("/health").json()["ready"] is False
+
+
+def test_n01_bad_audio_or_transcript_does_not_publish_mixed_version(tmp_path,monkeypatch):
+    from lite.profiles import Store
+    from lite.audio import AudioError
+    monkeypatch.setattr("lite.profiles.shutil.which",lambda _: "ffmpeg")
+    monkeypatch.setattr("lite.profiles.convert_reference",lambda src,dst,**kw:dst.write_bytes(wav()))
+    s=Settings(data_dir=tmp_path/"data",cache_dir=tmp_path/"cache",bin_dir=tmp_path/"bin",timeout=30)
+    store=Store(s)
+    app=create_app(s,store=store)
+    with TestClient(app) as c:
+        first=c.post("/profiles",data={"name":"Owned","ref_text":"A","consent":"yes"},
+           files={"ref_audio":("old.wav",wav(),"audio/wav")}).json()
+        sid=first["id"]
+        monkeypatch.setattr("lite.profiles.convert_reference",lambda *args,**kwargs:
+                            (_ for _ in ()).throw(AudioError("Synthetic bad source")))
+        bad=c.put("/profiles/"+sid+"/audio",data={"ref_text":"B","consent":"new"},
+           files={"ref_audio":("new.wav",wav_b(),"audio/wav")})
+        assert bad.status_code==422
+        row=c.get("/profiles/"+sid).json()
+        assert (row["id"],row["version"],row["ref_text"],row["ref_sha256"],row["consent"])==(
+           sid,1,"A",first["ref_sha256"],"yes")
+        assert store.reference(row).read_bytes()==wav()
+        assert not (s.data_dir/"voices"/sid/"2").exists()
+
+def test_n01_replacement_with_different_transcript_is_busy_during_speech(tmp_path,monkeypatch):
+    import asyncio
+    import httpx
+    monkeypatch.setattr("lite.profiles.shutil.which",lambda _: "ffmpeg")
+    monkeypatch.setattr("lite.profiles.convert_reference",lambda src,dst,**kw:dst.write_bytes(wav()))
+    s=Settings(data_dir=tmp_path/"data",cache_dir=tmp_path/"cache",bin_dir=tmp_path/"bin",timeout=30)
+    app=create_app(s)
+    row=app.state.store.import_audio(name="Owned",ref_text="A",language="en",source=wav(),suffix=".wav")
+    app.state.licence.is_ready=lambda:True
+    entered=asyncio.Event()
+    leave=asyncio.Event()
+    async def native(**kwargs):
+        entered.set()
+        await leave.wait()
+        assert kwargs["profile"]["ref_text"]=="A"
+        return wav(),{"request_id":"fake","verification_status":"verified",
+            "observed_native_backend":"Vulkan0","observed_device_identity":"NVIDIA GTX 1650"}
+    app.state.runner.generate=native
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                   base_url="http://127.0.0.1:3900") as c:
+            speaking=asyncio.create_task(c.post("/v1/audio/speech",json={
+                "model":"omnivoice-gguf","voice":row["id"],"input":"Hello","speed":1.0}))
+            await asyncio.wait_for(entered.wait(),timeout=4)
+            blocked=await c.put("/profiles/"+row["id"]+"/audio",
+                data={"ref_text":"Different B","consent":"new"},
+                files={"ref_audio":("b.wav",wav_b(),"audio/wav")})
+            assert blocked.status_code==409
+            assert app.state.store.get(row["id"])["version"]==1
+            leave.set()
+            assert (await asyncio.wait_for(speaking,timeout=5)).status_code==200
+    asyncio.run(exercise())

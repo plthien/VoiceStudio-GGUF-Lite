@@ -358,6 +358,12 @@ def test_n03_one_native_preflight_per_manual_chromium_refresh(ui_server,monkeypa
         expect(page.locator("#runtime-checked")).to_contain_text("Last checked",timeout=15000)
         expect(page.locator("#runtime-summary")).to_contain_text("Q8_0")
         assert len(calls)==2
+        prior=len(calls)
+        # Two synchronous clicks while one request is pending must not trigger
+        # two concurrent full model hashes; subsequent manual click still works.
+        page.evaluate("() => { const b=document.getElementById('runtime-refresh');b.click();b.click(); }")
+        expect(page.locator("#runtime-refresh")).to_be_enabled(timeout=15000)
+        assert len(calls)==prior+1
         browser.close()
 
 @pytest.mark.timeout(60)
