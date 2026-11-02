@@ -14,7 +14,7 @@ function revoke(id){const a=$(id);if(a.src){URL.revokeObjectURL(a.src);a.removeA
 function clearOutput(){if(ttsUrl){URL.revokeObjectURL(ttsUrl);ttsUrl=null;}$('tts-player').removeAttribute('src');$('tts-player').load();$('tts-output').hidden=true;}
 function setVoice(id){chosen=voices.some(p=>p.id===id)?id:'';const v=voices.find(p=>p.id===chosen);$('selected-voice').textContent=v?v.name+' · '+v.id:'No voice selected';$('tts-voice').value=chosen;}
 function openView(view){if(!titles[view])return;
-  if(view!=='library')resetReplacement();
+  if(view!=='library'){resetReplacement();revoke('saved-preview');}
   if(diagnosticController){diagnosticController.abort();diagnosticController=null;busy($('diagnostic-start'),false);$('diagnostic-export').disabled=true;if(diagnostic)diagnostic.status='cancelled';$('diagnostic-state').textContent='UI diagnostic cancelled on navigation.';}
   if(controller){controller.abort();controller=null;working=false;busy($('tts-submit'),false);busy($('tts-cancel'),true);$('tts-state').textContent='Request cancelled.';}
   if(view!=='tts')clearOutput();
@@ -105,7 +105,7 @@ $('replace-form').addEventListener('submit',async e=>{
     }
     notice('Reference and transcript saved to version '+result.version+' (stable voice ID unchanged).');
   }catch(err){notice(safeError(err),true);$('replace-state').textContent='Replacement failed. Previous saved version is unchanged.';}
-  finally{resetReplacement($('replace-state').textContent);busy(b,false);}
+  finally{if(editor===target)resetReplacement($('replace-state').textContent);busy(b,false);}
 });
 async function deleteVoice(purge){if(!editor)return;const id=editor;const words=purge?'delete this Lite profile AND its owned reference files':'remove this profile record while RETAINING its reference files';
   if(!window.confirm('Do you want to '+words+'? This never removes original VoiceStudio data.'))return;
@@ -179,7 +179,7 @@ async function refreshRuntime(){
     $('runtime-summary').replaceChildren(metric('Verification','FAILED — NOT CURRENT'));
     $('runtime-details').replaceChildren();
     $('licence-details').replaceChildren();$('licence-notice').replaceChildren();
-    licenceFingerprint=null;licenceAccepted=false;$('licence-accept').disabled=true;
+    licenceFingerprint=null;licenceAccepted=false;$('licence-accept').disabled=true;$('licence-withdraw').disabled=true;
     $('status-short').textContent='Readiness check failed';$('status-dot').className='status-dot bad';
     notice(safeError(err),true);
   }finally{runtimeChecking=false;busy(b,false);}}
