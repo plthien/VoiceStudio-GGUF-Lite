@@ -38,6 +38,17 @@ if ($Mode -eq "Activate") {
     throw "Rollback refuses to overwrite active bin; quarantine the candidate first"
   }
 }
+function Get-NativeSha256([string]$file) {
+  # .NET Framework 4.8 / .NET: independent of PowerShell module discovery.
+  $sha=[System.Security.Cryptography.SHA256]::Create()
+  $stream=[System.IO.File]::OpenRead($file)
+  try {
+    return [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace("-","").ToLowerInvariant()
+  } finally {
+    $stream.Dispose()
+    $sha.Dispose()
+  }
+}
 function Assert-NativeManifest([string]$directory,[bool]$requireSpeed) {
   $manifest=Join-Path $directory "checksums.sha256"
   if (!(Test-Path -LiteralPath $manifest -PathType Leaf)) {
@@ -69,7 +80,7 @@ function Assert-NativeManifest([string]$directory,[bool]$requireSpeed) {
         throw "Native component is not PE: $($file.Name)"
       }
     } finally { $stream.Dispose() }
-    if ((Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant() -ne $entries[$file.Name]) {
+    if ((Get-NativeSha256 $file) -ne $entries[$file.Name]) {
       throw "Native file checksum mismatch: $($file.Name)"
     }
   }
@@ -85,9 +96,9 @@ function Assert-NativeManifest([string]$directory,[bool]$requireSpeed) {
     $header=Join-Path $repo "scripts\internal\lite-native-speed.h"
     if ($info.schema -ne "lite-native-speed-v1" -or
         $info.runtime_revision -ne "886fc079838ca7400cb2b42b36e2a65aa1daabe8" -or
-        $info.exe_sha256 -ne (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant() -or
-        $info.patch_sha256 -ne (Get-FileHash -Algorithm SHA256 $patch).Hash.ToLowerInvariant() -or
-        $info.header_sha256 -ne (Get-FileHash -Algorithm SHA256 $header).Hash.ToLowerInvariant()) {
+        $info.exe_sha256 -ne (Get-NativeSha256 $exe) -or
+        $info.patch_sha256 -ne (Get-NativeSha256 $patch) -or
+        $info.header_sha256 -ne (Get-NativeSha256 $header)) {
       throw "Candidate speed receipt or patched EXE SHA invalid"
     }
   }
