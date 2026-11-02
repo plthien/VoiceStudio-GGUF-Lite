@@ -41,7 +41,7 @@ def test_fixed_path_migration_without_browser_filesystem_paths(tmp_path,monkeypa
         assert hashlib.sha256(db.read_bytes()).hexdigest()==before
         assert original.is_file()
         # No public filepath selector supported.
-        assert "legacy_path" not in c.openapi()["paths"]["/lite/migration/apply"]["post"]["requestBody"]["content"]["application/json"]["schema"].get("properties",{})
+        assert "legacy_path" not in c.get("/openapi.json").json()["paths"]["/lite/migration/apply"]["post"]["requestBody"]["content"]["application/json"]["schema"].get("properties",{})
 
 def test_symlinked_source_root_is_rejected(tmp_path,monkeypatch):
     root=tmp_path/"trusted";root.mkdir()

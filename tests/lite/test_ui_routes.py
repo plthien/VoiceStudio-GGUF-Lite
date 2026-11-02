@@ -36,7 +36,7 @@ def test_new_host_creates_owned_license_db_but_never_auto_accepts(local):
 
 def test_allowlisted_ui_is_local_csp_and_does_not_expose_files(local):
     c,s=local
-    root=c.get("/")
+    root=c.get("/",follow_redirects=False)
     assert root.status_code==307 and root.headers["location"]=="/ui"
     index=c.get("/ui")
     assert index.status_code==200 and "Voice Cloning" in index.text

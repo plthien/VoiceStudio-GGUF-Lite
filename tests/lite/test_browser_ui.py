@@ -129,7 +129,7 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#notice")).to_contain_text("terms acceptance")
         assert native.count==0
         page.locator('[data-view="runtime"]').click()
-        expect(page.locator("#runtime-summary")).to_contain_text("Ready",timeout=10000)
+        expect(page.locator("#runtime-summary")).to_contain_text("Not ready",timeout=10000)
         expect(page.locator("#licence-details")).to_contain_text("RESTRICTED / NOT CLEARED")
         page.locator("#licence-review").check()
         page.locator("#licence-accept").click()
