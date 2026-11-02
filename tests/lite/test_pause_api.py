@@ -93,7 +93,7 @@ def test_api_exact_pause_timing_seed_and_preflight_once(system,monkeypatch):
     assert first.headers["x-lite-verification-status"]=="verified"
     assert first.headers["x-lite-verified-backend"]=="Vulkan0"
     assert wav_info(first.content)["frames"]==3*2400+2300*24
-    assert float(first.headers["x-lite-audio-s"])==float(first.headers["x-lite-speech-s"])+2.3
+    assert float(first.headers["x-lite-audio-s"])==pytest.approx(float(first.headers["x-lite-speech-s"])+2.3,abs=1/24000)
     assert len(preflights)==2,preflights  # one per whole request, not per span
     assert len(pairs)==4 # one initial, one final model hash per request
     audit=(root/"audit.txt").read_text().splitlines()
