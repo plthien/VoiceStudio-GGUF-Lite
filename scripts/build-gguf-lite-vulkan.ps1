@@ -12,6 +12,7 @@ $target = Join-Path $Root "runtime"
 New-Item -ItemType Directory -Force -Path (Join-Path $stage "scripts/internal") | Out-Null
 Copy-Item (Join-Path $source "scripts/internal/build-gguf-lite.sh") (Join-Path $stage "scripts/internal")
 Copy-Item (Join-Path $source "scripts/internal/omnivoice-vulkan.sh") (Join-Path $stage "scripts/internal")
+Copy-Item (Join-Path $source "scripts/internal/instrument-attestation.py") (Join-Path $stage "scripts/internal")
 Push-Location $stage
 try {
   & $GitBash scripts/internal/build-gguf-lite.sh --platform windows-x86_64 --commit-sha $version
@@ -20,6 +21,39 @@ try {
   $exe = Join-Path $bin "omnivoice-tts-windows-x86_64.exe"
   $dll = Join-Path $bin "ggml-vulkan.dll"
   $manifest = Join-Path $bin "checksums.sha256"
+  $hashEntries = Get-Content $manifest | Where-Object { $_ -match '^[0-9a-fA-F]{64}  [^/\\]+
+  foreach ($file in @($exe,$dll,$manifest)) {
+    if (!(Test-Path -PathType Leaf $file)) { throw "Vulkan build did not produce $file; CPU fallback is forbidden" }
+  }
+  foreach ($file in @(Get-ChildItem $bin -File | Where-Object { $_.Extension -in @(".exe",".dll") } | Select-Object -ExpandProperty FullName)) {
+    $bytes = [IO.File]::ReadAllBytes($file)
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 77 -or $bytes[1] -ne 90) {
+      throw "Native build emitted an invalid Windows PE artifact"
+    }
+    $name = Split-Path $file -Leaf
+    $digest = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLowerInvariant()
+    $lines = Get-Content $manifest
+    if (!($lines | Where-Object { $_.ToLowerInvariant().StartsWith($digest) -and $_.Contains($name) })) {
+      throw "Native SHA256 manifest lacks a valid entry for $name"
+    }
+  }
+  foreach ($lib in @("ggml.dll","ggml-base.dll")) {
+    if (!(Test-Path (Join-Path $bin $lib))) { throw "Required GGML dependency is missing: $lib" }
+  }
+  $targetBin = Join-Path $target "bin"
+  # Prevent replacement of previously installed known-good Lite artifacts.
+  if (Test-Path $targetBin) { throw "Target runtime already installed; back it up separately before rebuilding" }
+  New-Item -ItemType Directory -Force -Path $target | Out-Null
+  Move-Item $bin $targetBin
+  Write-Host "Pinned Vulkan-only runtime installed to $targetBin"
+} finally {
+  Pop-Location
+  if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+}
+ }
+  if (($hashEntries | Measure-Object).Count -lt 3) {
+    throw "Manifest missing EXE/Vulkan and GGML dependencies"
+  }
   foreach ($file in @($exe,$dll,$manifest)) {
     if (!(Test-Path -PathType Leaf $file)) { throw "Vulkan build did not produce $file; CPU fallback is forbidden" }
   }

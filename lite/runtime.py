@@ -72,6 +72,7 @@ def _expected_quantmap() -> dict:
     if (pins.get("schema_version")!=2 or pins.get("model_revision")!=MODEL_REVISION or
         pins.get("runtime_revision")!=RUNTIME_REVISION or pins.get("quant")!="Q8_0" or
         pins.get("base",{}).get("name")!=BASE_NAME or pins.get("tokenizer",{}).get("name")!=TOKENIZER_NAME or
+        pins.get("source_hash_provenance")!="verified_hf_parent_commit_diff" or
         not all(_HEX.fullmatch(pins[k].get("sha256","")) for k in ("base","tokenizer"))):
         raise RuntimeErrorLite("Pinned Q8_0 metadata mismatch")
     return pins
@@ -164,6 +165,9 @@ def preflight(settings: Settings) -> dict:
     except (OSError, ValueError, RuntimeErrorLite) as exc:
         result["issues"].append(str(exc))
     try:
+        paths=[settings.cache_dir/"models--Serveurperso--OmniVoice-GGUF"/"snapshots"/MODEL_REVISION,
+               settings.cache_dir/MODEL_REVISION]
+        result["quant"]["installed"]=any(all((root/name).is_file() for name in (BASE_NAME,TOKENIZER_NAME)) for root in paths)
         model_pair(settings)
         result["model_pair"] = True
         result["quant"].update(installed=True,verified=True,prepared_quant="Q8_0")

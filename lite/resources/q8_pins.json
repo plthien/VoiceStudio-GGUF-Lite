@@ -3,7 +3,7 @@
   "model_revision": "361609388ae572a820d085185bbbe2a2aac4b30e",
   "runtime_revision": "886fc079838ca7400cb2b42b36e2a65aa1daabe8",
   "quant": "Q8_0",
-  "source_evidence": "Commit 3616093 changes README only from dc7038d. SHA hashes from Xet per-file metadata on dc7038d.",
+  "source_evidence": "HF model commit 361609388... parent dc7038df... changed README.md only; base/tokenizer Xet SHA256 at dc7038df... are identical at pinned revision.",
   "base": {
     "name": "omnivoice-base-Q8_0.gguf",
     "sha256": "2882d887921798aea13d45236556bdf8012842ab6f8cd2690943eead6289f298",
@@ -13,5 +13,7 @@
     "name": "omnivoice-tokenizer-Q8_0.gguf",
     "sha256": "75204fa566a8e30984e7a1066da6557184c9fd099c8f1bc0cb5b9415edfec255",
     "source_url": "https://huggingface.co/Serveurperso/OmniVoice-GGUF/blob/dc7038df5efc7311630a9c885b6875e6455a0a90/omnivoice-tokenizer-Q8_0.gguf"
-  }
+  },
+  "source_hash_provenance": "verified_hf_parent_commit_diff",
+  "pin_change_url": "https://huggingface.co/Serveurperso/OmniVoice-GGUF/commit/361609388ae572a820d085185bbbe2a2aac4b30e"
 }

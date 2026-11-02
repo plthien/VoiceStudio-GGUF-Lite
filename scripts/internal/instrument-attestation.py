@@ -4,6 +4,8 @@ import sys
 
 path=Path(sys.argv[1])
 source=path.read_text(encoding="utf-8")
+# Verified against pinned src/backend.h at 886fc079838ca7400cb2b42b36e2a65aa1daabe8.
+# Include ggml-backend.h for ggml_backend_get_device and ggml_backend_dev_description.
 old='    ov_log(OV_LOG_INFO, "[Load] %s backend: %s (CPU threads: %d)", label, ggml_backend_name(bp.backend), n_threads);'
 new='''    // LiteAttest/v1: native-selected GGML device, not requested env or vulkaninfo.
     ggml_backend_dev_t lite_dev = ggml_backend_get_device(bp.backend);
@@ -18,5 +20,9 @@ new='''    // LiteAttest/v1: native-selected GGML device, not requested env or v
 ''' + old
 if source.count(old)!=1 or "[LiteAttest/v1]" in source:
     raise SystemExit("Pinned C++ source does not match attestation patch anchor")
-path.write_text(source.replace(old,new),encoding="utf-8")
+# Never modify a source file if its anchor has drifted.
+updated=source.replace(old,new)
+if updated.count("[LiteAttest/v1]")!=2:
+    raise SystemExit("Unexpected number of attestation log sites")
+path.write_text(updated,encoding="utf-8")
 
