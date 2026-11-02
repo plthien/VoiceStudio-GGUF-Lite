@@ -17,7 +17,13 @@ link_ggml_backends(lite-reuse-probe)
 def stage(staging:Path):
     staging=staging.resolve(strict=True)
     project=Path(__file__).resolve().parents[2]
-    rev=subprocess.run(["git","-C",str(staging),"rev-parse","HEAD"],capture_output=True,text=True,check=True,timeout=15).stdout.strip()
+    # CI's verifier uses git checkout FETCH_HEAD -- <files>, so HEAD can
+    # remain unborn. Real owner builds have a detached pinned HEAD.
+    read_rev=subprocess.run(["git","-C",str(staging),"rev-parse","--verify","HEAD"],
+                             capture_output=True,text=True,timeout=15)
+    reference="HEAD" if read_rev.returncode==0 else "FETCH_HEAD"
+    rev=subprocess.run(["git","-C",str(staging),"rev-parse","--verify",reference],
+                        capture_output=True,text=True,check=True,timeout=15).stdout.strip()
     if rev!=PIN: raise ValueError("Pinned C++ revision mismatch")
     header=(staging/"src/omnivoice.h").read_text(encoding="utf8")
     source=(staging/"src/omnivoice.cpp").read_text(encoding="utf8")
