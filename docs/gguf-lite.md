@@ -45,7 +45,7 @@ Q8_0 mean RTF 3.291 is NOT a Lite result, and comparability remains false
 because reference preprocessing/DSP identity was not established. Neither
 host evidence nor subjective listening establishes model/output commercial rights.
 These are preserved owner observations, not CI tests or a new-clone UI acceptance.
-Never claim native speed/WPM or automatic sentence segmentation.
+The optional experimental native `--speed` changes estimator frame budgets (not output DSP), and requires a patched candidate validated by the speed capability receipt. Speed is NOT measured/guaranteed WPM; see [native speed owner guide](gguf-lite-native-speed.md). No automatic sentence segmentation is claimed.
 
 Use scripts/migrate-gguf-voices.ps1 with explicit LegacyDb,
 LegacyVoices and TargetData paths. Default is dry-run; -Apply backs up

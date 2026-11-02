@@ -52,7 +52,7 @@ def native_speed_capability(settings:Settings)->dict:
         proc=subprocess.run([str(exe),"--help"],env=native_env(settings),
                             capture_output=True,timeout=8,check=False)
         output=(proc.stdout+proc.stderr)[:32768]
-        if proc.returncode!=0 or MARKER.encode("ascii") not in output:
+        if proc.returncode!=0 or MARKER.encode("ascii") not in output or b"--speed" not in output:
             return result
     except (OSError,ValueError,subprocess.SubprocessError,KeyError,TypeError):
         return result
