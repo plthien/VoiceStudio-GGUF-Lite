@@ -137,3 +137,7 @@ CI runs `python -m lite.hash_benchmark` against a disposable 8 MiB fixture and
 prints measured time for each OS; **that is not a substitute** for measuring
 the real pinned ~945 MB pair and real native RTF on the owner's host. Do not
 replace trusted SHA verification with filename-only or mtime-only caching.
+
+## New local Web UI
+
+Use `http://127.0.0.1:3900/ui` after launching the same localhost FastAPI service. See [UI, cloning, migration and rights guide](gguf-lite-ui.md). Existing YouTube HTTP callers remain unchanged; see the [future integration contract](integrations/youtube-ai-studio-tts-contract.md).

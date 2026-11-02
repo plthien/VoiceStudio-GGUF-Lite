@@ -110,6 +110,9 @@ def test_api_contract_wav_bytes_without_alias(config):
                          "voice":"voice-001","input":"hello","speed":1.0})
         assert resp.status_code==200 and resp.headers["content-type"]=="audio/wav"
         assert resp.content==sample.getvalue()
+        assert resp.headers["x-lite-verified-backend"]=="Vulkan0"
+        assert resp.headers["x-lite-verification-status"]=="verified"
+        assert "GTX 1650" in resp.headers["x-lite-observed-device"]
         assert c.post("/v1/audio/speech",json={"model":"omnivoice-gguf",
                      "voice":"alloy","input":"hello"}).status_code==404
 
