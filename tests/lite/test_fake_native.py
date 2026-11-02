@@ -26,6 +26,7 @@ p.add_argument("--model");p.add_argument("--codec");p.add_argument("-o")
 p.add_argument("--ref-wav");p.add_argument("--ref-text")
 p.add_argument("--lang",default="English")
 p.add_argument("--seed",default="0")
+p.add_argument("--speed",default=None)
 args=p.parse_args()
 data=sys.stdin.buffer.read()
 if not data:
@@ -174,3 +175,26 @@ def test_stop_reaps_child_process_tree_and_releases_slot(fixture):
         assert runner.process is None and runner.active_id is None
     asyncio.run(execute())
     assert not list(root.glob("lite-*"))
+
+@pytest.mark.parametrize("requested",[0.85,1.004,1.127,1.15,1.234,0.999,1.25])
+def test_real_fake_native_argv_float32_round_trip(fixture,monkeypatch,requested):
+    from lite.speed import speed_to_native
+    import lite.native_runner as mod
+    runner,root=fixture
+    runner.settings=Settings(data_dir=root,cache_dir=root,bin_dir=runner.settings.bin_dir,timeout=20)
+    monkeypatch.setattr(mod,"native_speed_capability",lambda _:{"supported":True})
+    original=asyncio.create_subprocess_exec
+    seen=[]
+    async def spy(*args,**kwargs):
+        seen.append(args)
+        return await original(*args,**kwargs)
+    monkeypatch.setattr(asyncio,"create_subprocess_exec",spy)
+    async def test():
+        data,info=await runner.generate(**_params(root,"Precision native argv"),speed=requested)
+        assert data.startswith(b"RIFF")
+    asyncio.run(test())
+    effective,arg=speed_to_native(requested)
+    assert seen and "--speed" in seen[0]
+    assert seen[0][seen[0].index("--speed")+1]==arg
+    assert float(arg)==effective
+    if requested==1.004: assert arg!="1.00"

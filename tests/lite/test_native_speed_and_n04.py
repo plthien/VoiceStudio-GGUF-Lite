@@ -12,7 +12,7 @@ import pytest
 
 from lite.app import create_app
 from lite.config import Settings
-from lite.speed import native_speed_capability,MARKER,digest
+from lite.speed import native_speed_capability,MARKER,digest,speed_to_native
 
 def settings(tmp):
     return Settings(data_dir=tmp/"data",cache_dir=tmp/"cache",bin_dir=tmp/"bin",timeout=30)
@@ -139,13 +139,18 @@ def test_speed_nondefault_api_passes_typed_runner_kwarg_and_headers(tmp_path,mon
             "audio_s":0.25,"elapsed_s":0.1,"rtf":0.4}
     app.state.runner.generate=fake_generate
     with TestClient(app) as c:
-        first=c.post("/v1/audio/speech",json={"model":"omnivoice-gguf",
-            "voice":"voice","input":"hello","speed":1.2})
-        assert first.status_code==200,first.text
-        assert first.headers["x-lite-requested-speed"]=="1.20"
-        assert observed[-1]["speed"]==1.2
+        for speed in (0.75,0.85,1.004,1.127,1.15,1.234,0.999,1.25):
+            first=c.post("/v1/audio/speech",json={"model":"omnivoice-gguf",
+                "voice":"voice","input":"hello","speed":speed})
+            assert first.status_code==200,first.text
+            effective,token=speed_to_native(speed)
+            assert first.headers["x-lite-requested-speed"]==repr(speed)
+            assert first.headers["x-lite-effective-speed"]==token
+            assert observed[-1]["speed"]==effective
+            if speed==1.004: assert token!="1.00"
         baseline=c.post("/v1/audio/speech",json={"model":"omnivoice-gguf",
             "voice":"voice","input":"hello"})
         assert baseline.status_code==200
         assert "speed" not in observed[-1]
-        assert baseline.headers["x-lite-requested-speed"]=="1.00"
+        assert baseline.headers["x-lite-requested-speed"]=="1.0"
+        assert baseline.headers["x-lite-effective-speed"]=="1"
