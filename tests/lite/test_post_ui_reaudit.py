@@ -184,10 +184,14 @@ def test_f04_cancelled_profile_write_keeps_admission_until_thread_finishes(tmp_p
                 await asyncio.sleep(.01)
             assert entered.is_set()
             assert app.state.admission.locked()
+            during=(await client.get("/lite/status")).json()
+            assert during["busy"] is True and during["operation_busy"] is True
+            assert during["native_busy"] is False
             first.cancel()
             try:
                 await asyncio.sleep(.05)
                 assert app.state.admission.locked(), "Client cancel released active SQLite write"
+                assert (await client.get("/lite/status")).json()["busy"] is True
                 second=await client.delete("/profiles/"+row["id"]+"?purge=true")
                 assert second.status_code==409
             finally:
@@ -200,6 +204,7 @@ def test_f04_cancelled_profile_write_keeps_admission_until_thread_finishes(tmp_p
                     break
                 await asyncio.sleep(.01)
             assert not app.state.admission.locked()
+            assert (await client.get("/lite/status")).json()["busy"] is False
             assert app.state.store.get(row["id"])["name"]=="New"
             assert app.state.store.reference(row).exists()
     asyncio.run(scenario())
