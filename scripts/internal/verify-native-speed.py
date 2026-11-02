@@ -65,9 +65,23 @@ def main():
         backend=(upstream/"src/backend.h")
         command([sys.executable,ROOT/"scripts/internal/instrument-attestation.py",backend])
         assert "[LiteAttest/v1]" in backend.read_text()
+        # Staged feasibility target must compile against the real PINNED,
+        # Speed ABI-v2 patched header; this is NOT a real model execution.
+        staged=command([sys.executable,ROOT/"scripts/internal/stage-residency-feasibility.py",upstream],
+                       capture_output=True,text=True)
+        assert "LITE_REUSE_PROBE_STAGED" in staged.stdout
+        cmake=(upstream/"CMakeLists.txt").read_text()
+        assert "add_executable(lite-reuse-probe tools/lite-reuse-probe.cpp)" in cmake
+        assert "target_link_libraries(lite-reuse-probe PRIVATE omnivoice-core)" in cmake
+        denied=subprocess.run([sys.executable,ROOT/"scripts/internal/stage-residency-feasibility.py",upstream],
+                              capture_output=True,text=True,timeout=30)
+        assert denied.returncode!=0,"Double staging must fail closed"
         compiler=shutil.which("clang++") or shutil.which("g++")
         if compiler is None:
             raise RuntimeError("A C++17 compiler (clang++/g++) is mandatory for native speed CI")
+        command([compiler,"-std=c++17","-fsyntax-only","-I",upstream/"src",
+                 upstream/"tools/lite-reuse-probe.cpp"])
+        print("PINNED_REAL_CONTEXT_A_B_A_HARNESS_COMPILES_MODEL_NOT_RUN",PIN)
         exe=work/("speed-check.exe" if os.name=="nt" else "speed-check")
         command([compiler,"-std=c++17","-O0","-I",upstream/"src",
                  ROOT/"scripts/internal/native-speed-ci.cpp","-o",exe])

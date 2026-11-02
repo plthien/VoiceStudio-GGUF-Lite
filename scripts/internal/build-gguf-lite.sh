@@ -91,6 +91,10 @@ git -C "$WORK/src" checkout --detach "$COMMIT_SHA"
 git -C "$WORK/src" submodule update --init --recursive
 "$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-attestation.py" "$WORK/src/src/backend.h"
 "$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-native-speed.py" "$WORK/src"
+if [[ "${OMNIVOICE_RESIDENCY_FEASIBILITY:-0}" == "1" ]]; then
+    # Real native A-B-A probe only. No worker or resident mode is enabled.
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/internal/stage-residency-feasibility.py" "$WORK/src"
+fi
 
 cd "$WORK/src"
 
@@ -178,6 +182,17 @@ if ! try_vulkan_build; then
 fi
 exe="$(built_windows_exe)"
 cp -v "$exe" "$BIN_DIR/$OUT_NAME"
+if [[ "${OMNIVOICE_RESIDENCY_FEASIBILITY:-0}" == "1" ]]; then
+    for probe in build/Release/lite-reuse-probe.exe build/lite-reuse-probe.exe; do
+        if [[ -s "$probe" ]]; then
+            cp -v "$probe" "$BIN_DIR/lite-reuse-probe.exe"
+            printf '%s\n' "lite-reuse-probe.exe" >> "$COPIED_LIBS"
+            break
+        fi
+    done
+    [[ -s "$BIN_DIR/lite-reuse-probe.exe" ]] ||
+        { echo "Native feasibility C++ target did not compile" >&2; exit 2; }
+fi
 copy_shared_libs
 copy_msvc_runtime
 for lib in ggml-vulkan.dll ggml.dll ggml-base.dll; do
