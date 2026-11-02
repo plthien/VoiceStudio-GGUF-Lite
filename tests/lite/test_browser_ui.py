@@ -170,7 +170,14 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#tts-submit")).to_be_enabled()
         page.locator("#tts-text").fill("Recovered after navigation cancellation")
         page.locator("#tts-submit").click()
-        expect(page.locator("#tts-output")).to_be_visible(timeout=10000)
+        try:
+            expect(page.locator("#tts-output")).to_be_visible(timeout=10000)
+        except AssertionError:
+            assert False, {"state":page.locator("#tts-state").inner_text(),
+                "notice":page.locator("#notice").inner_text(),
+                "selected_voice":page.locator("#tts-voice").input_value(),
+                "busy":page.evaluate("() => fetch('/lite/status').then(r=>r.json()).then(s=>s.busy)"),
+                "submit_disabled":page.locator("#tts-submit").is_disabled()}
         page.locator('[data-view="library"]').click()
         expect(page.locator("#voice-list")).to_contain_text("New owner voice")
         page.locator("#voice-list .voice-item").filter(has_text="New owner voice").get_by_role("button",name="Edit").click()
