@@ -274,3 +274,35 @@ def test_runtime_ffmpeg_installed_and_missing_truth(ui_server,monkeypatch):
         expect(page.locator("#runtime-details")).to_contain_text("Missing — install FFmpeg",timeout=10000)
         assert page.request.get(base+"/lite/status").json()["ffmpeg_installed"] is False
         browser.close()
+
+
+@pytest.mark.timeout(70)
+def test_n03_one_native_preflight_per_manual_chromium_refresh(ui_server,monkeypatch):
+    base,_=ui_server
+    import lite.app as module
+    original=module.preflight
+    calls=[]
+    def counted(settings):
+        calls.append("preflight")
+        return original(settings)
+    monkeypatch.setattr(module,"preflight",counted)
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        page=browser.new_page(viewport={"width":1280,"height":900})
+        seen=[]
+        page.on("request",lambda request:seen.append(request.url))
+        page.goto(base+"/ui",wait_until="domcontentloaded")
+        page.locator('[data-view="runtime"]').click()
+        expect(page.locator("#runtime-refresh")).to_be_enabled(timeout=15000)
+        calls.clear()
+        seen.clear()
+        page.locator("#runtime-refresh").click()
+        expect(page.locator("#runtime-refresh")).to_be_enabled(timeout=15000)
+        assert len(calls)==1, ("Each UI click must run precisely one preflight",calls)
+        assert not any("/engines/omnivoice-gguf/quants" in u for u in seen),seen
+        assert sum("/lite/readiness" in u for u in seen)==1,seen
+        before=len(calls)
+        response=page.request.get(base+"/engines/omnivoice-gguf/quants")
+        assert response.status==200
+        assert len(calls)==before+1,"Independent quants route must still verify engine"
+        browser.close()
