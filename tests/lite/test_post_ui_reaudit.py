@@ -194,6 +194,11 @@ def test_f04_cancelled_profile_write_keeps_admission_until_thread_finishes(tmp_p
                 finish.set()
             with pytest.raises(asyncio.CancelledError):
                 await first
+            # Worker deliberately outlives the cancelled HTTP request.
+            for _ in range(200):
+                if not app.state.admission.locked():
+                    break
+                await asyncio.sleep(.01)
             assert not app.state.admission.locked()
             assert app.state.store.get(row["id"])["name"]=="New"
             assert app.state.store.reference(row).exists()

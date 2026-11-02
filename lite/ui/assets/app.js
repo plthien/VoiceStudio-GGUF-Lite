@@ -5,7 +5,7 @@ const titles={clone:['Voice Cloning','Create a voice from an owned reference rec
   library:['Voice Library','Manage your saved profiles and import legacy voices.'],
   tts:['Text to Speech','Generate a native verified WAV from any saved voice.'],
   runtime:['Runtime & Settings','Inspect pinned model and local inference readiness.']};
-let voices=[],chosen='',editor='',controller=null,ttsUrl=null,refUrl=null,cloneUrl=null,diagnostic=null,diagnosticController=null,licenceFingerprint=null,working=false;
+let voices=[],chosen='',editor='',controller=null,ttsUrl=null,refUrl=null,cloneUrl=null,diagnostic=null,diagnosticController=null,licenceFingerprint=null,licenceAccepted=false,working=false;
 const errors={INVALID_REQUEST:'Check required fields and the exact transcript.',INVALID_AUDIO:'Reference could not be decoded. Use an owned WAV or MP3.',AUDIO_TOO_LARGE:'Recording exceeds the local size limit.',PROFILE_NOT_FOUND:'Voice no longer exists. Refresh the library.',PROFILE_ACTIVE:'Voice is currently in use. Try again after generation.',REFERENCE_INVALID:'Saved reference changed or failed integrity checks.',NATIVE_BUSY:'GPU is already processing a request.',LICENCE_NOT_READY:'Model provenance and explicit terms acceptance are required.',RUNTIME_NOT_READY:'Q8_0, native executable or Vulkan0 did not pass readiness.',NATIVE_TIMEOUT:'Native generation timed out.',CLIENT_DISCONNECTED:'Generation cancelled after browser disconnect.',NATIVE_FAILURE:'Native generation failed. No WAV was published.',NATIVE_PROOF_MISSING:'Device verification was missing or did not match NVIDIA Vulkan0.',INVALID_WAV:'The server response was not a valid 24 kHz PCM16 WAV.',MIGRATION_FAILED:'Legacy voice could not be migrated. No successful import was reported.',PURGE_INCOMPLETE:'Profile removed, but owned audio cleanup requires manual local review.',MIGRATION_SOURCE_UNAVAILABLE:'Close VoiceStudio and check %APPDATA%/OmniVoice/omnivoice.db, or configure the trusted legacy root on the server.'};
 const safeError=e=>errors[e.code]||((e.name==='AbortError')?'Request cancelled.':'Local request failed. Check service status.');
 function notice(message,bad=false){const n=$('notice');n.textContent=message;n.className='notice'+(bad?' error':'');n.hidden=false;}
@@ -127,7 +127,7 @@ async function refreshRuntime(){const b=$('runtime-refresh');busy(b,true);$('run
         source.append(a);
       }catch{}
     }
-    licenceFingerprint=acceptance.fingerprint;$('licence-review').checked=false;
+    licenceFingerprint=acceptance.fingerprint;licenceAccepted=acceptance.accepted;$('licence-review').checked=false;
     $('licence-accept').disabled=acceptance.accepted;$('licence-withdraw').disabled=!acceptance.accepted;
     $('status-short').textContent=ready.ready?'Q8_0 runtime ready':'Runtime not ready';$('status-dot').className='status-dot'+(ready.ready?' ok':' bad');
   }catch(err){$('runtime-checked').textContent='Readiness failed';notice(safeError(err),true);}finally{busy(b,false);}}
@@ -135,7 +135,7 @@ $('runtime-refresh').addEventListener('click',refreshRuntime);
 $('licence-form').addEventListener('submit',async e=>{e.preventDefault();
   if(!licenceFingerprint||!$('licence-review').checked){notice('Review the exact model terms before acceptance.',true);return;}
   const b=$('licence-accept');busy(b,true);try{await api.json('/models/licenses/accept','POST',{repo_id:'Serveurperso/OmniVoice-GGUF',fingerprint:licenceFingerprint,accepted:true});
-  notice('Local terms acknowledgement recorded; this is not commercial permission.');await refreshRuntime();}catch(err){notice(safeError(err),true)}finally{busy(b,false);}});
+  notice('Local terms acknowledgement recorded; this is not commercial permission.');await refreshRuntime();}catch(err){notice(safeError(err),true)}finally{busy(b,false);b.disabled=licenceAccepted;}});
 $('licence-withdraw').addEventListener('click',async()=>{if(!licenceFingerprint)return;
   try{await api.json('/models/licenses/accept','POST',{repo_id:'Serveurperso/OmniVoice-GGUF',fingerprint:licenceFingerprint,accepted:false});notice('Local terms acknowledgement withdrawn.');await refreshRuntime();}catch(e){notice(safeError(e),true);}});
 $('migration-preview').addEventListener('click',async()=>{const b=$('migration-preview');busy(b,true);$('migration-feedback').textContent='Inspecting the configured legacy source…';
