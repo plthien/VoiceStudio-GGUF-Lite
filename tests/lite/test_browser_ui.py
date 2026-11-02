@@ -420,7 +420,7 @@ def test_native_speed_browser_real_json_request_and_measured_display(ui_server,m
         expect(page.locator("#view-tts")).to_be_visible()
         expect(page.locator("#tts-speed")).to_be_enabled(timeout=10000)
         assert float(page.locator("#tts-speed").input_value())==1.0
-        page.locator("#tts-speed").fill("1.20")
+        page.locator("#tts-speed").evaluate("(el) => {el.value='1.20';el.dispatchEvent(new Event('input',{bubbles:true}));}")
         expect(page.locator("#tts-speed-value")).to_have_text("1.20×")
         page.locator("#tts-text").fill("Five words to measure speech")
         page.locator("#tts-submit").click()
@@ -431,7 +431,7 @@ def test_native_speed_browser_real_json_request_and_measured_display(ui_server,m
         expect(page.locator("#tts-timing")).to_contain_text("Approx measured")
         expect(page.locator("#tts-timing")).to_contain_text("Server RTF")
         assert page.evaluate("document.documentElement.scrollWidth<=innerWidth+2")
-        page.locator("#tts-speed").fill("0.85")
+        page.locator("#tts-speed").evaluate("(el) => {el.value='0.85';el.dispatchEvent(new Event('input',{bubbles:true}));}")
         page.locator("#tts-text").fill("Slow requested delivery of this sentence")
         page.locator("#tts-submit").click()
         expect(page.locator("#tts-output")).to_be_visible(timeout=15000)
