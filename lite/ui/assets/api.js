@@ -21,9 +21,9 @@ export const update=(id,payload)=>json('/profiles/'+encodeURIComponent(id),'PUT'
 export const replaceAudio=(id,form)=>request('/profiles/'+encodeURIComponent(id)+'/audio',{method:'PUT',body:form});
 export const remove=(id,purge)=>request('/profiles/'+encodeURIComponent(id)+(purge?'?purge=true':''),{method:'DELETE'});
 export const previewReference=id=>request('/profiles/'+encodeURIComponent(id)+'/reference',{raw:true});
-export async function speech(voice,text,language,seed,signal){
+export async function speech(voice,text,language,seed,signal,speed=1.0){
   return request('/v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({model:'omnivoice-gguf',voice,input:text,response_format:'wav',speed:1.0,
+    body:JSON.stringify({model:'omnivoice-gguf',voice,input:text,response_format:'wav',speed,
       ...(language?{language}:{}),...(seed!==null?{seed}:{})}),raw:true,signal});
 }
 export function attest(response){
@@ -34,7 +34,7 @@ export function attest(response){
   if(status!=='verified'||backend!=='Vulkan0'||!device.includes('NVIDIA')||!device.includes('GTX 1650')){
     throw new ApiError(500,'NATIVE_PROOF_MISSING');
   }
-  return {backend,device,status,serverElapsed:h.get('x-lite-elapsed-s'),serverAudio:h.get('x-lite-audio-s'),serverRtf:h.get('x-lite-rtf')};
+  return {backend,device,status,serverElapsed:h.get('x-lite-elapsed-s'),serverAudio:h.get('x-lite-audio-s'),serverRtf:h.get('x-lite-rtf'),requestedSpeed:h.get('x-lite-requested-speed')};
 }
 export function checkWav(bytes){
   if(bytes.byteLength<46) throw new ApiError(500,'INVALID_WAV');

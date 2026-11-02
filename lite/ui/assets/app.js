@@ -6,13 +6,31 @@ const titles={clone:['Voice Cloning','Create a voice from an owned reference rec
   tts:['Text to Speech','Generate a native verified WAV from any saved voice.'],
   runtime:['Runtime & Settings','Inspect pinned model and local inference readiness.']};
 let voices=[],chosen='',editor='',controller=null,ttsUrl=null,refUrl=null,cloneUrl=null,replaceUrl=null,diagnostic=null,diagnosticController=null,licenceFingerprint=null,licenceAccepted=false,working=false,runtimeChecking=false;
-const errors={INVALID_TRANSCRIPT:'Enter the exact transcript of the NEW reference (or explicitly confirm same words).',INVALID_REQUEST:'Check required fields and the exact transcript.',INVALID_AUDIO:'Reference could not be decoded. Use an owned WAV or MP3.',AUDIO_TOO_LARGE:'Recording exceeds the local size limit.',PROFILE_NOT_FOUND:'Voice no longer exists. Refresh the library.',PROFILE_ACTIVE:'Voice is currently in use. Try again after generation.',REFERENCE_INVALID:'Saved reference changed or failed integrity checks.',NATIVE_BUSY:'GPU is already processing a request.',LICENCE_NOT_READY:'Model provenance and explicit terms acceptance are required.',RUNTIME_NOT_READY:'Q8_0, native executable or Vulkan0 did not pass readiness.',NATIVE_TIMEOUT:'Native generation timed out.',CLIENT_DISCONNECTED:'Generation cancelled after browser disconnect.',NATIVE_FAILURE:'Native generation failed. No WAV was published.',NATIVE_PROOF_MISSING:'Device verification was missing or did not match NVIDIA Vulkan0.',INVALID_WAV:'The server response was not a valid 24 kHz PCM16 WAV.',MIGRATION_FAILED:'Legacy voice could not be migrated. No successful import was reported.',PURGE_INCOMPLETE:'Profile removed, but owned audio cleanup requires manual local review.',MIGRATION_SOURCE_UNAVAILABLE:'Close VoiceStudio and check %APPDATA%/OmniVoice/omnivoice.db, or configure the trusted legacy root on the server.'};
+const errors={INVALID_TRANSCRIPT:'Enter the exact transcript of the NEW reference (or explicitly confirm same words).',INVALID_REQUEST:'Check required fields and the exact transcript.',INVALID_AUDIO:'Reference could not be decoded. Use an owned WAV or MP3.',AUDIO_TOO_LARGE:'Recording exceeds the local size limit.',PROFILE_NOT_FOUND:'Voice no longer exists. Refresh the library.',PROFILE_ACTIVE:'Voice is currently in use. Try again after generation.',REFERENCE_INVALID:'Saved reference changed or failed integrity checks.',NATIVE_BUSY:'GPU is already processing a request.',LICENCE_NOT_READY:'Model provenance and explicit terms acceptance are required.',RUNTIME_NOT_READY:'Q8_0, native executable or Vulkan0 did not pass readiness.',NATIVE_TIMEOUT:'Native generation timed out.',CLIENT_DISCONNECTED:'Generation cancelled after browser disconnect.',NATIVE_FAILURE:'Native generation failed. No WAV was published.',NATIVE_PROOF_MISSING:'Device verification was missing or did not match NVIDIA Vulkan0.',INVALID_WAV:'The server response was not a valid 24 kHz PCM16 WAV.',MIGRATION_FAILED:'Legacy voice could not be migrated. No successful import was reported.',PURGE_INCOMPLETE:'Profile removed, but owned audio cleanup requires manual local review.',NATIVE_SPEED_UNAVAILABLE:'Native Speed requires rebuilt Lite Vulkan runtime. Baseline 1.00× is still available.',MIGRATION_SOURCE_UNAVAILABLE:'Close VoiceStudio and check %APPDATA%/OmniVoice/omnivoice.db, or configure the trusted legacy root on the server.'};
 const safeError=e=>errors[e.code]||((e.name==='AbortError')?'Request cancelled.':'Local request failed. Check service status.');
 function notice(message,bad=false){const n=$('notice');n.textContent=message;n.className='notice'+(bad?' error':'');n.hidden=false;}
 function busy(button,state){button.disabled=state;button.setAttribute('aria-busy',String(state));}
 function revoke(id){const a=$(id);if(a.src){URL.revokeObjectURL(a.src);a.removeAttribute('src');a.load();}a.hidden=true;}
 function clearOutput(){if(ttsUrl){URL.revokeObjectURL(ttsUrl);ttsUrl=null;}$('tts-player').removeAttribute('src');$('tts-player').load();$('tts-output').hidden=true;}
 function setVoice(id){chosen=voices.some(p=>p.id===id)?id:'';const v=voices.find(p=>p.id===chosen);$('selected-voice').textContent=v?v.name+' · '+v.id:'No voice selected';$('tts-voice').value=chosen;}
+let nativeSpeedReady=false;
+async function loadSpeedCapability(){
+  $('tts-speed').disabled=true;
+  $('tts-speed-notice').textContent='Checking native speed capability…';
+  try{
+    const cap=await api.request('/lite/speed-capability');
+    nativeSpeedReady=cap.supported===true;
+    $('tts-speed').disabled=!nativeSpeedReady;
+    $('tts-speed-notice').textContent=nativeSpeedReady?'Experimental native duration estimator (no guaranteed WPM).':
+      'Native Speed requires rebuilt Lite Vulkan runtime. Use baseline 1.00×.';
+    if(!nativeSpeedReady){$('tts-speed').value='1.00';$('tts-speed-value').textContent='1.00×';}
+  }catch{
+    nativeSpeedReady=false;$('tts-speed').disabled=true;$('tts-speed').value='1.00';
+    $('tts-speed-value').textContent='1.00×';
+    $('tts-speed-notice').textContent='Native Speed capability could not be verified. Baseline 1.00× only.';
+  }
+}
+$('tts-speed').addEventListener('input',()=>{$('tts-speed-value').textContent=Number($('tts-speed').value).toFixed(2)+'×';});
 function openView(view){if(!titles[view])return;
   if(view!=='library'){resetReplacement();revoke('saved-preview');}
   if(diagnosticController){diagnosticController.abort();diagnosticController=null;busy($('diagnostic-start'),false);$('diagnostic-export').disabled=true;if(diagnostic)diagnostic.status='cancelled';$('diagnostic-state').textContent='UI diagnostic cancelled on navigation.';}
@@ -21,7 +39,7 @@ function openView(view){if(!titles[view])return;
   for(const n of nav){const active=n.dataset.view===view;n.classList.toggle('active',active);if(active)n.setAttribute('aria-current','page');else n.removeAttribute('aria-current');}
   for(const key of Object.keys(titles))$('view-'+key).hidden=key!==view;
   $('page-title').textContent=titles[view][0];$('page-subtitle').textContent=titles[view][1];
-  if(view==='library')loadVoices();if(view==='runtime')refreshRuntime();
+  if(view==='library')loadVoices();if(view==='runtime')refreshRuntime();if(view==='tts')loadSpeedCapability();
   window.location.hash=view;
 }
 nav.forEach(x=>x.addEventListener('click',()=>openView(x.dataset.view)));
@@ -41,7 +59,7 @@ function renderVoices(){const list=$('voice-list');list.replaceChildren();$('lib
   setVoice(chosen);
 }
 async function loadVoices(){try{voices=await api.profiles();renderVoices();await cheapStatus();}catch(e){notice(safeError(e),true)}}
-async function cheapStatus(){try{const v=await api.request('/lite/status');$('status-short').textContent=v.busy?'Native inference busy':'Local API connected';$('status-dot').className='status-dot'+(v.busy?'':' ok');}catch{$('status-short').textContent='Service unavailable';$('status-dot').className='status-dot bad';}}
+async function cheapStatus(){try{const v=await api.request('/lite/status');$('status-short').textContent=v.busy?'Voice operation busy':'Local API connected';$('status-dot').className='status-dot'+(v.busy?'':' ok');}catch{$('status-short').textContent='Service unavailable';$('status-dot').className='status-dot bad';}}
 $('refresh-voices').addEventListener('click',loadVoices);$('library-refresh').addEventListener('click',loadVoices);
 $('tts-voice').addEventListener('change',e=>{chosen=e.target.value;setVoice(chosen);});
 $('clone-file').addEventListener('change',e=>{if(cloneUrl)URL.revokeObjectURL(cloneUrl);const f=e.target.files[0];$('clone-preview').hidden=!f;if(f){cloneUrl=URL.createObjectURL(f);$('clone-preview').src=cloneUrl;}});
@@ -114,20 +132,28 @@ async function deleteVoice(purge){if(!editor)return;const id=editor;const words=
   }catch(e){notice(safeError(e),true)}}
 $('delete-purge').addEventListener('click',()=>deleteVoice(true));$('delete-only').addEventListener('click',()=>deleteVoice(false));
 $('tts-cancel').addEventListener('click',()=>{if(controller)controller.abort();});
-async function performSpeech(voice,text,language,seed,signal){const now=performance.now();const response=await api.speech(voice,text,language,seed,signal);
+async function performSpeech(voice,text,language,seed,signal,speed=1.0){const now=performance.now();const response=await api.speech(voice,text,language,seed,signal,speed);
   const proof=api.attest(response);if(response.headers.get('content-type')?.split(';')[0]!=='audio/wav')throw new api.ApiError(500,'INVALID_WAV');
   const bytes=await response.arrayBuffer();const seconds=api.checkWav(bytes);
   return {blob:new Blob([bytes],{type:'audio/wav'}),proof,seconds,clientSeconds:(performance.now()-now)/1000};}
 $('tts-form').addEventListener('submit',async e=>{e.preventDefault();if(working)return;const voice=$('tts-voice').value,text=$('tts-text').value;
   if(!voice||!text.trim()){notice('Select a saved voice and enter text.',true);return;}
   const value=$('tts-seed').value,seed=value===''?null:Number(value);if(seed!==null&&(!Number.isInteger(seed)||seed<0||seed>2147483647)){notice('Seed must be a nonnegative integer.',true);return;}
+  const requestedSpeed=Number($('tts-speed').value);
+  if(requestedSpeed!==1&&!nativeSpeedReady){notice('Native Speed requires rebuilt Lite Vulkan runtime.',true);return;}
   clearOutput();controller=new AbortController();const current=controller;working=true;busy($('tts-submit'),true);busy($('tts-cancel'),false);$('tts-state').textContent='Generating…';$('tts-native-summary').textContent='Waiting for native attestation…';
-  try{const result=await performSpeech(voice,text,$('tts-language').value,seed,current.signal);
+  try{const result=await performSpeech(voice,text,$('tts-language').value,seed,current.signal,requestedSpeed);
     if(current.signal.aborted)return;
     ttsUrl=URL.createObjectURL(result.blob);$('tts-player').src=ttsUrl;$('tts-download').href=ttsUrl;$('tts-download').download='lite-'+voice+'.wav';
     $('tts-proof').textContent='Verified · '+result.proof.device+' · Vulkan0';
     $('tts-native-summary').textContent='Verified from native response headers: '+result.proof.device+' / '+result.proof.backend;
-    $('tts-timing').textContent='Audio '+result.seconds.toFixed(2)+' s · Client '+result.clientSeconds.toFixed(2)+' s'+(result.proof.serverRtf?' · Server RTF '+result.proof.serverRtf:'');
+    const words=text.trim().split(/\s+/).filter(Boolean).length;
+    const actualWpm=(60*words/result.seconds).toFixed(1);
+    $('tts-timing').textContent='Requested '+requestedSpeed.toFixed(2)+'× · WAV '+result.seconds.toFixed(2)+
+      ' s · Approx measured '+actualWpm+' WPM ('+words+' whitespace-delimited words)'+
+      (result.proof.serverElapsed?' · Server elapsed '+result.proof.serverElapsed+' s':'')+
+      (result.proof.serverRtf?' · Server RTF '+result.proof.serverRtf:'')+
+      ' · Client '+result.clientSeconds.toFixed(2)+' s';
     $('tts-output').hidden=false;$('tts-state').textContent='Completed';notice('Verified 24 kHz WAV is ready.');
   }catch(err){$('tts-state').textContent=err.name==='AbortError'?'Cancelled':'Failed';notice(safeError(err)+(err.retryAfter?' Retry after '+err.retryAfter+'s.':''),true);
   }finally{if(controller===current){controller=null;working=false;busy($('tts-submit'),false);busy($('tts-cancel'),true);}}});

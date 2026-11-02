@@ -5,6 +5,7 @@ import contextlib
 import logging
 import uuid
 import shutil
+import math
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ from .native_runner import Runner, NativeBusy, NativeFailure, NativeTimeout
 from .profiles import Store, ProfileError
 from .runtime import preflight, RuntimeErrorLite
 from .readiness import complete_readiness
+from .speed import native_speed_capability
 
 logger = logging.getLogger("gguf_lite")
 
@@ -126,8 +128,8 @@ class Speech(BaseModel):
     @field_validator("speed")
     @classmethod
     def fixed_speed(cls, value):
-        if value != 1.0:
-            raise ValueError("Native GGUF does not support speed control")
+        if not math.isfinite(value) or not 0.75 <= value <= 1.25:
+            raise ValueError("Native speed must be finite within 0.75–1.25")
         return value
 
     @field_validator("input")
@@ -229,10 +231,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
     @app.get("/lite/status")
     def cheap_status():
         """No GPU preflight or multi-GB hash on this route."""
-        return {"busy":app.state.runner.lock.locked(),
+        native_busy=app.state.runner.lock.locked()
+        operation_busy=app.state.admission.locked()
+        return {"busy":native_busy or operation_busy,
+                "native_busy":native_busy,"operation_busy":operation_busy,
                 "voice_count":len(app.state.store.list()),"model":"omnivoice-gguf",
                 "quant":"Q8_0","backend_requested":"Vulkan0",
                 "ffmpeg_installed":bool(shutil.which("ffmpeg"))}
+
+    @app.get("/lite/speed-capability")
+    async def speed_capability():
+        return await asyncio.to_thread(native_speed_capability,settings)
 
     @app.get("/lite/migration/preview")
     def migration_dry_run():
@@ -410,6 +419,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         if not state.licence.is_ready():
             return failure(403, "LICENCE_NOT_READY", "Model terms require verified provenance and explicit acceptance")
+        if payload.speed!=1.0:
+            capability=await asyncio.to_thread(native_speed_capability,settings)
+            if not capability["supported"]:
+                return failure(503,"NATIVE_SPEED_UNAVAILABLE","Native Speed requires rebuilt Lite Vulkan runtime")
         try:
             reference = state.store.reference(row)
         except ProfileError:
@@ -420,10 +433,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                     if await request.is_disconnected():
                         return
                     await asyncio.sleep(0.1)
-            generation=asyncio.create_task(state.runner.generate(
-                profile=row, reference=reference, text=payload.input,
-                language=payload.language, seed=payload.seed,
-                request_id=str(uuid.uuid4())))
+            kwargs=dict(profile=row,reference=reference,text=payload.input,
+                        language=payload.language,seed=payload.seed,
+                        request_id=str(uuid.uuid4()))
+            # Default speed preserves every old runner/provider call signature.
+            if payload.speed!=1.0: kwargs["speed"]=payload.speed
+            generation=asyncio.create_task(state.runner.generate(**kwargs))
             watcher=asyncio.create_task(detect_disconnect())
             try:
                 done,_=await asyncio.wait({generation,watcher},
@@ -442,6 +457,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                     return failure(500,"NATIVE_PROOF_MISSING","Native GPU proof was not verified")
                 return Response(data, media_type="audio/wav", headers={
                     "X-Lite-Request-Id": info["request_id"], "Cache-Control": "no-store",
+                    "X-Lite-Requested-Speed":format(payload.speed,".2f"),
                     **({"X-Lite-Verified-Backend":info["observed_native_backend"],
                         "X-Lite-Observed-Device":info["observed_device_identity"],
                         "X-Lite-Verification-Status":info["verification_status"],

@@ -90,6 +90,7 @@ git -C "$WORK/src" checkout --detach "$COMMIT_SHA"
 [[ "$(git -C "$WORK/src" rev-parse HEAD)" == "886fc079838ca7400cb2b42b36e2a65aa1daabe8" ]] || exit 2
 git -C "$WORK/src" submodule update --init --recursive
 "$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-attestation.py" "$WORK/src/src/backend.h"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-native-speed.py" "$WORK/src"
 
 cd "$WORK/src"
 
@@ -197,6 +198,10 @@ sha256_of() {
     fi
 }
 DIGEST="$(sha256_of "$OUT_NAME")"
+# Native --help must expose the reviewed patch marker before receipt publication.
+if ! "$BIN_DIR/$OUT_NAME" --help 2>&1 | grep -F "LiteNativeSpeed/v1" >/dev/null; then
+    echo "Built binary lacks LiteNativeSpeed/v1 CLI capability" >&2; exit 2
+fi
 
 # Rewrite the manifest atomically, replacing (not accumulating) the entries
 # this build owns, so renamed platforms and rebuilt libraries never leave a
@@ -215,4 +220,8 @@ done < "$OWNED"
 sort -k2 -o "$MANIFEST" "$TMP_MANIFEST"
 rm -f "$TMP_MANIFEST" "$OWNED"
 
-echo "✓ Built $OUT_NAME ($DIGEST)"
+# Attested build-capability receipt, tied to sha256-checked EXE and exact patch sources.
+cat > "$BIN_DIR/speed-capability.json" <<JSON
+{"schema":"lite-native-speed-v1","runtime_revision":"$COMMIT_SHA","exe_sha256":"$DIGEST","patch_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/instrument-native-speed.py")","header_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/lite-native-speed.h")"}
+JSON
+echo "✓ Built $OUT_NAME ($DIGEST) LiteNativeSpeed/v1"

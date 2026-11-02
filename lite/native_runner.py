@@ -14,6 +14,7 @@ import re
 from .audio import wav_file
 from .config import Settings
 from .runtime import model_pair, native_files, native_env, preflight, RuntimeErrorLite
+from .speed import native_speed_capability
 
 LOG = logging.getLogger("gguf_lite")
 
@@ -108,9 +109,11 @@ class Runner:
 
     async def generate(self, *, profile: dict, reference: Path,
                        text: str, language: str | None, seed: int | None,
-                       request_id: str) -> tuple[bytes, dict]:
+                       request_id: str, speed: float = 1.0) -> tuple[bytes, dict]:
         if self.lock.locked():
             raise NativeBusy("GPU is busy with another request")
+        if speed!=1.0 and not native_speed_capability(self.settings)["supported"]:
+            raise RuntimeErrorLite("NATIVE_SPEED_UNAVAILABLE: verified patched native runtime required")
         async with self.lock:
             self.active_id = profile["id"]
             started = time.monotonic()
@@ -140,6 +143,8 @@ class Runner:
                         argv += ["--lang", labels.get(lang, lang.capitalize())]
                     if seed is not None:
                         argv += ["--seed", str(seed)]
+                    if speed!=1.0:
+                        argv += ["--speed", format(speed, ".2f")]
                     self.process = await asyncio.create_subprocess_exec(
                         *native_command(exe), *argv[1:], cwd=str(self.settings.bin_dir), env=native_env(self.settings),
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
