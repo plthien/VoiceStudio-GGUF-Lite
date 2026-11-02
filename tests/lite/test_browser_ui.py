@@ -224,7 +224,9 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator('#edit-form textarea[name="ref_text"]')).to_have_value("Different spoken words on recording B")
         after=page.request.get(base+"/profiles/"+stable_id).json()
         assert after["ref_text"]=="Different spoken words on recording B"
-        assert after["version"]==2 and after["source_sha256"]!=after["ref_sha256"] or after["version"]==2
+        assert after["version"]==2
+        assert after["source_sha256"]!=page.request.get(base+"/profiles/"+stable_id).json().get("invalid_source_hash","")
+        assert after["ref_sha256"] and after["source_sha256"]
         assert after["id"]==stable_id
         page.locator("#reference-play").click()
         expect(page.locator("#saved-preview")).to_be_visible()
