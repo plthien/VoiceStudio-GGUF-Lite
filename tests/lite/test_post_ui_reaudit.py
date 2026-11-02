@@ -203,3 +203,35 @@ def test_f04_cancelled_profile_write_keeps_admission_until_thread_finishes(tmp_p
             assert app.state.store.get(row["id"])["name"]=="New"
             assert app.state.store.reference(row).exists()
     asyncio.run(scenario())
+
+def test_f01_default_appdata_api_preview_apply_preserves_original_bytes(tmp_path,monkeypatch):
+    import hashlib
+    root=tmp_path/"OmniVoice"
+    voices=root/"voices"
+    voices.mkdir(parents=True)
+    reference=voices/"owned.wav"
+    reference.write_bytes(wav())
+    database=root/"omnivoice.db"
+    with sqlite3.connect(database) as db:
+        db.execute("CREATE TABLE voice_profiles(id TEXT,name TEXT,ref_audio_path TEXT,ref_text TEXT,language TEXT,kind TEXT)")
+        db.execute("INSERT INTO voice_profiles VALUES(?,?,?,?,?,?)",
+            ("legacy-real","Historical owner profile","owned.wav","Exact historical transcript","en","clone"))
+    old_db_hash=hashlib.sha256(database.read_bytes()).hexdigest()
+    old_ref_hash=hashlib.sha256(reference.read_bytes()).hexdigest()
+    monkeypatch.setenv("APPDATA",str(tmp_path))
+    for var in ("GGUF_LITE_LEGACY_ROOT","GGUF_LITE_LEGACY_DB","GGUF_LITE_LEGACY_VOICES"):
+        monkeypatch.delenv(var,raising=False)
+    app,s=setup(tmp_path,monkeypatch)
+    with TestClient(app) as c:
+        preview=c.get("/lite/migration/preview")
+        assert preview.status_code==200,preview.text
+        assert [x["id"] for x in preview.json()["eligible"]]==["legacy-real"]
+        assert not app.state.store.get("legacy-real")
+        applied=c.post("/lite/migration/apply",json={"voice_id":"legacy-real"})
+        assert applied.status_code==200,applied.text
+        assert applied.json()["migrated"]==1
+        saved=app.state.store.get("legacy-real")
+        assert saved["id"]=="legacy-real" and saved["ref_text"]=="Exact historical transcript"
+        assert c.post("/lite/migration/apply",json={"voice_id":"legacy-real"}).json()["skipped"]==1
+    assert hashlib.sha256(database.read_bytes()).hexdigest()==old_db_hash
+    assert hashlib.sha256(reference.read_bytes()).hexdigest()==old_ref_hash
