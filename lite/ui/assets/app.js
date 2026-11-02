@@ -5,8 +5,8 @@ const titles={clone:['Voice Cloning','Create a voice from an owned reference rec
   library:['Voice Library','Manage your saved profiles and import legacy voices.'],
   tts:['Text to Speech','Generate a native verified WAV from any saved voice.'],
   runtime:['Runtime & Settings','Inspect pinned model and local inference readiness.']};
-let voices=[],chosen='',editor='',controller=null,ttsUrl=null,refUrl=null,cloneUrl=null,diagnostic=null,licenceFingerprint=null,working=false;
-const errors={INVALID_REQUEST:'Check required fields and the exact transcript.',INVALID_AUDIO:'Reference could not be decoded. Use an owned WAV or MP3.',AUDIO_TOO_LARGE:'Recording exceeds the local size limit.',PROFILE_NOT_FOUND:'Voice no longer exists. Refresh the library.',PROFILE_ACTIVE:'Voice is currently in use. Try again after generation.',REFERENCE_INVALID:'Saved reference changed or failed integrity checks.',NATIVE_BUSY:'GPU is already processing a request.',LICENCE_NOT_READY:'Model provenance and explicit terms acceptance are required.',RUNTIME_NOT_READY:'Q8_0, native executable or Vulkan0 did not pass readiness.',NATIVE_TIMEOUT:'Native generation timed out.',NATIVE_FAILURE:'Native generation failed. No WAV was published.',NATIVE_PROOF_MISSING:'Device verification was missing or did not match NVIDIA Vulkan0.',INVALID_WAV:'The server response was not a valid 24 kHz PCM16 WAV.',MIGRATION_FAILED:'Legacy voice could not be migrated. No successful import was reported.',MIGRATION_SOURCE_UNAVAILABLE:'Configure a trusted legacy root on the server and close VoiceStudio.'};
+let voices=[],chosen='',editor='',controller=null,ttsUrl=null,refUrl=null,cloneUrl=null,diagnostic=null,diagnosticController=null,licenceFingerprint=null,working=false;
+const errors={INVALID_REQUEST:'Check required fields and the exact transcript.',INVALID_AUDIO:'Reference could not be decoded. Use an owned WAV or MP3.',AUDIO_TOO_LARGE:'Recording exceeds the local size limit.',PROFILE_NOT_FOUND:'Voice no longer exists. Refresh the library.',PROFILE_ACTIVE:'Voice is currently in use. Try again after generation.',REFERENCE_INVALID:'Saved reference changed or failed integrity checks.',NATIVE_BUSY:'GPU is already processing a request.',LICENCE_NOT_READY:'Model provenance and explicit terms acceptance are required.',RUNTIME_NOT_READY:'Q8_0, native executable or Vulkan0 did not pass readiness.',NATIVE_TIMEOUT:'Native generation timed out.',NATIVE_FAILURE:'Native generation failed. No WAV was published.',NATIVE_PROOF_MISSING:'Device verification was missing or did not match NVIDIA Vulkan0.',INVALID_WAV:'The server response was not a valid 24 kHz PCM16 WAV.',MIGRATION_FAILED:'Legacy voice could not be migrated. No successful import was reported.',PURGE_INCOMPLETE:'Profile removed, but owned audio cleanup requires manual local review.',MIGRATION_SOURCE_UNAVAILABLE:'Configure a trusted legacy root on the server and close VoiceStudio.'};
 const safeError=e=>errors[e.code]||((e.name==='AbortError')?'Request cancelled.':'Local request failed. Check service status.');
 function notice(message,bad=false){const n=$('notice');n.textContent=message;n.className='notice'+(bad?' error':'');n.hidden=false;}
 function busy(button,state){button.disabled=state;button.setAttribute('aria-busy',String(state));}
@@ -14,6 +14,7 @@ function revoke(id){const a=$(id);if(a.src){URL.revokeObjectURL(a.src);a.removeA
 function clearOutput(){if(ttsUrl){URL.revokeObjectURL(ttsUrl);ttsUrl=null;}$('tts-player').removeAttribute('src');$('tts-player').load();$('tts-output').hidden=true;}
 function setVoice(id){chosen=voices.some(p=>p.id===id)?id:'';const v=voices.find(p=>p.id===chosen);$('selected-voice').textContent=v?v.name+' · '+v.id:'No voice selected';$('tts-voice').value=chosen;}
 function openView(view){if(!titles[view])return;
+  if(diagnosticController){diagnosticController.abort();diagnosticController=null;busy($('diagnostic-start'),false);$('diagnostic-state').textContent='UI diagnostic cancelled on navigation.';}
   if(controller){controller.abort();controller=null;working=false;busy($('tts-submit'),false);busy($('tts-cancel'),true);$('tts-state').textContent='Request cancelled.';}
   if(view!=='tts')clearOutput();
   for(const n of nav){const active=n.dataset.view===view;n.classList.toggle('active',active);if(active)n.setAttribute('aria-current','page');else n.removeAttribute('aria-current');}
@@ -130,17 +131,17 @@ $('migration-apply').addEventListener('click',async()=>{const id=$('migration-ch
   }catch(err){$('migration-feedback').textContent=safeError(err);notice(safeError(err),true);}finally{busy(b,false);}});
 const DIAGNOSTIC_TEXT='You lift the lid, toss in a banana peel, and forget about it. But when Paris tried to get people to use covered garbage bins in the eighteen eighties, people got angry. Landlords complained. Newspapers made jokes. And workers who earned their living from discarded stuff worried they might lose their jobs.';
 $('diagnostic-start').addEventListener('click',async()=>{if(!chosen){notice('Choose a saved voice before running a diagnostic.',true);return;}
-  const b=$('diagnostic-start');busy(b,true);$('diagnostic-export').disabled=true;diagnostic={type:'UI diagnostic — NOT authoritative CLI benchmark',voice_id:chosen,seed:42,character_count:DIAGNOSTIC_TEXT.length,comparable:false,runs:[],status:'running'};
+  const b=$('diagnostic-start');busy(b,true);diagnosticController=new AbortController();$('diagnostic-export').disabled=true;diagnostic={type:'UI diagnostic — NOT authoritative CLI benchmark',voice_id:chosen,seed:42,character_count:DIAGNOSTIC_TEXT.length,comparable:false,runs:[],status:'running'};
   try{if(DIAGNOSTIC_TEXT.length!==306)throw new Error('Diagnostic prompt does not match frozen case');
     for(let i=1;i<=3;i++){$('diagnostic-state').textContent='Running '+i+' / 3…';
-      const result=await performSpeech(chosen,DIAGNOSTIC_TEXT,'en',42,undefined);
+      const result=await performSpeech(chosen,DIAGNOSTIC_TEXT,'en',42,diagnosticController.signal);
       diagnostic.runs.push({run:i,audio_s:result.seconds,client_elapsed_s:result.clientSeconds,client_rtf:result.clientSeconds/result.seconds,native_device:result.proof.device,verified:true});
     }
     diagnostic.status='complete';diagnostic.mean_client_rtf=diagnostic.runs.reduce((s,x)=>s+x.client_rtf,0)/3;
     $('diagnostic-state').textContent='3/3 verified. UI client RTF '+diagnostic.mean_client_rtf.toFixed(3)+'; not a CLI benchmark.';$('diagnostic-export').disabled=false;
   }catch(err){diagnostic.status='failed';$('diagnostic-state').textContent='Diagnostic failed at '+(diagnostic.runs.length+1)+'/3';notice(safeError(err),true);
-  }finally{busy(b,false);}});
+  }finally{diagnosticController=null;busy(b,false);}});
 $('diagnostic-export').addEventListener('click',()=>{if(!diagnostic||diagnostic.status!=='complete')return;
   const url=URL.createObjectURL(new Blob([JSON.stringify(diagnostic,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='lite-ui-diagnostic.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
-window.addEventListener('beforeunload',()=>{if(controller)controller.abort();if(ttsUrl)URL.revokeObjectURL(ttsUrl);if(refUrl)URL.revokeObjectURL(refUrl);if(cloneUrl)URL.revokeObjectURL(cloneUrl);});
+window.addEventListener('beforeunload',()=>{if(controller)controller.abort();if(diagnosticController)diagnosticController.abort();if(ttsUrl)URL.revokeObjectURL(ttsUrl);if(refUrl)URL.revokeObjectURL(refUrl);if(cloneUrl)URL.revokeObjectURL(cloneUrl);});
 loadVoices();cheapStatus();openView(['clone','library','tts','runtime'].includes(location.hash.slice(1))?location.hash.slice(1):'clone');

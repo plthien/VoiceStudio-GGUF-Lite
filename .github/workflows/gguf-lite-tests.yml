@@ -39,6 +39,14 @@ jobs:
         run: python -m lite.hash_benchmark
       - name: Repo structural gate
         run: python tests/lite/check_repo_layout.py
+      - name: Upload non-private UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-ui-${{ matrix.os }}
+          path: ui-test-artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Windows PowerShell parser (no host execution)
         if: runner.os == 'Windows'
         shell: pwsh

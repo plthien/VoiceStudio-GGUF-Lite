@@ -310,8 +310,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                     active_id=app.state.runner.active_id,purge=purge)
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
-        except ProfileError:
-            return failure(409, "PROFILE_ACTIVE", "Profile active or owned audio cleanup incomplete")
+        except ProfileError as exc:
+            if "cleanup" in str(exc):
+                return failure(409,"PURGE_INCOMPLETE",
+                    "Profile was removed, but owned audio cleanup requires local review")
+            return failure(409, "PROFILE_ACTIVE", "Profile is active or the owned path is unsafe")
         return {"deleted": True, "id": profile_id, "owned_reference_files_purged":purge}
 
     @app.get("/models/licenses/details/{repo_id:path}")

@@ -16,3 +16,5 @@ data/
 runtime/
 benchmarks/
 native-build-*/
+
+ui-test-artifacts/

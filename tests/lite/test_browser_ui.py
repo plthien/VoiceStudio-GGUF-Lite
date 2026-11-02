@@ -112,6 +112,10 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         page.on("dialog",lambda dialog:dialog.accept())
         page.goto(base+"/ui",wait_until="domcontentloaded")
         expect(page.locator("#clone-form")).to_be_visible()
+        from pathlib import Path as _Path
+        shots=_Path("ui-test-artifacts")
+        shots.mkdir(parents=True,exist_ok=True)
+        page.screenshot(path=str(shots/("cloning-"+str(viewport["width"])+".png")),full_page=True)
         assert page.locator("script[src^='http']").count()==0
         page.locator("#clone-form input[name=name]").fill("New owner voice")
         page.locator("#clone-file").set_input_files({
@@ -175,4 +179,5 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         page.locator('[data-view="runtime"]').click()
         expect(page.locator("#runtime-summary")).to_contain_text("Q8_0")
         assert native.count>=2
+        page.screenshot(path=str(shots/("runtime-"+str(viewport["width"])+".png")),full_page=True)
         browser.close()
