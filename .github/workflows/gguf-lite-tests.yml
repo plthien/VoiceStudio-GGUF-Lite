@@ -21,6 +21,10 @@ jobs:
       - name: FFmpeg Linux
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: FFmpeg Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
       - name: Compile and FFmpeg
         run: |
           python -m compileall -q lite
