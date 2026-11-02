@@ -92,6 +92,42 @@ function Assert-NativeManifest([string]$directory,[bool]$requireSpeed) {
     }
   }
 }
+function Assert-ExecutableSpeedHelp([string]$directory) {
+  $exe=Join-Path $directory "omnivoice-tts-windows-x86_64.exe"
+  $stdout=[IO.Path]::GetTempFileName()
+  $stderr=[IO.Path]::GetTempFileName()
+  $proc=$null
+  try {
+    # Explicit executable and fixed --help argv; no shell command execution.
+    $proc=Start-Process -FilePath $exe -ArgumentList @("--help") -WorkingDirectory $directory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -NoNewWindow -PassThru -ErrorAction Stop
+    if (!$proc.WaitForExit(8000)) {
+      try { $proc.Kill($true) } catch {}
+      try { $proc.WaitForExit(3000) | Out-Null } catch {}
+      throw "Native Speed candidate --help timed out"
+    }
+    if ($proc.ExitCode -ne 0) {
+      throw "Native Speed candidate --help returned nonzero exit code"
+    }
+    $outSize=(Get-Item -LiteralPath $stdout).Length
+    $errSize=(Get-Item -LiteralPath $stderr).Length
+    if ($outSize+$errSize -gt 32768) {
+      throw "Native Speed candidate help output exceeded 32 KiB"
+    }
+    $helpText=(Get-Content -Raw -LiteralPath $stdout)+[Environment]::NewLine+(Get-Content -Raw -LiteralPath $stderr)
+    if (!$helpText.Contains("LiteNativeSpeed/v1") -or !$helpText.Contains("--speed")) {
+      throw "Native Speed candidate help capability marker/option missing"
+    }
+  } finally {
+    if ($null -ne $proc) {
+      if (!$proc.HasExited) {
+        try { $proc.Kill($true); $proc.WaitForExit(3000) | Out-Null } catch {}
+      }
+      $proc.Dispose()
+    }
+    Remove-Item -LiteralPath $stdout,$stderr -Force -ErrorAction SilentlyContinue
+  }
+}
+
 # Do not swap while the HTTP server is accepting requests.
 $socket=[Net.Sockets.TcpClient]::new()
 try {
@@ -106,6 +142,7 @@ try {
 if ($Mode -eq "Activate") {
   Assert-NativeManifest $source $true
   Assert-NativeManifest $active $false
+  Assert-ExecutableSpeedHelp $source
   $parent=Split-Path -Parent $backup
   if (!(Test-Path -LiteralPath $parent)) {
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
