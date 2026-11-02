@@ -112,6 +112,9 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         page.on("dialog",lambda dialog:dialog.accept())
         page.goto(base+"/ui",wait_until="domcontentloaded")
         expect(page.locator("#clone-form")).to_be_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 2"),"UI horizontally overflows viewport"
+        page.keyboard.press("Tab")
+        assert page.evaluate("['BUTTON','INPUT','SELECT','A'].includes(document.activeElement.tagName)")
         from pathlib import Path as _Path
         shots=_Path("ui-test-artifacts")
         shots.mkdir(parents=True,exist_ok=True)
