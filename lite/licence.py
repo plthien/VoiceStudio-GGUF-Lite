@@ -58,6 +58,7 @@ class Licence:
     def __init__(self,settings):
         self.settings=settings
         self.dbpath=settings.data_dir/"lite.sqlite3"
+        settings.data_dir.mkdir(parents=True,exist_ok=True)
         with self.db() as conn:
             conn.execute("""CREATE TABLE IF NOT EXISTS licence_acceptance(
                 repo_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,

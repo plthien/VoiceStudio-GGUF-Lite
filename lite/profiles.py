@@ -121,11 +121,35 @@ class Store:
                        [*updates.values(), time.time(), profile_id])
         return self.get(profile_id)
 
-    def delete(self, profile_id: str, *, active_id: str | None) -> None:
-        with self.lock, self.connect() as db:
+    def delete(self, profile_id: str, *, active_id: str | None, purge: bool = False) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}",profile_id):
+            raise ProfileError("Unsafe profile identifier")
+        with self.lock:
             if active_id == profile_id:
                 raise ProfileError("Profile is currently in use")
-            if not db.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
-                raise KeyError(profile_id)
-            db.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
-        # Old version files intentionally retained until an explicit offline cleanup.
+            with self.connect() as db:
+                if not db.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
+                    raise KeyError(profile_id)
+                owned=self.root/profile_id
+                if purge and owned.exists():
+                    if owned.is_symlink() or not owned.resolve().is_relative_to(self.root.resolve()):
+                        raise ProfileError("Unsafe owned reference directory")
+                    # Move to a private staging name before the database commit.
+                    parked=self.root/(".purge-"+uuid.uuid4().hex)
+                    os.replace(owned,parked)
+                else:
+                    parked=None
+                try:
+                    db.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
+                    db.commit()
+                except BaseException:
+                    if parked is not None:
+                        os.replace(parked,owned)
+                    raise
+            if parked is not None:
+                try:
+                    shutil.rmtree(parked)
+                except OSError as exc:
+                    # Do not falsely report erased files; retain a named quarantine for review.
+                    raise ProfileError("Profile removed but owned audio cleanup needs manual review") from exc
+        # By default legacy API retains on-disk versions; purge=True is explicit.

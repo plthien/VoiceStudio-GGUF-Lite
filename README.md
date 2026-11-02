@@ -1,6 +1,6 @@
 # VoiceStudio GGUF Lite
 
-Independent localhost-only FastAPI service for pinned Q8_0 OmniVoice on Windows 10 NVIDIA GTX 1650 Vulkan0. No frontend, Electron, Torch, other TTS engines, ASR or cloud.
+Independent localhost-only FastAPI service for pinned Q8_0 OmniVoice on Windows 10 NVIDIA GTX 1650 Vulkan0. Includes a bundled local-only vanilla JavaScript Web UI at `http://127.0.0.1:3900/ui`. No Electron, React/Bun, Torch, other TTS engines, ASR or cloud.
 
 Install: `scripts/install-gguf-lite.ps1`; pinned native Vulkan-only build: `scripts/build-gguf-lite-vulkan.ps1`; preflight: `scripts/run-gguf-lite.ps1 -Preflight`; launch: `scripts/run-gguf-lite.ps1`.
 

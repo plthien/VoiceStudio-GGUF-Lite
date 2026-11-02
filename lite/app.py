@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -11,6 +12,8 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from .ui_routes import router as ui_router
+from .ui_support import legacy_sources, migration_preview, migration_apply
 from pydantic import BaseModel, Field, field_validator
 
 from .config import Settings, REPO_ID, BASE_NAME, TOKENIZER_NAME
@@ -112,6 +115,17 @@ class ProfilePatch(BaseModel):
     language: str | None = None
     consent: str | None = None
 
+class MigrationSelection(BaseModel):
+    voice_id: str = Field(min_length=1,max_length=128)
+
+    @field_validator("voice_id")
+    @classmethod
+    def safe_id(cls,value):
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}",value):
+            raise ValueError("Invalid stable voice ID")
+        return value
+
 class AcceptTerms(BaseModel):
     repo_id: str
     fingerprint: str
@@ -130,6 +144,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
     app.state.store = store or Store(settings)
     app.state.licence = licence or Licence(settings)
     app.state.runner = runner or Runner(settings)
+    app.include_router(ui_router)
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
@@ -180,6 +195,35 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         state = await asyncio.to_thread(preflight, settings)
         return {**state["quant"], "base": BASE_NAME, "tokenizer": TOKENIZER_NAME, "ready": state["ready"]}
 
+    @app.get("/lite/status")
+    def cheap_status():
+        """No GPU preflight or multi-GB hash on this route."""
+        return {"busy":app.state.runner.lock.locked(),
+                "voice_count":len(app.state.store.list()),"model":"omnivoice-gguf",
+                "quant":"Q8_0","backend_requested":"Vulkan0",
+                "ffmpeg_installed":bool(shutil.which("ffmpeg"))}
+
+    @app.get("/lite/migration/preview")
+    def migration_dry_run():
+        try:
+            db,voices=legacy_sources()
+            return migration_preview(db,voices)
+        except (ValueError,OSError,RuntimeError) as exc:
+            return failure(409,"MIGRATION_SOURCE_UNAVAILABLE","Trusted legacy source not available")
+
+    @app.post("/lite/migration/apply")
+    async def migration_selected(payload:MigrationSelection):
+        if app.state.runner.lock.locked():
+            return failure(409,"PROFILE_ACTIVE","Native inference is active")
+        try:
+            db,voices=legacy_sources()
+            result=await asyncio.to_thread(migration_apply,db,voices,settings,payload.voice_id)
+            if result["failed"]:
+                return failure(409,"MIGRATION_FAILED","Migration failed; inspect local source and permissions")
+            return result
+        except (ValueError,OSError,RuntimeError) as exc:
+            return failure(409,"MIGRATION_FAILED","Legacy source changed or unavailable")
+
     @app.get("/v1/audio/voices")
     def voices():
         return [{"id": v["id"], "voice_id": v["id"], "name": v["name"],
@@ -189,13 +233,27 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
     def profiles():
         return app.state.store.list()
 
+    @app.get("/profiles/{profile_id}/reference")
+    def reference_preview(profile_id:str):
+        row=app.state.store.get(profile_id)
+        if not row:
+            return failure(404,"PROFILE_NOT_FOUND","Unknown voice ID")
+        try:
+            reference=app.state.store.reference(row)
+            if reference.stat().st_size>settings.max_output_bytes:
+                return failure(413,"REFERENCE_TOO_LARGE","Stored audio is too large")
+            return Response(reference.read_bytes(),media_type="audio/wav",headers={
+                "Cache-Control":"no-store","X-Content-Type-Options":"nosniff"})
+        except (ProfileError,OSError):
+            return failure(409,"REFERENCE_INVALID","Stored reference is invalid")
+
     @app.get("/profiles/{profile_id}")
     def get_profile(profile_id: str):
         row = app.state.store.get(profile_id)
         return row if row else failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
 
     async def upload(name: str, ref_text: str, language: str, ref_audio: UploadFile,
-                     profile_id: str | None = None):
+                     profile_id: str | None = None, consent: str | None = None):
         if not ref_audio.filename:
             return failure(422, "AUDIO_REQUIRED", "WAV or MP3 is required")
         suffix = Path(ref_audio.filename).suffix.lower()
@@ -207,7 +265,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         try:
             return await asyncio.to_thread(app.state.store.import_audio,
                 name=name, ref_text=ref_text, language=language, source=payload,
-                suffix=suffix, profile_id=profile_id)
+                suffix=suffix, profile_id=profile_id, consent=consent)
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         except (ValueError, OSError) as exc:
@@ -215,8 +273,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
 
     @app.post("/profiles")
     async def create_profile(name: str = Form(...), ref_text: str = Form(...),
-                             language: str = Form("en"), ref_audio: UploadFile = File(...)):
-        return await upload(name, ref_text, language, ref_audio)
+                             language: str = Form("en"), ref_audio: UploadFile = File(...),
+                             consent: str | None = Form(None)):
+        return await upload(name, ref_text, language, ref_audio,consent=consent)
 
     @app.put("/profiles/{profile_id}/audio")
     async def replace_audio(profile_id: str, ref_audio: UploadFile = File(...)):
@@ -237,14 +296,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
             return failure(422, "INVALID_PROFILE", str(exc))
 
     @app.delete("/profiles/{profile_id}")
-    def delete_profile(profile_id: str):
+    def delete_profile(profile_id: str, purge: bool = False):
         try:
-            app.state.store.delete(profile_id, active_id=app.state.runner.active_id)
+            app.state.store.delete(profile_id, active_id=app.state.runner.active_id,purge=purge)
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         except ProfileError:
-            return failure(409, "PROFILE_ACTIVE", "Voice in active inference")
-        return {"deleted": True, "id": profile_id}
+            return failure(409, "PROFILE_ACTIVE", "Profile active or owned audio cleanup incomplete")
+        return {"deleted": True, "id": profile_id, "owned_reference_files_purged":purge}
 
     @app.get("/models/licenses/details/{repo_id:path}")
     def licence_details(repo_id: str):
@@ -307,7 +366,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                     "X-Lite-Request-Id": info["request_id"], "Cache-Control": "no-store",
                     **({"X-Lite-Verified-Backend":info["observed_native_backend"],
                         "X-Lite-Observed-Device":info["observed_device_identity"],
-                        "X-Lite-Verification-Status":info["verification_status"]}
+                        "X-Lite-Verification-Status":info["verification_status"],
+                        **({"X-Lite-Elapsed-S":str(info["elapsed_s"]),
+                            "X-Lite-Audio-S":str(info["audio_s"]),
+                            "X-Lite-RTF":str(info["rtf"])}
+                           if all(k in info for k in ("elapsed_s","audio_s","rtf")) else {})}
                        if info.get("verification_status")=="verified" else {})})
             finally:
                 watcher.cancel()
