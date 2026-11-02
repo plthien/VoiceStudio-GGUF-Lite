@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111925">
+  <title>VoiceStudio Lite — Local Voice Workspace</title>
+  <link rel="stylesheet" href="/ui/assets/app.css">
+  <script type="module" src="/ui/assets/app.js"></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-icon" aria-hidden="true">◉</div><div><strong>VoiceStudio <span>Lite</span></strong><small>LOCAL VOICE WORKSPACE</small></div></div>
+    <div class="workspace-label">WORKSPACE</div>
+    <nav aria-label="Main navigation" class="navigation">
+      <button type="button" class="nav-button active" data-view="clone" aria-current="page"><span aria-hidden="true">✦</span> Voice Cloning</button>
+      <button type="button" class="nav-button" data-view="library"><span aria-hidden="true">▤</span> Voice Library</button>
+      <button type="button" class="nav-button" data-view="tts"><span aria-hidden="true">◷</span> Text to Speech</button>
+      <button type="button" class="nav-button" data-view="runtime"><span aria-hidden="true">⚙</span> Runtime & Settings</button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="mini-label">CURRENT VOICE</div>
+      <div id="selected-voice" class="selected-voice">No voice selected</div>
+      <div class="line"></div>
+      <div class="sidebar-status"><span id="status-dot" class="status-dot"></span><span id="status-short">Checking local service</span></div>
+      <small>127.0.0.1 · Q8_0 only · offline</small>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div><span class="eyebrow">OMNIVOICE / GGUF Q8_0</span><h1 id="page-title">Voice Cloning</h1><p id="page-subtitle">Create a voice from an owned reference recording.</p></div>
+      <div class="topbar-actions"><span class="local-pill">● Local only</span><button type="button" class="secondary small" id="refresh-voices">Refresh voices</button></div>
+    </header>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section id="view-clone" class="view" aria-labelledby="clone-heading">
+      <div class="page-grid">
+        <div class="panel primary-panel">
+          <div class="panel-heading"><span class="step">01</span><div><h2 id="clone-heading">New voice profile</h2><p>Upload your own short recording and enter exactly what was spoken.</p></div></div>
+          <form id="clone-form">
+            <div class="two-col">
+              <label>Voice name<input required name="name" maxlength="128" placeholder="e.g. Studio narrator"></label>
+              <label>Language<select name="language" id="clone-language"><option value="en">English</option><option value="vi">Vietnamese</option><option value="fr">French</option><option value="es">Spanish</option><option value="de">German</option><option value="ja">Japanese</option><option value="zh">Chinese</option></select></label>
+            </div>
+            <label>Reference recording <span class="hint">WAV or MP3 · max 24 MB</span><input id="clone-file" name="ref_audio" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label>
+            <audio id="clone-preview" controls preload="none" hidden aria-label="New reference preview"></audio>
+            <label>Exact reference transcript<textarea name="ref_text" required maxlength="4096" rows="5" placeholder="Write exactly the words spoken in the recording. No automatic transcription is performed."></textarea></label>
+            <label class="check"><input type="checkbox" id="clone-consent" required><span>I confirm I have permission and consent to use this voice recording for local testing.</span></label>
+            <div class="actions"><button type="submit" class="primary" id="clone-submit">Create voice profile</button><span id="clone-result" class="muted" aria-live="polite"></span></div>
+          </form>
+        </div>
+        <div class="side-stack">
+          <div class="panel info-panel"><span class="overline">HOW IT WORKS</span><h3>Reference-conditioned cloning</h3><ol class="steps"><li><strong>Add a recording</strong><span>Use an owned WAV or MP3.</span></li><li><strong>Enter the transcript</strong><span>Exact spoken words are required.</span></li><li><strong>Generate speech</strong><span>Choose your new stable voice ID in TTS.</span></li></ol></div>
+          <div class="panel warning-panel"><span class="overline">IMPORTANT</span><h3>No model training</h3><p>Lite performs zero-shot reference-conditioned synthesis. Nothing is uploaded to external services, and voice ownership is not automatically verified.</p><p>Model / output commercial rights are not cleared.</p></div>
+        </div>
+      </div>
+    </section>
+    <section id="view-library" class="view" aria-labelledby="library-heading" hidden>
+      <div class="panel">
+        <div class="panel-heading split"><div><span class="overline">YOUR LOCAL STORAGE</span><h2 id="library-heading">Voice Library</h2><p>Stable IDs and versioned reference recordings.</p></div><button type="button" class="secondary" id="library-refresh">Refresh list</button></div>
+        <div id="voice-list" class="voice-list" aria-live="polite"></div>
+        <div id="library-empty" class="empty" hidden><h3>No saved voices yet</h3><p>Start with an owned reference and its exact transcript.</p><button type="button" class="primary" data-goto="clone">Create a voice</button></div>
+      </div>
+      <div class="panel" id="editor-panel" hidden>
+        <div class="panel-heading"><div><span class="overline">PROFILE DETAILS</span><h2>Edit selected voice</h2></div></div>
+        <p id="editor-id" class="mono muted"></p>
+        <form id="edit-form">
+          <div class="two-col"><label>Name<input name="name" required maxlength="128"></label><label>Language<input name="language" required maxlength="32"></label></div>
+          <label>Exact reference transcript<textarea name="ref_text" required rows="4" maxlength="4096"></textarea></label>
+          <div class="actions"><button class="primary" type="submit" id="edit-save">Save profile</button><button class="secondary" type="button" id="reference-play">Preview saved reference</button></div>
+        </form>
+        <audio id="saved-preview" controls hidden aria-label="Stored normalized reference"></audio>
+        <div class="subsection"><h3>Replace reference audio</h3><p class="muted">This increments the version without changing the voice ID.</p><form id="replace-form"><label>New WAV or MP3<input type="file" name="ref_audio" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label><button class="secondary" type="submit" id="replace-submit">Replace recording</button></form></div>
+        <div class="subsection danger-area"><h3>Delete voice</h3><p>Delete the selected Lite profile and its owned reference files, or remove only its database record (retaining files). The original VoiceStudio data is never deleted.</p><button type="button" class="danger" id="delete-purge">Delete profile and owned audio</button><button type="button" class="secondary" id="delete-only">Remove profile only (keep files)</button></div>
+      </div>
+      <div class="panel">
+        <div class="panel-heading split"><div><span class="overline">READ-ONLY SOURCE</span><h2>Import legacy voices</h2><p>Configured locally on the server. No arbitrary browser paths.</p></div><button type="button" class="secondary" id="migration-preview">Preview migration</button></div>
+        <p class="muted">Set <code>GGUF_LITE_LEGACY_ROOT</code> on the server. Dry-run never changes original VoiceStudio files.</p>
+        <div id="migration-feedback" role="status" aria-live="polite"></div><div id="migration-list" class="voice-list"></div>
+        <div class="actions"><label for="migration-choice">Choose one eligible voice</label><select id="migration-choice" aria-label="Legacy voice to import"><option value="">Preview sources first</option></select><button type="button" id="migration-apply" class="primary" disabled>Import selected voice</button></div>
+      </div>
+    </section>
+    <section id="view-tts" class="view" aria-labelledby="tts-heading" hidden>
+      <div class="page-grid">
+        <div class="panel primary-panel">
+          <div class="panel-heading"><span class="step">02</span><div><h2 id="tts-heading">Generate speech</h2><p>One native NVIDIA Vulkan0 inference at a time.</p></div></div>
+          <form id="tts-form">
+            <label>Saved voice<select id="tts-voice" name="voice" required><option value="">Select a voice</option></select></label>
+            <label>Text to speak<textarea id="tts-text" rows="8" maxlength="4096" required placeholder="Type the words you want to synthesize…"></textarea></label>
+            <div class="two-col"><label>Language <span class="hint">Optional</span><select id="tts-language"><option value="">Use voice language</option><option value="en">English</option><option value="vi">Vietnamese</option><option value="fr">French</option><option value="es">Spanish</option><option value="de">German</option></select></label><label>Seed <span class="hint">Optional</span><input type="number" id="tts-seed" min="0" max="2147483647" step="1" value="42"></label></div>
+            <div class="actions"><button type="submit" id="tts-submit" class="primary">Generate WAV</button><button type="button" class="secondary" id="tts-cancel" disabled>Cancel request</button><span id="tts-state" class="muted" role="status">Idle</span></div>
+          </form>
+          <div id="tts-output" class="result-panel" hidden><h3>Generated audio</h3><p id="tts-proof" class="muted"></p><audio id="tts-player" controls preload="metadata"></audio><div class="actions"><a id="tts-download" class="download" download="voice.wav">Download 24 kHz WAV</a><span id="tts-timing" class="muted"></span></div></div>
+        </div>
+        <div class="side-stack"><div class="panel info-panel"><span class="overline">OUTPUT CONTRACT</span><h3>24 kHz · Mono · PCM16</h3><p>No speed slider, WPM control, alignment or cloud model. Lite returns raw native WAV.</p></div><div class="panel warning-panel"><span class="overline">VERIFICATION</span><p id="tts-native-summary">Native device verification appears only after a successful server response with an NVIDIA GTX 1650 Vulkan0 attestation.</p></div></div>
+      </div>
+    </section>
+    <section id="view-runtime" class="view" aria-labelledby="runtime-heading" hidden>
+      <div class="panel">
+        <div class="panel-heading split"><div><span class="overline">PINNED LOCAL ENGINE</span><h2 id="runtime-heading">Runtime & Settings</h2><p>Read-only verification. Refresh only when needed; Q8 checks are expensive.</p></div><button type="button" class="primary" id="runtime-refresh">Refresh readiness</button></div>
+        <p id="runtime-checked" class="muted">Not yet checked</p><div id="runtime-summary" class="metric-grid"></div><div id="runtime-details" class="detail-grid"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-heading"><div><span class="overline">MODEL RIGHTS</span><h2>Licence & provenance</h2><p>Application AGPL terms do not grant commercial model or output permission.</p></div></div>
+        <div id="licence-details" class="detail-grid"></div><p class="warning-text">Commercial use and output rights: RESTRICTED / NOT CLEARED. The historical model notice revision differs from the pinned model revision.</p>
+        <form id="licence-form"><label class="check"><input type="checkbox" id="licence-review" required><span>I have personally inspected the exact pinned model/component terms and understand this local acceptance does not grant commercial rights.</span></label><div class="actions"><button class="secondary" type="submit" id="licence-accept">Accept reviewed notice</button><button type="button" class="secondary" id="licence-withdraw">Withdraw acceptance</button></div></form>
+      </div>
+      <div class="panel"><div class="panel-heading"><div><span class="overline">OWNER DIAGNOSTIC</span><h2>Three-request UI diagnostic</h2><p>Frozen 306-character text, seed 42. This is NOT the authoritative CLI benchmark.</p></div></div><p>Three sequential calls using the selected profile. No automatic start, speed adjustment or retry.</p><div class="actions"><button class="secondary" type="button" id="diagnostic-start">Run 3 verified requests</button><button class="secondary" type="button" id="diagnostic-export" disabled>Export diagnostic JSON</button></div><p id="diagnostic-state" class="muted" role="status">Not started</p></div>
+      <div class="panel"><h3>Local troubleshooting</h3><p>Run <code>scripts/run-gguf-lite.ps1 -Preflight</code> in PowerShell. If <code>vulkaninfo</code> fails on your GTX 1650 + AMD iGPU host, use <code>$env:VK_LOADER_LAYERS_DISABLE="VK_LAYER_AMD_switchable_graphics*"</code> within that PowerShell session only. Do not disable GPU proof.</p></div>
+    </section>
+    <footer class="footer">VoiceStudio GGUF Lite · Local-only development tool · No external telemetry · Model rights require independent review</footer>
+  </main>
+</div>
+</body>
+</html>
