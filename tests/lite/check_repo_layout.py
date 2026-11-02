@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory() as tmp:
           "/models/licenses/acceptance/{repo_id}","/models/licenses/accept",
           "/v1/audio/speech","/lite/status","/profiles/{profile_id}/reference",
           "/lite/migration/preview","/lite/migration/apply",
-          "/lite/speed-capability"},routes
+          "/lite/speed-capability","/lite/pause-capability"},routes
         assert c.get("/ui").status_code==200
         assert c.get("/ui/assets/app.js").status_code==200
         assert c.get("/ui/assets/missing.js").status_code==404
