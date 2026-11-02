@@ -248,3 +248,31 @@ def test_same_native_untagged_wav_bytes_at_seed_42(system):
     assert first.status_code==second.status_code==200
     assert first.content==second.content
     assert "x-lite-pause-count" not in first.headers
+
+def test_shutdown_between_native_spans_cancels_entire_request(system):
+    from lite.pause import parse_pause_script
+    app,runner,settings,pairs,root=system
+    entered=asyncio.Event()
+    original=runner._paused_span
+    calls=[0]
+    async def waiting(**kwargs):
+        calls[0]+=1
+        if calls[0]==2:
+            entered.set()
+            await asyncio.Event().wait()
+        return await original(**kwargs)
+    runner._paused_span=waiting
+    async def run():
+        task=asyncio.create_task(runner.generate_paused(
+            script=parse_pause_script("Alpha[pause 200ms]Beta"),
+            profile={"id":"owned-voice","ref_text":"EXACT OWNED REFERENCE","language":"en"},
+            reference=root/"owned-ref.wav",language="en",seed=42,request_id="shutdown"))
+        await asyncio.wait_for(entered.wait(),timeout=8)
+        assert runner.lock.locked() and runner.active_id=="owned-voice"
+        await asyncio.wait_for(runner.stop(),timeout=8)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert runner.process is None and runner.active_id is None
+        assert runner._paused_task is None and not runner.lock.locked()
+        assert not list(root.glob("lite-pause-*"))
+    asyncio.run(run())
