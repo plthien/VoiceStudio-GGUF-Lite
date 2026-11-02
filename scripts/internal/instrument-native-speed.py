@@ -101,8 +101,11 @@ static int duration_estimate_tokens_speed(const std::string & target_text,
        "                          float        prompt_duration_sec,\n                          bool         prompt_denoise,",
        "                          float        prompt_duration_sec,\n                          float        prompt_speed,\n                          bool         prompt_denoise,")
     replace("tools/omnivoice-tts.cpp",
+       "            params.T_override          = T_override;\n            params.chunk_duration_sec",
+       "            params.T_override          = T_override;\n            params.speed               = prompt_speed;\n            params.chunk_duration_sec")
+    replace("tools/omnivoice-tts.cpp",
        "    params.T_override          = T_override;\n    params.chunk_duration_sec",
-       "    params.T_override          = T_override;\n    params.speed               = prompt_speed;\n    params.chunk_duration_sec",2)
+       "    params.T_override          = T_override;\n    params.speed               = prompt_speed;\n    params.chunk_duration_sec")
     replace("tools/omnivoice-tts.cpp",
        "    float        prompt_duration_sec    = 0.0f;",
        "    float        prompt_duration_sec    = 0.0f;\n    float        prompt_speed           = 1.0f;\n    bool         prompt_speed_seen      = false;")
