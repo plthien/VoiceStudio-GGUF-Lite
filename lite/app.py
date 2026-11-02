@@ -24,6 +24,7 @@ from .profiles import Store, ProfileError
 from .runtime import preflight, RuntimeErrorLite
 from .readiness import complete_readiness
 from .speed import native_speed_capability, speed_to_native
+from .pause import parse_pause_script, PauseError
 
 logger = logging.getLogger("gguf_lite")
 
@@ -403,14 +404,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
 
     @app.post("/v1/audio/speech")
     async def speech(payload: Speech, request: Request):
+        try:
+            pause_script=parse_pause_script(payload.input)
+        except PauseError as exc:
+            return failure(422,exc.code,"Invalid or excessive inline pause script")
         # Non-queuing admission: once acquired, profile row/reference remain
         # stable until native success, failure, disconnect or termination.
         if app.state.admission.locked() or app.state.runner.lock.locked():
             return failure(429,"NATIVE_BUSY","One native inference already active",retry=True)
         async with app.state.admission:
-            return await _speech_admitted(payload,request)
+            return await _speech_admitted(payload,request,pause_script)
 
-    async def _speech_admitted(payload:Speech,request:Request):
+    async def _speech_admitted(payload:Speech,request:Request,pause_script=None):
         state = app.state
         if state.runner.lock.locked():
             return failure(429, "NATIVE_BUSY", "One native inference already active", retry=True)
@@ -439,7 +444,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                         request_id=str(uuid.uuid4()))
             # Default speed preserves every old runner/provider call signature.
             if payload.speed!=1.0: kwargs["speed"]=effective_speed
-            generation=asyncio.create_task(state.runner.generate(**kwargs))
+            if pause_script is None:
+                generation=asyncio.create_task(state.runner.generate(**kwargs))
+            else:
+                kwargs.pop("text")
+                kwargs["script"]=pause_script
+                generation=asyncio.create_task(state.runner.generate_paused(**kwargs))
             watcher=asyncio.create_task(detect_disconnect())
             try:
                 done,_=await asyncio.wait({generation,watcher},
@@ -456,7 +466,30 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                     "NVIDIA" not in info.get("observed_device_identity","") or
                     "GTX 1650" not in info.get("observed_device_identity","")):
                     return failure(500,"NATIVE_PROOF_MISSING","Native GPU proof was not verified")
+                pause_headers={}
+                if pause_script is not None:
+                    expected={"pause_count":pause_script.pause_count,
+                              "pause_frames":pause_script.pause_frames,
+                              "speech_segments":pause_script.speech_segments}
+                    if any(info.get(k)!=v for k,v in expected.items()):
+                        return failure(500,"PAUSE_ASSEMBLY_FAILED","Pause metadata mismatch")
+                    audio_frames=info.get("audio_frames")
+                    speech_frames=info.get("speech_frames")
+                    if (not isinstance(audio_frames,int) or
+                        not isinstance(speech_frames,int) or
+                        speech_frames<=0 or
+                        audio_frames!=speech_frames+pause_script.pause_frames):
+                        return failure(500,"PAUSE_ASSEMBLY_FAILED","Pause frame mismatch")
+                    pause_headers={
+                        "X-Lite-Pause-Count":str(pause_script.pause_count),
+                        "X-Lite-Pause-S":str(pause_script.pause_frames/24000),
+                        "X-Lite-Speech-S":str(speech_frames/24000),
+                        "X-Lite-Audio-S":str(audio_frames/24000),
+                        "X-Lite-Speech-Segments":str(pause_script.speech_segments),
+                        "X-Lite-Speech-RTF":str(info.get("speech_rtf","")),
+                    }
                 return Response(data, media_type="audio/wav", headers={
+                    **pause_headers,
                     "X-Lite-Request-Id": info["request_id"], "Cache-Control": "no-store",
                     "X-Lite-Requested-Speed":repr(payload.speed),
                     "X-Lite-Effective-Speed":speed_arg,
