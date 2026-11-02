@@ -83,8 +83,16 @@ class Runner:
         self.lock = asyncio.Lock()
         self.active_id: str | None = None
         self.process: asyncio.subprocess.Process | None = None
+        self._paused_task: asyncio.Task | None = None
 
     async def stop(self):
+        # A paused request can be BETWEEN native spans while still owning
+        # the GPU lock. Stop the entire request, not only the current child.
+        active=self._paused_task
+        if active is not None and not active.done() and active is not asyncio.current_task():
+            active.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await active
         if self.process is not None and self.process.returncode is None:
             await self._terminate(self.process)
 
@@ -210,6 +218,7 @@ class Runner:
         if speed!=1.0 and not native_speed_capability(self.settings)["supported"]:
             raise RuntimeErrorLite("NATIVE_SPEED_UNAVAILABLE")
         async with self.lock:
+            self._paused_task=asyncio.current_task()
             self.active_id=profile["id"]
             started=time.monotonic()
             deadline=started+self.settings.timeout
@@ -280,6 +289,7 @@ class Runner:
                         raise
                 self.process=None
                 self.active_id=None
+                self._paused_task=None
 
     async def _paused_span(self, *, exe:Path, base:Path, codec:Path, gpu:dict,
                            profile:dict,reference:Path,language:str|None,
