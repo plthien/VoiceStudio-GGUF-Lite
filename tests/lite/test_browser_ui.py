@@ -159,6 +159,9 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#tts-output")).to_be_visible()
         page.locator("#tts-text").fill("slow")
         page.locator("#tts-submit").click()
+        # Ensure native owns the slot BEFORE aborting; otherwise the POST may
+        # race with navigation and the later 429 is correct, not a recovery bug.
+        page.wait_for_function("() => fetch('/lite/status').then(r=>r.json()).then(s=>s.busy)",timeout=8000)
         page.locator('[data-view="library"]').click()
         expect(page.locator("#view-library")).to_be_visible()
         expect(page.locator("#tts-output")).to_be_hidden()
