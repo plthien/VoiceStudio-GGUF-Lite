@@ -35,6 +35,28 @@ jobs:
           ffmpeg -version
       - name: Compile and verify pinned native speed patch (no GPU)
         run: python scripts/internal/verify-native-speed.py
+      - name: NS04 Windows PowerShell 5.1 real process cleanup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+            throw 'NOT VERIFIED: Windows PowerShell 5.1 is not installed'
+          }
+          & powershell.exe -NoProfile -Command 'if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { exit 2 }'
+          if ($LASTEXITCODE -ne 0) { throw 'NOT VERIFIED: powershell.exe is not Windows PowerShell 5.1' }
+          python -m pytest tests/lite/test_speed_candidate_switch.py -vv -ra --timeout=35 -k WindowsPowerShell5_1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell 5.1 NS04 behavioral tests failed' }
+      - name: NS04 PowerShell 7 real process cleanup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Get-Command pwsh.exe -ErrorAction SilentlyContinue)) {
+            throw 'NOT VERIFIED: PowerShell 7 is not installed'
+          }
+          & pwsh.exe -NoProfile -Command 'if ($PSVersionTable.PSVersion.Major -lt 7) { exit 2 }'
+          if ($LASTEXITCODE -ne 0) { throw 'NOT VERIFIED: pwsh.exe is not PowerShell 7' }
+          python -m pytest tests/lite/test_speed_candidate_switch.py -vv -ra --timeout=35 -k PowerShell7
+          if ($LASTEXITCODE -ne 0) { throw 'PowerShell 7 NS04 behavioral tests failed' }
       - name: Behavioral tests
         run: python -m pytest tests/lite -vv -ra --timeout=30
       - name: Synthetic streaming SHA overhead (not user-host benchmark)
