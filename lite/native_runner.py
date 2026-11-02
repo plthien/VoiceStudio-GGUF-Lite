@@ -48,6 +48,34 @@ def native_attestation(stderr: bytes, detected: dict) -> dict:
             "verification_evidence":"native-stderr:LiteAttest/v1",
             "verification_status":"verified"}
 
+async def _bounded_communicate(proc: asyncio.subprocess.Process, payload: bytes) -> bytes:
+    """Pipe is drained incrementally; never buffer arbitrary native stderr."""
+    async def read_stderr():
+        pieces=[]
+        total=0
+        while True:
+            chunk=await proc.stderr.read(8192)
+            if not chunk:
+                return b"".join(pieces)
+            total+=len(chunk)
+            if total>131072:
+                raise NativeFailure("Native verification stderr exceeded 128 KiB")
+            pieces.append(chunk)
+
+    async def send_stdin():
+        try:
+            proc.stdin.write(payload)
+            await proc.stdin.drain()
+        except (BrokenPipeError,ConnectionResetError):
+            pass
+        finally:
+            proc.stdin.close()
+            with contextlib.suppress(BrokenPipeError,ConnectionResetError):
+                await proc.stdin.wait_closed()
+
+    _,data,_=await asyncio.gather(send_stdin(),read_stderr(),proc.wait())
+    return data
+
 class Runner:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -120,8 +148,8 @@ class Runner:
                         creationflags=(getattr(__import__("subprocess"), "CREATE_NEW_PROCESS_GROUP", 0)
                                        if os.name == "nt" else 0))
                     try:
-                        _, stderr = await asyncio.wait_for(
-                            self.process.communicate(text.encode("utf-8")),
+                        stderr = await asyncio.wait_for(
+                            _bounded_communicate(self.process, text.encode("utf-8")),
                             timeout=self.settings.timeout)
                     except asyncio.TimeoutError as exc:
                         await self._terminate(self.process)
@@ -149,6 +177,11 @@ class Runner:
             finally:
                 # Reap the whole owned tree even if cancellation happens before communicate().
                 if self.process is not None and self.process.returncode is None:
-                    await asyncio.shield(self._terminate(self.process))
+                    cleanup=asyncio.create_task(self._terminate(self.process))
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        await cleanup
+                        raise
                 self.process = None
                 self.active_id = None

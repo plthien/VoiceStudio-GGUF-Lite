@@ -33,3 +33,15 @@ jobs:
         run: python -m pytest tests/lite -vv -ra --timeout=30
       - name: Repo structural gate
         run: python tests/lite/check_repo_layout.py
+      - name: Windows PowerShell parser (no host execution)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bad = @()
+          Get-ChildItem scripts -Filter '*.ps1' -File | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors) { $bad += $errors }
+          }
+          if ($bad.Count) { $bad | Out-String | Write-Error; exit 1 }

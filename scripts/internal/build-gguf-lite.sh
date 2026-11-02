@@ -1,23 +1,6 @@
 #!/usr/bin/env bash
-# Build the `omnivoice-tts` binary from a pinned omnivoice.cpp commit SHA.
-#
-# Phase 4 Plan 04-01 (GGUF-03 / GATE-03). Runs in CI for every PR that
-# touches `backend/engines/omnivoice_gguf/` and on every release. The
-# bundled output goes to `bin/omnivoice-tts-<platform>` (with .exe on
-# Windows) and a SHA-256 line is appended to `bin/checksums.sha256`.
-#
-# Usage:
-#   scripts/build-omnivoice-tts.sh \
-#       --platform {darwin-arm64|darwin-x86_64|windows-x86_64|linux-x86_64|linux-aarch64} \
-#       --commit-sha <40hex>
-#
-# Required tools: git, cmake, ninja or make, a working C++17 compiler,
-# `sha256sum` (Linux) or `shasum -a 256` (macOS) or `CertUtil` (Windows).
-#
-# Hard exits:
-#   * exit 2 — macOS Apple Silicon + cmake -DGGML_METAL=ON failed. The
-#     caller (CI matrix) treats this as a documented Pitfall 1 fallback:
-#     macOS Apple Silicon stays on the in-process VoiceStudioBackend.
+# Lite-only Windows x86_64 Vulkan source-build, pinned to 886fc0798.
+# No legacy VoiceStudio dependency tree or fallback build for non-Vulkan targets.
 set -euo pipefail
 
 PLATFORM=""

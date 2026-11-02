@@ -38,3 +38,12 @@ def test_malformed_length_rejected(client):
                        headers={"Content-Length":"-1","Content-Type":"application/json"})
     assert result.status_code in (400,422,403)
 
+
+def test_chunked_payload_without_content_length_hits_receive_cap(client):
+    def stream():
+        for _ in range(70):
+            yield b"x"*1024
+    result=client.post("/v1/audio/speech",content=stream(),
+                       headers={"Content-Type":"application/json"})
+    assert result.status_code==413
+    assert result.json()["error"]["code"]=="BODY_TOO_LARGE"

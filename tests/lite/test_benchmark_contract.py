@@ -4,7 +4,17 @@ from pathlib import Path
 import pytest
 from lite.benchmark import TEXT,TEXT_SHA256,_device_proof,run
 from lite.audio_metrics import measure
-from tests.lite.test_profiles_and_audio import sample_wav
+import io
+import wave
+
+def sample_wav():
+    b=io.BytesIO()
+    with wave.open(b,"wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(24000)
+        out.writeframes(b"\x01\x00"*24000)
+    return b.getvalue()
 
 def test_frozen_case_length_and_sha():
     assert len(TEXT)==306

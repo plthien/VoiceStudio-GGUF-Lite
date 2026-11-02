@@ -28,6 +28,10 @@ if b"slow" in data:
     time.sleep(4)
 if b"failed" in data:
     sys.exit(9)
+if b"noisy" in data:
+    sys.stderr.buffer.write(b"x"*150000)
+    sys.stderr.flush()
+    time.sleep(1)
 print("[LiteAttest/v1] backend=Vulkan0; device=Vulkan0; description=NVIDIA GeForce GTX 1650",file=sys.stderr)
 with wave.open(args.o, "wb") as out:
     out.setnchannels(1)
@@ -100,5 +104,15 @@ def test_concurrent_native_busy_rejects_without_queue(fixture):
         await runner.stop()
         with pytest.raises((NativeFailure,Exception)):
             await first
+    asyncio.run(execute())
+    assert not list(root.glob("lite-*"))
+
+def test_large_native_stderr_never_publishes_wav(fixture):
+    runner,root=fixture
+    runner.settings=Settings(data_dir=root,cache_dir=root,bin_dir=runner.settings.bin_dir,timeout=8)
+    async def execute():
+        with pytest.raises(NativeFailure):
+            await runner.generate(**_params(root,"noisy"))
+        assert runner.process is None and runner.active_id is None
     asyncio.run(execute())
     assert not list(root.glob("lite-*"))
