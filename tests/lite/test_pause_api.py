@@ -276,3 +276,22 @@ def test_shutdown_between_native_spans_cancels_entire_request(system):
         assert runner._paused_task is None and not runner.lock.locked()
         assert not list(root.glob("lite-pause-*"))
     asyncio.run(run())
+
+def test_reference_integrity_rechecked_before_final_wav(system):
+    from lite.profiles import ProfileError
+    app,runner,settings,pairs,root=system
+    original=app.state.store.reference
+    calls=[0]
+    def changed(row):
+        calls[0]+=1
+        if calls[0]>1:
+            raise ProfileError("External reference was modified mid-script")
+        return original(row)
+    app.state.store.reference=changed
+    with TestClient(app) as client:
+        response=client.post("/v1/audio/speech",json=body("A[pause 200ms]B"))
+    assert response.status_code==409
+    assert response.json()["error"]["code"]=="REFERENCE_INVALID"
+    assert response.headers["content-type"].startswith("application/json")
+    assert calls[0]==2
+    assert runner.process is None and not runner.lock.locked()
