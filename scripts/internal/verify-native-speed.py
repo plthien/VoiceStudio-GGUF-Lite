@@ -40,7 +40,7 @@ def main():
         assert "float speed;" not in (upstream/"src/omnivoice.h").read_text()
         assert "p->speed" not in (upstream/"src/omnivoice.cpp").read_text()
         assert "ov_synthesize_with_speed(" in (upstream/"src/omnivoice.cpp").read_text()
-        assert "float lite_speed)" in (upstream/"src/pipeline-tts.h").read_text()
+        assert "float                 lite_speed);" in (upstream/"src/pipeline-tts.h").read_text()
         p=(upstream/"src/pipeline-tts.cpp").read_text()
         assert p.count("duration_estimate_tokens_speed(")==4
         assert p.count("lite_speed, params->denoise")==2
