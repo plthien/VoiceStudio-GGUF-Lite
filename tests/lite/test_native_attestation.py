@@ -16,7 +16,8 @@ def test_genuine_schema_contract():
     b"[LiteAttest/v1] backend=Vulkan1; device=Vulkan1; description=NVIDIA GeForce GTX 1650\n",
     b"[LiteAttest/v1] backend=Vulkan0; device=Vulkan0; description=AMD Radeon 780M\n",
     VALID+VALID,VALID+b"[LiteAttest/v1] malformed\n",b"x"*131073,
-])
+], ids=["empty","requested-env-only","discovery-only","cpu",
+        "vulkan1","amd","duplicate","malformed","oversize-131073"])
 def test_rejects_missing_cpu_amd_vulkan1_duplicate_and_overflow(stderr):
     with pytest.raises(NativeFailure):
         native_attestation(stderr,ADAPTER)
