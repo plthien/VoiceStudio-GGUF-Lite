@@ -1,6 +1,6 @@
 // Compiled against the EXACT patched pinned src/duration-estimator.h in CI.
 #include "duration-estimator.h"
-#include "lite-native-speed.h"
+// Included transitively from the patched pinned duration-estimator.h.
 #include <cassert>
 #include <climits>
 #include <cmath>
