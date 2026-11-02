@@ -76,7 +76,13 @@ def run(voice_id:str,output:Path,port:int=3900,repetitions:int=3,policy:str="war
     exe,dll=native_files(settings)
     pins=json.loads((Path(__file__).resolve().parent/"resources/q8_pins.json").read_text(encoding="utf-8"))
     output.mkdir(parents=True,exist_ok=True)
-    report={"benchmark_case_id":"Ink-Explainer-306","source_head_sha":None,
+    try:
+        head=subprocess.run(["git","rev-parse","HEAD"],
+            cwd=Path(__file__).resolve().parents[1],capture_output=True,
+            text=True,timeout=5,check=True).stdout.strip()
+    except (OSError,subprocess.SubprocessError):
+        head=None
+    report={"benchmark_case_id":"Ink-Explainer-306","source_head_sha":head,
        "narration_sha256":TEXT_SHA256,"character_count":306,"seed":42,
        "profile_id":voice_id,"profile_version":profile["version"],
        "ref_audio_sha256":profile["source_sha256"],"normalized_ref_sha256":profile["ref_sha256"],

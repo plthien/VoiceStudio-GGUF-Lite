@@ -2,7 +2,9 @@
 from pathlib import Path
 import re
 import subprocess
+import sys
 root=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(root))
 paths=set(subprocess.run(["git","ls-files"],cwd=root,check=True,capture_output=True,text=True).stdout.splitlines())
 for prefix in ("backend/","frontend/","electron/","tauri/","mobile/","deploy/","examples/"):
     assert not any(p.startswith(prefix) for p in paths),prefix
