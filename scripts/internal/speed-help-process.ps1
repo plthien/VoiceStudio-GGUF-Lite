@@ -80,8 +80,11 @@ function Assert-ExecutableSpeedHelp([string]$directory) {
     if (!$proc.WaitForExit(8000)) {
       throw "NS04: Native Speed candidate --help timed out after 8 seconds"
     }
-    if ($proc.ExitCode -ne 0) {
-      throw "Native Speed candidate --help returned nonzero exit code"
+    $proc.Refresh()
+    if (!$proc.HasExited) { throw "NS04: candidate is still running after WaitForExit" }
+    $exitCode=[int]$proc.ExitCode
+    if ($exitCode -ne 0) {
+      throw "Native Speed candidate --help returned nonzero exit code $exitCode"
     }
     $outSize=(Get-Item -LiteralPath $stdout).Length
     $errSize=(Get-Item -LiteralPath $stderr).Length
