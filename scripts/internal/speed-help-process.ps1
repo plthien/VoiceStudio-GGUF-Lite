@@ -53,7 +53,7 @@ function Stop-SpeedHelpTree([System.Diagnostics.Process]$process, [long]$startTi
     if ($killCode -ne 0) {
       # A natural-exit race is acceptable only after verifying the original
       # process handle exited. Do not claim taskkill successfully killed it.
-      Write-Verbose "NS04: taskkill returned $killCode; original candidate already exited."
+      Write-Warning "NS04: taskkill returned $killCode after original candidate exited (natural-exit race)."
     }
   } finally {
     $killer.Dispose()
@@ -70,7 +70,13 @@ function Assert-ExecutableSpeedHelp([string]$directory) {
   try {
     # Fixed --help argument; Start-Process uses the literal executable path.
     $proc=Start-Process -FilePath $exe -ArgumentList @("--help") -WorkingDirectory $directory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -NoNewWindow -PassThru -ErrorAction Stop
-    $startTicks=$proc.StartTime.ToUniversalTime().Ticks
+    if (!$proc.HasExited) {
+      try {
+        $startTicks=$proc.StartTime.ToUniversalTime().Ticks
+      } catch {
+        if (!$proc.HasExited) { throw "NS04: cannot capture candidate process identity: $($_.Exception.Message)" }
+      }
+    }
     if (!$proc.WaitForExit(8000)) {
       throw "NS04: Native Speed candidate --help timed out after 8 seconds"
     }
@@ -92,6 +98,7 @@ function Assert-ExecutableSpeedHelp([string]$directory) {
     if ($null -ne $proc) {
       try {
         if (!$proc.HasExited) {
+          if ($startTicks -le 0L) { throw "NS04: cannot terminate candidate without verified start identity" }
           Stop-SpeedHelpTree $proc $startTicks
         }
         if (!$proc.HasExited) { throw "NS04: original candidate process is still running" }
