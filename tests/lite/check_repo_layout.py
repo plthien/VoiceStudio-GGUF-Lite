@@ -13,6 +13,9 @@ for name in ("pyproject.toml","uv.lock","bun.lock","package.json"):
 required=("LICENSE","LICENSE-NOTICE.md","README.md","lite/resources/q8_pins.json",
           "lite/resources/model_notice.json","scripts/internal/build-gguf-lite.sh",
           "scripts/internal/omnivoice-vulkan.sh","scripts/internal/instrument-attestation.py",
+          "scripts/internal/instrument-native-speed.py","scripts/internal/lite-native-speed.h",
+          "scripts/internal/native-speed-ci.cpp","scripts/internal/verify-native-speed.py",
+          "scripts/switch-gguf-lite-runtime.ps1","lite/speed.py",
           "scripts/build-gguf-lite-vulkan.ps1","scripts/benchmark-gguf-lite.ps1",
           "lite/ui/index.html","lite/ui/assets/app.css","lite/ui/assets/app.js",
           "lite/ui/assets/api.js","lite/ui_routes.py","lite/ui_support.py")
@@ -22,7 +25,8 @@ for file in (root/"lite").rglob("*.py"):
     text=file.read_text(encoding="utf-8")
     assert 'backend/' not in text and 'import backend' not in text,str(file)
 for p in ("README.md","LICENSE-NOTICE.md","docs/gguf-lite.md",
-          "docs/gguf-lite-ui.md","docs/integrations/youtube-ai-studio-tts-contract.md"):
+          "docs/gguf-lite-ui.md","docs/gguf-lite-native-speed.md",
+          "docs/integrations/youtube-ai-studio-tts-contract.md"):
     text=(root/p).read_text(encoding="utf-8")
     for target in re.findall(r'\]\(([^)]+)\)',text):
         if "://" in target or target.startswith("#") or target.startswith("mailto:"):
@@ -46,7 +50,8 @@ with tempfile.TemporaryDirectory() as tmp:
           "/profiles/{profile_id}/audio","/models/licenses/details/{repo_id}",
           "/models/licenses/acceptance/{repo_id}","/models/licenses/accept",
           "/v1/audio/speech","/lite/status","/profiles/{profile_id}/reference",
-          "/lite/migration/preview","/lite/migration/apply"},routes
+          "/lite/migration/preview","/lite/migration/apply",
+          "/lite/speed-capability"},routes
         assert c.get("/ui").status_code==200
         assert c.get("/ui/assets/app.js").status_code==200
         assert c.get("/ui/assets/missing.js").status_code==404
