@@ -77,3 +77,14 @@ def test_instrumentation_uses_only_explicit_interpreter():
     assert '\npython "$REPO_ROOT/scripts/internal/instrument-attestation.py"' not in bash
     assert 'SetEnvironmentVariable("GGUF_LITE_BUILD_PYTHON",$pythonExe,"Process")' in powershell
     assert 'SetEnvironmentVariable("GGUF_LITE_BUILD_PYTHON",$previousBuildPython,"Process")' in powershell
+
+
+def test_native_speed_patch_uses_pinned_python_and_not_untracked_cli():
+    bash=SH.read_text()
+    ps=PS.read_text()
+    assert '"$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-native-speed.py"' in bash
+    assert "instrument-native-speed.py" in ps and "lite-native-speed.h" in ps
+    assert "speed-capability.json" in bash and "speed-capability.json" in ps
+    assert "-OutputRuntime" not in bash  # only explicit owner-controlled PowerShell staging option
+    assert "$OutputRuntime" in ps
+    assert "A Lite native runtime exists" in ps
