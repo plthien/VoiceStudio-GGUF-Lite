@@ -180,3 +180,45 @@ def test_n01_replacement_with_different_transcript_is_busy_during_speech(tmp_pat
             leave.set()
             assert (await asyncio.wait_for(speaking,timeout=5)).status_code==200
     asyncio.run(exercise())
+
+
+import pytest
+
+@pytest.mark.parametrize("engine_ok,accepted,reconciled,ffmpeg",[
+    (True, True, True, True),
+    (True, True, True, False),
+    (True, False, True, True),
+    (True, True, False, True),
+    (False, True, True, True),
+],ids=["all-ready","no-ffmpeg","unaccepted-terms","unreconciled-terms","no-engine"])
+def test_n02_cli_http_same_full_truth_table(
+        tmp_path,monkeypatch,capsys,engine_ok,accepted,reconciled,ffmpeg):
+    import lite.app as appmod
+    import lite.preflight as climod
+    from lite.licence import Licence
+    s=Settings(data_dir=tmp_path/"data",cache_dir=tmp_path/"cache",bin_dir=tmp_path/"bin",timeout=30)
+    raw={"ready":engine_ok,"binary":engine_ok,"model_pair":engine_ok,
+         "quant":{"verified":engine_ok,"prepared_quant":"Q8_0" if engine_ok else None},
+         "gpu":{"verified":True} if engine_ok else None,"issues":[]}
+    monkeypatch.setattr(appmod,"preflight",lambda settings:raw.copy())
+    monkeypatch.setattr(climod,"preflight",lambda settings:raw.copy())
+    monkeypatch.setattr(appmod.shutil,"which",lambda name:"/ffmpeg" if ffmpeg and name=="ffmpeg" else None)
+    monkeypatch.setattr(climod.Settings,"load",lambda:s)
+    status={"accepted":accepted,"provenance_reconciled":reconciled}
+    monkeypatch.setattr(Licence,"status",lambda self:status)
+    app=create_app(s)
+    with TestClient(app) as c:
+        api=c.get("/lite/readiness").json()
+        quant=c.get("/engines/omnivoice-gguf/quants").json()
+        assert quant["ready"]==engine_ok
+        assert c.get("/health").status_code==200
+    rc=climod.main()
+    console=json.loads(capsys.readouterr().out)
+    for key in ("runtime_ready","tts_ready","cloning_ready","ready","ffmpeg","ffmpeg_installed"):
+        assert api[key]==console[key],(key,api,console)
+    expected_tts=engine_ok and accepted and reconciled
+    expected_full=expected_tts and ffmpeg
+    assert api["runtime_ready"]==engine_ok
+    assert api["tts_ready"]==expected_tts
+    assert api["cloning_ready"]==api["ready"]==expected_full
+    assert rc==(0 if expected_full else 1)
