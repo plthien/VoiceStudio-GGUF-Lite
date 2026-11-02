@@ -179,3 +179,46 @@ def test_busy_admission_covers_between_spans(system,monkeypatch):
             assert result.status_code==200,result.text
             assert not runner.lock.locked()
     asyncio.run(exercise())
+
+def test_cancel_in_second_native_span_reaps_process_and_workspace(system):
+    from lite.pause import parse_pause_script
+    app,runner,settings,pairs,root=system
+    script=parse_pause_script("First[pause 200ms]slow")
+    async def exercise():
+        job=asyncio.create_task(runner.generate_paused(
+            script=script,profile={"id":"owned-voice","ref_text":"EXACT OWNED REFERENCE","language":"en"},
+            reference=root/"owned-ref.wav",language="en",seed=42,request_id="pause-cancel"))
+        for _ in range(250):
+            if runner.process is not None and runner.process.returncode is None:
+                break
+            await asyncio.sleep(.02)
+        assert runner.process is not None
+        proc=runner.process
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await job
+        assert proc.returncode is not None and runner.process is None
+        assert not runner.lock.locked()
+        assert not list(root.glob("lite-pause-*"))
+    asyncio.run(exercise())
+
+def test_single_deadline_not_n_times_timeout(system):
+    from lite.pause import parse_pause_script
+    app,runner,settings,pairs,root=system
+    runner.settings=Settings(data_dir=root,cache_dir=root,bin_dir=settings.bin_dir,timeout=.22)
+    orig=runner._paused_span
+    async def delayed(**kw):
+        await asyncio.sleep(.15)
+        return await orig(**kw)
+    runner._paused_span=delayed
+    async def run():
+        with pytest.raises(Exception) as err:
+            await runner.generate_paused(
+                script=parse_pause_script("First[pause 200ms]Second"),
+                profile={"id":"owned-voice","ref_text":"EXACT OWNED REFERENCE","language":"en"},
+                reference=root/"owned-ref.wav",language="en",seed=42,request_id="deadline")
+        from lite.native_runner import NativeTimeout
+        assert isinstance(err.value,NativeTimeout),type(err.value)
+        assert runner.process is None and not runner.lock.locked()
+        assert not list(root.glob("lite-pause-*"))
+    asyncio.run(run())
