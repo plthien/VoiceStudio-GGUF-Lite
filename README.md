@@ -9,3 +9,7 @@ See [GGUF Lite documentation](docs/gguf-lite.md), [Local Web UI guide](docs/gguf
 Licence: AGPL-3.0 source in LICENSE, GGUF model notice in `lite/resources/model_notice.json`, original licence notice in LICENSE-NOTICE.md. Model terms include CC-BY-NC-4.0, Higgs Audio 2 and Meta Llama 3. No commercial rights or legal provenance clearance implied.
 
 No voice recordings, model weights, executable binaries, benchmark data or secrets are committed.
+
+## Experimental native speed
+
+Native 0.75–1.25× speed is an estimator-level pinned C++ patch, not a WAV time-stretch. It requires an opt-in [candidate build and safe activation/rollback](docs/gguf-lite-native-speed.md). Old installs keep speed 1.0; owner GTX1650 speed/quality is NOT VERIFIED.
