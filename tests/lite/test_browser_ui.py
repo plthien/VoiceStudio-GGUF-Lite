@@ -211,6 +211,7 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         page.locator("#reference-play").click()
         expect(page.locator("#saved-preview")).to_be_visible()
         # No UI submission without new transcript or a deliberate same-words choice.
+        original=page.request.get(base+"/profiles/"+voice).json()
         page.locator('#replace-consent').check()
         page.locator('#replace-form input[type=file]').set_input_files({
           "name":"replacement.wav","mimeType":"audio/wav","buffer":alternate_audio()})
@@ -225,8 +226,8 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         after=page.request.get(base+"/profiles/"+stable_id).json()
         assert after["ref_text"]=="Different spoken words on recording B"
         assert after["version"]==2
-        assert after["source_sha256"]!=page.request.get(base+"/profiles/"+stable_id).json().get("invalid_source_hash","")
-        assert after["ref_sha256"] and after["source_sha256"]
+        assert after["source_sha256"]!=original["source_sha256"]
+        assert after["ref_sha256"]!=original["ref_sha256"]
         assert after["id"]==stable_id
         page.locator("#reference-play").click()
         expect(page.locator("#saved-preview")).to_be_visible()
@@ -339,4 +340,52 @@ def test_n03_one_native_preflight_per_manual_chromium_refresh(ui_server,monkeypa
         response=page.request.get(base+"/engines/omnivoice-gguf/quants")
         assert response.status==200
         assert len(calls)==before+1,"Independent quants route must still verify engine"
+        calls.clear()
+        # Error must invalidate prior green state; next explicit click can recover.
+        fail={"active":True}
+        def intermittent(settings):
+            calls.append("checked")
+            if fail["active"]:
+                raise RuntimeError("Synthetic failed preflight")
+            return original(settings)
+        monkeypatch.setattr(module,"preflight",intermittent)
+        page.locator("#runtime-refresh").click()
+        expect(page.locator("#runtime-checked")).to_contain_text("FAILED",timeout=15000)
+        expect(page.locator("#runtime-summary")).to_contain_text("NOT CURRENT")
+        assert page.locator("#runtime-details .detail").count()==0
+        fail["active"]=False
+        page.locator("#runtime-refresh").click()
+        expect(page.locator("#runtime-checked")).to_contain_text("Last checked",timeout=15000)
+        expect(page.locator("#runtime-summary")).to_contain_text("Q8_0")
+        assert len(calls)==2
+        browser.close()
+
+@pytest.mark.timeout(60)
+def test_n01_rendered_same_words_requires_explicit_confirmation(ui_server):
+    base,native=ui_server
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        page=browser.new_page(viewport={"width":390,"height":844})
+        page.goto(base+"/ui")
+        page.locator('#clone-form input[name="name"]').fill("Same words voice")
+        page.locator("#clone-file").set_input_files({
+            "name":"original.wav","mimeType":"audio/wav","buffer":audio()})
+        page.locator('#clone-form textarea[name="ref_text"]').fill("Unchanged spoken words")
+        page.locator("#clone-consent").check()
+        page.locator("#clone-submit").click()
+        expect(page.locator("#view-tts")).to_be_visible()
+        id=page.locator("#tts-voice").input_value()
+        page.locator('[data-view="library"]').click()
+        page.locator("#voice-list .voice-item").filter(has_text="Same words voice").get_by_role("button",name="Edit").click()
+        page.locator("#replace-file").set_input_files({
+            "name":"different-take.wav","mimeType":"audio/wav","buffer":alternate_audio()})
+        page.locator("#replace-same").check()
+        expect(page.locator("#replace-text")).to_be_disabled()
+        page.locator("#replace-consent").check()
+        page.locator("#replace-submit").click()
+        expect(page.locator("#editor-id")).to_contain_text("version 2")
+        saved=page.request.get(base+"/profiles/"+id).json()
+        assert saved["ref_text"]=="Unchanged spoken words"
+        assert saved["consent"]=="owner-confirmed-local"
+        assert not page.locator("#replace-same").is_checked()
         browser.close()
