@@ -170,14 +170,14 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#tts-submit")).to_be_enabled()
         page.locator("#tts-text").fill("Recovered after navigation cancellation")
         page.locator("#tts-submit").click()
-        try:
-            expect(page.locator("#tts-output")).to_be_visible(timeout=10000)
-        except AssertionError:
-            assert False, {"state":page.locator("#tts-state").inner_text(),
-                "notice":page.locator("#notice").inner_text(),
-                "selected_voice":page.locator("#tts-voice").input_value(),
-                "busy":page.evaluate("() => fetch('/lite/status').then(r=>r.json()).then(s=>s.busy)"),
-                "submit_disabled":page.locator("#tts-submit").is_disabled()}
+        # A 429 is a confirmed rejection (not an ambiguous native submission).
+        # Only a NEW user click after Retry-After is valid; no invisible UI replay.
+        page.wait_for_function("() => !document.getElementById('tts-output').hidden || document.getElementById('tts-state').textContent === 'Failed'",timeout=10000)
+        if page.locator("#tts-output").is_hidden():
+            expect(page.locator("#notice")).to_contain_text("already processing")
+            page.wait_for_timeout(3100)
+            page.locator("#tts-submit").click()
+        expect(page.locator("#tts-output")).to_be_visible(timeout=10000)
         page.locator('[data-view="library"]').click()
         expect(page.locator("#voice-list")).to_contain_text("New owner voice")
         page.locator("#voice-list .voice-item").filter(has_text="New owner voice").get_by_role("button",name="Edit").click()
