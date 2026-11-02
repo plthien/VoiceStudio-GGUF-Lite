@@ -169,14 +169,20 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         page.locator('[data-view="tts"]').click()
         expect(page.locator("#tts-submit")).to_be_enabled()
         page.locator("#tts-text").fill("Recovered after navigation cancellation")
-        page.locator("#tts-submit").click()
-        # A 429 is a confirmed rejection (not an ambiguous native submission).
-        # Only a NEW user click after Retry-After is valid; no invisible UI replay.
-        page.wait_for_function("() => !document.getElementById('tts-output').hidden || document.getElementById('tts-state').textContent === 'Failed'",timeout=10000)
-        if page.locator("#tts-output").is_hidden():
-            expect(page.locator("#notice")).to_contain_text("already processing")
-            page.wait_for_timeout(3100)
+        def is_recovery(response):
+            return (response.url.endswith("/v1/audio/speech")
+                and response.request.method=="POST"
+                and response.request.post_data_json.get("input")=="Recovered after navigation cancellation")
+        with page.expect_response(is_recovery,timeout=12000) as first:
             page.locator("#tts-submit").click()
+        assert first.value.status in (200,429)
+        if first.value.status==429:
+            # 429 is confirmed rejection, safe to submit only on another user click.
+            expect(page.locator("#notice")).to_contain_text("already processing")
+            page.wait_for_timeout(3200)
+            with page.expect_response(is_recovery,timeout=12000) as second:
+                page.locator("#tts-submit").click()
+            assert second.value.status==200
         expect(page.locator("#tts-output")).to_be_visible(timeout=10000)
         page.locator('[data-view="library"]').click()
         expect(page.locator("#voice-list")).to_contain_text("New owner voice")
