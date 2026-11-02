@@ -40,7 +40,7 @@
           <form id="clone-form">
             <div class="two-col">
               <label>Voice name<input required name="name" maxlength="128" placeholder="e.g. Studio narrator"></label>
-              <label>Language<select name="language" id="clone-language"><option value="en">English</option><option value="vi">Vietnamese</option><option value="fr">French</option><option value="es">Spanish</option><option value="de">German</option><option value="ja">Japanese</option><option value="zh">Chinese</option></select></label>
+              <label>Language<select name="language" id="clone-language"><option value="en">English</option><option value="fr">French</option><option value="es">Spanish</option><option value="de">German</option><option value="it">Italian</option><option value="pt">Portuguese</option><option value="ko">Korean</option><option value="ja">Japanese</option><option value="zh">Chinese</option></select></label>
             </div>
             <label>Reference recording <span class="hint">WAV or MP3 · max 24 MB</span><input id="clone-file" name="ref_audio" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label>
             <audio id="clone-preview" controls preload="none" hidden aria-label="New reference preview"></audio>
@@ -87,7 +87,7 @@
           <form id="tts-form">
             <label>Saved voice<select id="tts-voice" name="voice" required><option value="">Select a voice</option></select></label>
             <label>Text to speak<textarea id="tts-text" rows="8" maxlength="4096" required placeholder="Type the words you want to synthesize…"></textarea></label>
-            <div class="two-col"><label>Language <span class="hint">Optional</span><select id="tts-language"><option value="">Use voice language</option><option value="en">English</option><option value="vi">Vietnamese</option><option value="fr">French</option><option value="es">Spanish</option><option value="de">German</option></select></label><label>Seed <span class="hint">Optional</span><input type="number" id="tts-seed" min="0" max="2147483647" step="1" value="42"></label></div>
+            <div class="two-col"><label>Language <span class="hint">Optional</span><select id="tts-language"><option value="">Use voice language</option><option value="en">English</option><option value="fr">French</option><option value="es">Spanish</option><option value="de">German</option><option value="it">Italian</option><option value="pt">Portuguese</option><option value="ko">Korean</option></select></label><label>Seed <span class="hint">Optional</span><input type="number" id="tts-seed" min="0" max="2147483647" step="1" value="42"></label></div>
             <div class="actions"><button type="submit" id="tts-submit" class="primary">Generate WAV</button><button type="button" class="secondary" id="tts-cancel" disabled>Cancel request</button><span id="tts-state" class="muted" role="status">Idle</span></div>
           </form>
           <div id="tts-output" class="result-panel" hidden><h3>Generated audio</h3><p id="tts-proof" class="muted"></p><audio id="tts-player" controls preload="metadata"></audio><div class="actions"><a id="tts-download" class="download" download="voice.wav">Download 24 kHz WAV</a><span id="tts-timing" class="muted"></span></div></div>
