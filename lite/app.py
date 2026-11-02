@@ -263,9 +263,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         if profile_id is not None and profile_id == app.state.runner.active_id:
             return failure(409, "PROFILE_ACTIVE", "Voice in active inference")
         try:
-            return await asyncio.to_thread(app.state.store.import_audio,
-                name=name, ref_text=ref_text, language=language, source=payload,
-                suffix=suffix, profile_id=profile_id, consent=consent)
+            if profile_id is not None and app.state.runner.lock.locked():
+                return failure(409,"PROFILE_ACTIVE","Native inference may be using this reference")
+            async with app.state.runner.lock:
+                return await asyncio.to_thread(app.state.store.import_audio,
+                    name=name, ref_text=ref_text, language=language, source=payload,
+                    suffix=suffix, profile_id=profile_id, consent=consent)
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         except (ValueError, OSError) as exc:
@@ -285,20 +288,26 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         return await upload(row["name"], row["ref_text"], row["language"], ref_audio, profile_id)
 
     @app.put("/profiles/{profile_id}")
-    def update_profile(profile_id: str, patch: ProfilePatch):
-        if profile_id == app.state.runner.active_id:
-            return failure(409, "PROFILE_ACTIVE", "Voice in active inference")
+    async def update_profile(profile_id: str, patch: ProfilePatch):
+        if app.state.runner.lock.locked():
+            return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
-            return app.state.store.update(profile_id, patch.model_dump(exclude_unset=True))
+            async with app.state.runner.lock:
+                return await asyncio.to_thread(app.state.store.update,profile_id,
+                    patch.model_dump(exclude_unset=True))
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         except ProfileError as exc:
             return failure(422, "INVALID_PROFILE", str(exc))
 
     @app.delete("/profiles/{profile_id}")
-    def delete_profile(profile_id: str, purge: bool = False):
+    async def delete_profile(profile_id: str, purge: bool = False):
+        if app.state.runner.lock.locked():
+            return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
-            app.state.store.delete(profile_id, active_id=app.state.runner.active_id,purge=purge)
+            async with app.state.runner.lock:
+                await asyncio.to_thread(app.state.store.delete,profile_id,
+                    active_id=app.state.runner.active_id,purge=purge)
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         except ProfileError:
@@ -362,6 +371,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                         await generation
                     return failure(499,"CLIENT_DISCONNECTED","Native generation cancelled")
                 data,info=await generation
+                # Defense in depth: never publish a WAV on a proofless or conflicting runner result.
+                if (info.get("verification_status")!="verified" or
+                    info.get("observed_native_backend")!="Vulkan0" or
+                    "NVIDIA" not in info.get("observed_device_identity","") or
+                    "GTX 1650" not in info.get("observed_device_identity","")):
+                    return failure(500,"NATIVE_PROOF_MISSING","Native GPU proof was not verified")
                 return Response(data, media_type="audio/wav", headers={
                     "X-Lite-Request-Id": info["request_id"], "Cache-Control": "no-store",
                     **({"X-Lite-Verified-Backend":info["observed_native_backend"],

@@ -101,7 +101,9 @@ def test_api_contract_wav_bytes_without_alias(config):
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
         w.writeframes(b"\0\0"*100)
     async def fake_generate(**kwargs):
-        return sample.getvalue(),{"request_id":"request-1"}
+        return sample.getvalue(),{"request_id":"request-1",
+                "verification_status":"verified","observed_native_backend":"Vulkan0",
+                "observed_device_identity":"NVIDIA GeForce GTX 1650"}
     app.state.runner.generate=fake_generate
     with TestClient(app) as c:
         resp=c.post("/v1/audio/speech",json={"model":"omnivoice-gguf",
@@ -110,3 +112,18 @@ def test_api_contract_wav_bytes_without_alias(config):
         assert resp.content==sample.getvalue()
         assert c.post("/v1/audio/speech",json={"model":"omnivoice-gguf",
                      "voice":"alloy","input":"hello"}).status_code==404
+
+def test_native_proofless_output_fails_closed_and_does_not_publish(config):
+    app=create_app(config)
+    app.state.licence.is_ready=lambda:True
+    app.state.store.get=lambda x:{"id":"safe","ref_text":"words","language":"en"} if x=="safe" else None
+    app.state.store.reference=lambda x:Path("/fake.wav")
+    async def proofless(**kwargs):
+        return b"RIFF",{"request_id":"r"}
+    app.state.runner.generate=proofless
+    with TestClient(app) as c:
+        response=c.post("/v1/audio/speech",json={"model":"omnivoice-gguf",
+            "voice":"safe","input":"Say this","speed":1.0})
+        assert response.status_code==500
+        assert response.json()["error"]["code"]=="NATIVE_PROOF_MISSING"
+        assert response.headers["content-type"].startswith("application/json")

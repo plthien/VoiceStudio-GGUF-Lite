@@ -156,7 +156,7 @@ def nvidia_device(*, run=subprocess.run, which=shutil.which) -> dict:
     return {**gpu, "vram_mib": vram, "backend": "Vulkan0", "verified": True}
 
 def preflight(settings: Settings) -> dict:
-    result = {"ready": False, "quant": {"selected": BASE_NAME, "installed": False, "verified": False,
+    result = {"ffmpeg":bool(shutil.which("ffmpeg")),"ready": False, "quant": {"selected": BASE_NAME, "installed": False, "verified": False,
                                       "prepared_quant": None, "in_use": None,
                                       "base": BASE_NAME, "tokenizer": TOKENIZER_NAME,
                                       "revision": MODEL_REVISION, "runtime_revision": RUNTIME_REVISION},

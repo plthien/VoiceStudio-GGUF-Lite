@@ -24,6 +24,9 @@ def legacy_sources() -> tuple[Path,Path]:
             raise ValueError("Legacy path outside server-configured root")
     if not database.is_file() or not voices.is_dir():
         raise ValueError("Legacy DB/voice directory absent")
+    # Reject an active WAL database rather than claiming an immutable read reflects live writes.
+    if any(database.with_name(database.name+suffix).exists() for suffix in ("-wal","-shm")):
+        raise ValueError("Legacy SQLite WAL/SHM present; close the old application first")
     return database.resolve(), voices.resolve()
 
 def migration_preview(db: Path, voices:Path) -> dict:
