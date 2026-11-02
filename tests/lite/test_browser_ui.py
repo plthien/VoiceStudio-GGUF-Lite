@@ -43,7 +43,7 @@ class FakeNative:
         self.fail_on=None
         self.slow_on=None
         self.observed=[]
-    async def generate(self,*,profile,reference,text,language,seed,request_id):
+    async def generate(self,*,profile,reference,text,language,seed,request_id,speed=1.0):
         self.attempts+=1
         if self.fail_on==self.attempts:
             raise NativeFailure("Synthetic requested failure")
@@ -53,7 +53,7 @@ class FakeNative:
             raise NativeFailure("Synthetic failure")
         async with self.lock:
             self.observed.append({"id":profile["id"],"ref_text":profile["ref_text"],
-                                  "reference":reference.read_bytes(),"version":profile["version"]})
+                                  "reference":reference.read_bytes(),"version":profile["version"],"speed":speed})
             self.active_id=profile["id"]
             try:
                 await asyncio.sleep(1.1 if text=="slow" or self.slow_on==self.attempts else .025)
@@ -394,4 +394,73 @@ def test_n01_rendered_same_words_requires_explicit_confirmation(ui_server):
         assert saved["ref_text"]=="Unchanged spoken words"
         assert saved["consent"]=="owner-confirmed-local"
         assert not page.locator("#replace-same").is_checked()
+        browser.close()
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("width",[1280,390])
+def test_native_speed_browser_real_json_request_and_measured_display(ui_server,monkeypatch,width):
+    base,native=ui_server
+    import lite.app as appmodule
+    monkeypatch.setattr(appmodule,"native_speed_capability",
+                        lambda _:{"supported":True,"marker":"LiteNativeSpeed/v1","min":0.75,"max":1.25})
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        page=browser.new_page(viewport={"width":width,"height":860})
+        seen=[]
+        page.on("request",lambda req:seen.append(req.post_data_json)
+                if req.url.endswith("/v1/audio/speech") and req.method=="POST" else None)
+        page.goto(base+"/ui")
+        page.locator('#clone-form input[name="name"]').fill("Native speed synthetic")
+        page.locator("#clone-file").set_input_files({
+            "name":"owner.wav","mimeType":"audio/wav","buffer":audio()})
+        page.locator('#clone-form textarea[name="ref_text"]').fill("A short reference transcript")
+        page.locator("#clone-consent").check()
+        page.locator("#clone-submit").click()
+        expect(page.locator("#view-tts")).to_be_visible()
+        expect(page.locator("#tts-speed")).to_be_enabled(timeout=10000)
+        assert page.locator("#tts-speed").input_value()=="1.00"
+        page.locator("#tts-speed").fill("1.20")
+        expect(page.locator("#tts-speed-value")).to_have_text("1.20×")
+        page.locator("#tts-text").fill("Five words to measure speech")
+        page.locator("#tts-submit").click()
+        expect(page.locator("#tts-output")).to_be_visible(timeout=15000)
+        assert seen and seen[-1]["speed"]==1.2
+        assert native.observed[-1]["speed"]==1.2
+        expect(page.locator("#tts-timing")).to_contain_text("Requested 1.20×")
+        expect(page.locator("#tts-timing")).to_contain_text("Approx measured")
+        expect(page.locator("#tts-timing")).to_contain_text("Server RTF")
+        assert page.evaluate("document.documentElement.scrollWidth<=innerWidth+2")
+        page.locator("#tts-speed").fill("0.85")
+        page.locator("#tts-text").fill("Slow requested delivery of this sentence")
+        page.locator("#tts-submit").click()
+        expect(page.locator("#tts-output")).to_be_visible(timeout=15000)
+        assert seen[-1]["speed"]==0.85
+        assert native.observed[-1]["speed"]==0.85
+        browser.close()
+
+@pytest.mark.timeout(60)
+def test_old_binary_disables_native_speed_ui_but_preserves_baseline(ui_server,monkeypatch):
+    base,native=ui_server
+    import lite.app as appmodule
+    monkeypatch.setattr(appmodule,"native_speed_capability",
+                        lambda _:{"supported":False,"reason":"old native runtime","min":0.75,"max":1.25})
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        page=browser.new_page()
+        page.goto(base+"/ui")
+        page.locator('#clone-form input[name="name"]').fill("Old baseline")
+        page.locator("#clone-file").set_input_files({
+            "name":"owner.wav","mimeType":"audio/wav","buffer":audio()})
+        page.locator('#clone-form textarea[name="ref_text"]').fill("A reference sentence")
+        page.locator("#clone-consent").check()
+        page.locator("#clone-submit").click()
+        expect(page.locator("#view-tts")).to_be_visible()
+        expect(page.locator("#tts-speed")).to_be_disabled()
+        expect(page.locator("#tts-speed-notice")).to_contain_text("requires rebuilt")
+        assert page.locator("#tts-speed").input_value()=="1.00"
+        page.locator("#tts-text").fill("Old binary can still speak at baseline")
+        page.locator("#tts-submit").click()
+        expect(page.locator("#tts-output")).to_be_visible(timeout=15000)
+        assert native.observed[-1]["speed"]==1.0
         browser.close()
