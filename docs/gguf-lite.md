@@ -37,9 +37,14 @@ No commercial inference or output rights are warranted, and AGPL-3.0
 source obligations remain separate.
 
 Native WAV is 24 kHz mono PCM16. The standalone Vulkan build instruments the exact pinned upstream backend source; every successful generation must include native-selected GGML device evidence. Lite does not apply the legacy
-trim/master/normalization/watermark chain; quality parity and 3-run
-Ink Explainer Windows benchmark are NOT VERIFIED. Prior original
-VoiceStudio Q8_0 mean RTF 3.291 is a baseline, not a Lite result.
+trim/master/normalization/watermark chain. Previously recorded OWNER-HOST
+Windows GTX1650 Q8_0 Ink-Explainer-306 validation: 3/3 native-verified WAVs,
+mean Lite RTF 3.344524, median Lite RTF 3.324411 and 15.28 seconds audio;
+the owner reported live listening PASS. The historical original VoiceStudio
+Q8_0 mean RTF 3.291 is NOT a Lite result, and comparability remains false
+because reference preprocessing/DSP identity was not established. Neither
+host evidence nor subjective listening establishes model/output commercial rights.
+These are preserved owner observations, not CI tests or a new-clone UI acceptance.
 Never claim native speed/WPM or automatic sentence segmentation.
 
 Use scripts/migrate-gguf-voices.ps1 with explicit LegacyDb,
