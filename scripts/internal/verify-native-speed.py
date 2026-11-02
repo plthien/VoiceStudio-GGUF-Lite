@@ -80,7 +80,7 @@ def main():
         stop=source.index("\n}",start)+2
         initializer=source[start:stop]
         implementation=work/"native-default-params.cpp"
-        implementation.write_text('#include "omnivoice.h"\nextern "C" {\\n'+initializer+'\n}\n',encoding="utf8")
+        implementation.write_text('#include "omnivoice.h"\nextern "C" {\n'+initializer+'\n}\n',encoding="utf8")
         oldcaller=work/"legacy-v2-caller.cpp"
         oldcaller.write_text('''#include "omnivoice.h"
 #include <cstdint>
