@@ -432,7 +432,7 @@ def test_native_speed_browser_real_json_request_and_measured_display(ui_server,m
         page.locator("#tts-submit").click()
         expect(page.locator("#tts-output")).to_be_visible(timeout=15000)
         assert seen and seen[-1]["speed"]==1.2
-        assert native.observed[-1]["speed"]==1.2
+        assert native.observed[-1]["speed"]==pytest.approx(1.2)
         expect(page.locator("#tts-timing")).to_contain_text("Requested 1.20×")
         expect(page.locator("#tts-timing")).to_contain_text("Approx measured")
         expect(page.locator("#tts-timing")).to_contain_text("Server RTF")
@@ -442,7 +442,7 @@ def test_native_speed_browser_real_json_request_and_measured_display(ui_server,m
         page.locator("#tts-submit").click()
         expect(page.locator("#tts-output")).to_be_visible(timeout=15000)
         assert seen[-1]["speed"]==0.85
-        assert native.observed[-1]["speed"]==0.85
+        assert native.observed[-1]["speed"]==pytest.approx(0.85)
         browser.close()
 
 @pytest.mark.timeout(60)

@@ -196,5 +196,6 @@ def test_real_fake_native_argv_float32_round_trip(fixture,monkeypatch,requested)
     effective,arg=speed_to_native(requested)
     assert seen and "--speed" in seen[0]
     assert seen[0][seen[0].index("--speed")+1]==arg
-    assert float(arg)==effective
+    import struct
+    assert struct.unpack("<f",struct.pack("<f",float(arg)))[0]==effective
     if requested==1.004: assert arg!="1.00"
