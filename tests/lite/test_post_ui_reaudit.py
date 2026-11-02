@@ -87,3 +87,75 @@ def test_f04_profile_mutation_cannot_overtake_unadmitted_generation(tmp_path,mon
             assert done.status_code==200
             assert app.state.store.get(row["id"])["ref_text"]=="actual"
     asyncio.run(attempt())
+
+@pytest.mark.parametrize("mode",["replace","purge","migration","second-speech"])
+def test_f04_adversarial_mutation_and_parallel_tts_blocked(tmp_path,monkeypatch,mode):
+    app,s=setup(tmp_path,monkeypatch)
+    row=app.state.store.import_audio(name="Voice",ref_text="known words",language="en",source=wav(),suffix=".wav")
+    original=app.state.store.reference(row).read_bytes()
+    app.state.licence.is_ready=lambda:True
+    entered=asyncio.Event()
+    release=asyncio.Event()
+    async def generate(**kwargs):
+        entered.set()
+        await release.wait()
+        return wav(),{"request_id":"r","verification_status":"verified",
+            "observed_native_backend":"Vulkan0",
+            "observed_device_identity":"NVIDIA GTX 1650"}
+    app.state.runner.generate=generate
+    def migration_should_not_run(*args,**kwargs):
+        raise AssertionError("Migration entered before native completed")
+    if mode=="migration":
+        monkeypatch.setattr("lite.app.legacy_sources",lambda:(Path("db"),Path("refs")))
+        monkeypatch.setattr("lite.app.migration_apply",migration_should_not_run)
+    async def attempt():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://127.0.0.1:3900") as client:
+            payload={"model":"omnivoice-gguf","voice":row["id"],"input":"Hello","speed":1.0}
+            a=asyncio.create_task(client.post("/v1/audio/speech",json=payload))
+            await asyncio.wait_for(entered.wait(),timeout=3)
+            if mode=="replace":
+                result=await client.put("/profiles/"+row["id"]+"/audio",
+                    files={"ref_audio":("changed.wav",wav(),"audio/wav")})
+            elif mode=="purge":
+                result=await client.delete("/profiles/"+row["id"]+"?purge=true")
+            elif mode=="migration":
+                result=await client.post("/lite/migration/apply",json={"voice_id":row["id"]})
+            else:
+                result=await client.post("/v1/audio/speech",json=payload)
+            release.set()
+            response=await asyncio.wait_for(a,timeout=6)
+            assert result.status_code==(429 if mode=="second-speech" else 409)
+            assert response.status_code==200
+            assert app.state.store.get(row["id"])["ref_text"]=="known words"
+            assert app.state.store.reference(row).read_bytes()==original
+    asyncio.run(attempt())
+
+def test_f01_trusted_override_and_parent_escape(tmp_path,monkeypatch):
+    root=tmp_path/"trusted";(root/"refs").mkdir(parents=True)
+    db=root/"custom.db"
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE TABLE voice_profiles(id TEXT,name TEXT,ref_audio_path TEXT,ref_text TEXT,language TEXT,kind TEXT)")
+    monkeypatch.setenv("GGUF_LITE_LEGACY_ROOT",str(root))
+    monkeypatch.setenv("GGUF_LITE_LEGACY_DB","custom.db")
+    monkeypatch.setenv("GGUF_LITE_LEGACY_VOICES","refs")
+    assert legacy_sources()==(db,root/"refs")
+    monkeypatch.setenv("GGUF_LITE_LEGACY_DB","../custom.db")
+    with pytest.raises(ValueError):
+        legacy_sources()
+    monkeypatch.setenv("GGUF_LITE_LEGACY_DB",str(tmp_path/"outside.db"))
+    with pytest.raises((ValueError,FileNotFoundError)):
+        legacy_sources()
+
+def test_f03_invalid_replacement_rolls_back_consent_and_audio(tmp_path,monkeypatch):
+    app,s=setup(tmp_path,monkeypatch)
+    with TestClient(app) as c:
+        old=c.post("/profiles",data={"name":"Owned","ref_text":"spoken","consent":"yes"},
+            files={"ref_audio":("old.wav",wav(),"audio/wav")}).json()
+        sid=old["id"]
+        bad=c.put("/profiles/"+sid+"/audio",data={"consent":"new-confirmed"},
+            files={"ref_audio":("bad.exe",b"x"*300,"application/octet-stream")})
+        assert bad.status_code==422
+        now=c.get("/profiles/"+sid).json()
+        assert now["version"]==1 and now["consent"]=="yes"
+        assert app.state.store.reference(now).read_bytes()==wav()

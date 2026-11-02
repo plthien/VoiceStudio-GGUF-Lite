@@ -35,7 +35,13 @@ class FakeNative:
         self.lock=asyncio.Lock()
         self.active_id=None
         self.count=0
+        self.attempts=0
+        self.fail_on=None
+        self.slow_on=None
     async def generate(self,*,profile,reference,text,language,seed,request_id):
+        self.attempts+=1
+        if self.fail_on==self.attempts:
+            raise NativeFailure("Synthetic requested failure")
         if text=="busy":
             raise NativeBusy("Synthetic busy")
         if text=="failed":
@@ -43,7 +49,7 @@ class FakeNative:
         async with self.lock:
             self.active_id=profile["id"]
             try:
-                await asyncio.sleep(1.1 if text=="slow" else .025)
+                await asyncio.sleep(1.1 if text=="slow" or self.slow_on==self.attempts else .025)
                 self.count+=1
                 return audio(),{"request_id":request_id,"observed_native_backend":"Vulkan0",
                     "observed_device_identity":"NVIDIA GeForce GTX 1650",
@@ -217,6 +223,23 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#diagnostic-state")).to_contain_text("3/3 verified",timeout=15000)
         assert page.locator("#diagnostic-rows tr").count()==3
         expect(page.locator("#diagnostic-rows")).to_contain_text("NVIDIA GeForce GTX 1650")
+        native.fail_on=native.attempts+2
+        page.locator("#diagnostic-start").click()
+        expect(page.locator("#diagnostic-state")).to_contain_text("failed after 1/3",timeout=15000)
+        assert page.locator("#diagnostic-rows tr").count()==2
+        assert page.locator("#diagnostic-export").is_disabled()
+        native.fail_on=None
+        page.locator("#diagnostic-start").click()
+        expect(page.locator("#diagnostic-state")).to_contain_text("3/3 verified",timeout=15000)
+        assert page.locator("#diagnostic-rows tr").count()==3
+        native.slow_on=native.attempts+2
+        page.locator("#diagnostic-start").click()
+        expect(page.locator("#diagnostic-rows tr")).to_have_count(1,timeout=10000)
+        page.wait_for_function("() => fetch('/lite/status').then(r=>r.json()).then(x=>x.busy)",timeout=5000)
+        page.locator('[data-view="library"]').click()
+        expect(page.locator("#diagnostic-export")).to_be_disabled()
+        page.locator('[data-view="runtime"]').click()
+        native.slow_on=None
         assert page.locator("#diagnostic-export").is_enabled()
         with page.expect_download() as exported:
             page.locator("#diagnostic-export").click()
