@@ -21,6 +21,7 @@ from .licence import Licence
 from .native_runner import Runner, NativeBusy, NativeFailure, NativeTimeout
 from .profiles import Store, ProfileError
 from .runtime import preflight, RuntimeErrorLite
+from .readiness import complete_readiness
 
 logger = logging.getLogger("gguf_lite")
 
@@ -213,12 +214,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
 
     @app.get("/lite/readiness")
     async def readiness():
-        state = await asyncio.to_thread(preflight, settings)
-        state["ffmpeg_installed"] = bool(shutil.which("ffmpeg"))
-        state["licence"] = app.state.licence.status()
-        state["voice_store"] = {"healthy": settings.data_dir.is_dir()}
-        state["busy"] = app.state.runner.lock.locked()
-        state["ready"] = state["ready"] and app.state.licence.is_ready() and state["voice_store"]["healthy"]
+        engine = await asyncio.to_thread(preflight, settings)
+        status = app.state.licence.status()
+        state = complete_readiness(engine,status,store_healthy=settings.data_dir.is_dir(),
+                                   ffmpeg_installed=bool(shutil.which("ffmpeg")))
+        state["busy"] = app.state.runner.lock.locked() or app.state.admission.locked()
         return state
 
     @app.get("/engines/omnivoice-gguf/quants")
@@ -302,7 +302,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                     existing=app.state.store.get(profile_id)
                     if existing is None:
                         raise KeyError(profile_id)
-                    actual_name,actual_text,actual_language=(existing[k] for k in ("name","ref_text","language"))
+                    actual_name,_,actual_language=(existing[k] for k in ("name","ref_text","language"))
+                    # If ref_text was omitted, retain old behavior for legacy API
+                    # clients; a new UI replacement must supply transcript B or
+                    # explicitly confirm the recording says the same words.
+                    actual_text=existing["ref_text"] if ref_text is None else ref_text
                 return app.state.store.import_audio(name=actual_name,ref_text=actual_text,
                     language=actual_language,source=payload,suffix=suffix,
                     profile_id=profile_id,consent=consent)
@@ -322,9 +326,16 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
 
     @app.put("/profiles/{profile_id}/audio")
     async def replace_audio(profile_id: str, ref_audio: UploadFile = File(...),
-                            consent: str | None = Form(None)):
-        # Previous reference's consent NEVER transfers to a different recording.
-        return await upload(None, None, None, ref_audio, profile_id, consent=consent)
+                            consent: str | None = Form(None),
+                            ref_text: str | None = Form(None),
+                            reuse_existing_transcript: bool = Form(False)):
+        # Omitting ref_text is a legacy compatibility path, not evidence that
+        # the new audio contains the old words. UI never uses it silently.
+        if ref_text is not None and (not ref_text.strip() or len(ref_text)>4096):
+            return failure(422,"INVALID_TRANSCRIPT","Exact new transcript must be nonblank and at most 4096 characters")
+        if reuse_existing_transcript and ref_text is not None:
+            return failure(422,"INVALID_TRANSCRIPT","Choose either a new transcript or same-words confirmation")
+        return await upload(None, ref_text, None, ref_audio, profile_id, consent=consent)
 
     @app.put("/profiles/{profile_id}")
     async def update_profile(profile_id: str, patch: ProfilePatch):

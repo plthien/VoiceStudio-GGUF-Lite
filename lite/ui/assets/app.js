@@ -5,8 +5,8 @@ const titles={clone:['Voice Cloning','Create a voice from an owned reference rec
   library:['Voice Library','Manage your saved profiles and import legacy voices.'],
   tts:['Text to Speech','Generate a native verified WAV from any saved voice.'],
   runtime:['Runtime & Settings','Inspect pinned model and local inference readiness.']};
-let voices=[],chosen='',editor='',controller=null,ttsUrl=null,refUrl=null,cloneUrl=null,diagnostic=null,diagnosticController=null,licenceFingerprint=null,licenceAccepted=false,working=false;
-const errors={INVALID_REQUEST:'Check required fields and the exact transcript.',INVALID_AUDIO:'Reference could not be decoded. Use an owned WAV or MP3.',AUDIO_TOO_LARGE:'Recording exceeds the local size limit.',PROFILE_NOT_FOUND:'Voice no longer exists. Refresh the library.',PROFILE_ACTIVE:'Voice is currently in use. Try again after generation.',REFERENCE_INVALID:'Saved reference changed or failed integrity checks.',NATIVE_BUSY:'GPU is already processing a request.',LICENCE_NOT_READY:'Model provenance and explicit terms acceptance are required.',RUNTIME_NOT_READY:'Q8_0, native executable or Vulkan0 did not pass readiness.',NATIVE_TIMEOUT:'Native generation timed out.',CLIENT_DISCONNECTED:'Generation cancelled after browser disconnect.',NATIVE_FAILURE:'Native generation failed. No WAV was published.',NATIVE_PROOF_MISSING:'Device verification was missing or did not match NVIDIA Vulkan0.',INVALID_WAV:'The server response was not a valid 24 kHz PCM16 WAV.',MIGRATION_FAILED:'Legacy voice could not be migrated. No successful import was reported.',PURGE_INCOMPLETE:'Profile removed, but owned audio cleanup requires manual local review.',MIGRATION_SOURCE_UNAVAILABLE:'Close VoiceStudio and check %APPDATA%/OmniVoice/omnivoice.db, or configure the trusted legacy root on the server.'};
+let voices=[],chosen='',editor='',controller=null,ttsUrl=null,refUrl=null,cloneUrl=null,replaceUrl=null,diagnostic=null,diagnosticController=null,licenceFingerprint=null,licenceAccepted=false,working=false,runtimeChecking=false;
+const errors={INVALID_TRANSCRIPT:'Enter the exact transcript of the NEW reference (or explicitly confirm same words).',INVALID_REQUEST:'Check required fields and the exact transcript.',INVALID_AUDIO:'Reference could not be decoded. Use an owned WAV or MP3.',AUDIO_TOO_LARGE:'Recording exceeds the local size limit.',PROFILE_NOT_FOUND:'Voice no longer exists. Refresh the library.',PROFILE_ACTIVE:'Voice is currently in use. Try again after generation.',REFERENCE_INVALID:'Saved reference changed or failed integrity checks.',NATIVE_BUSY:'GPU is already processing a request.',LICENCE_NOT_READY:'Model provenance and explicit terms acceptance are required.',RUNTIME_NOT_READY:'Q8_0, native executable or Vulkan0 did not pass readiness.',NATIVE_TIMEOUT:'Native generation timed out.',CLIENT_DISCONNECTED:'Generation cancelled after browser disconnect.',NATIVE_FAILURE:'Native generation failed. No WAV was published.',NATIVE_PROOF_MISSING:'Device verification was missing or did not match NVIDIA Vulkan0.',INVALID_WAV:'The server response was not a valid 24 kHz PCM16 WAV.',MIGRATION_FAILED:'Legacy voice could not be migrated. No successful import was reported.',PURGE_INCOMPLETE:'Profile removed, but owned audio cleanup requires manual local review.',MIGRATION_SOURCE_UNAVAILABLE:'Close VoiceStudio and check %APPDATA%/OmniVoice/omnivoice.db, or configure the trusted legacy root on the server.'};
 const safeError=e=>errors[e.code]||((e.name==='AbortError')?'Request cancelled.':'Local request failed. Check service status.');
 function notice(message,bad=false){const n=$('notice');n.textContent=message;n.className='notice'+(bad?' error':'');n.hidden=false;}
 function busy(button,state){button.disabled=state;button.setAttribute('aria-busy',String(state));}
@@ -51,7 +51,26 @@ $('clone-form').addEventListener('submit',async e=>{e.preventDefault();const b=$
     notice('Voice profile saved locally. Select it in Text to Speech.');
     openView('tts');
   }catch(e){notice(safeError(e),true);$('clone-result').textContent='Not created';}finally{busy(b,false);}});
-function editVoice(id){editor=id;const v=voices.find(p=>p.id===id);if(!v)return;
+function resetReplacement(){
+  $('replace-form').reset();$('replace-text').disabled=false;$('replace-text').required=true;
+  if(replaceUrl){URL.revokeObjectURL(replaceUrl);replaceUrl=null;}
+  $('replace-preview').removeAttribute('src');$('replace-preview').load();$('replace-preview').hidden=true;
+  $('replace-state').textContent='No new recording selected.';
+}
+$('replace-file').addEventListener('change',e=>{
+  if(replaceUrl){URL.revokeObjectURL(replaceUrl);replaceUrl=null;}
+  const file=e.target.files[0];$('replace-preview').hidden=!file;
+  $('replace-preview').removeAttribute('src');
+  if(file){replaceUrl=URL.createObjectURL(file);$('replace-preview').src=replaceUrl;
+    $('replace-state').textContent='Preview the new recording and confirm its exact spoken words.';}
+  else $('replace-state').textContent='No new recording selected.';
+});
+$('replace-same').addEventListener('change',e=>{
+  const same=e.target.checked;
+  $('replace-text').disabled=same;$('replace-text').required=!same;
+  if(same)$('replace-text').value='';
+});
+function editVoice(id){if(editor!==id)resetReplacement();editor=id;const v=voices.find(p=>p.id===id);if(!v)return;
   const f=$('edit-form');f.elements.name.value=v.name;f.elements.language.value=v.language;f.elements.ref_text.value=v.ref_text;
   $('editor-id').textContent=v.id+' · version '+v.version;
   $('editor-consent').textContent=v.consent?'Current reference: owner acknowledged':'Current reference: UNCONFIRMED (no owner acknowledgement)';
@@ -65,11 +84,28 @@ $('reference-play').addEventListener('click',async ()=>{try{const r=await api.pr
   revoke('saved-preview');refUrl=URL.createObjectURL(new Blob([bytes],{type:'audio/wav'}));
   $('saved-preview').src=refUrl;$('saved-preview').hidden=false;notice('Validated saved reference ready for playback.');
 }catch(e){notice(safeError(e),true);}});
-$('replace-form').addEventListener('submit',async e=>{e.preventDefault();const b=$('replace-submit');busy(b,true);
-  try{if(!$('replace-consent').checked){notice('Confirm permission for the NEW recording.',true);return;}
+$('replace-form').addEventListener('submit',async e=>{
+  e.preventDefault();const b=$('replace-submit'),target=editor;
+  if(b.disabled)return;busy(b,true);$('replace-state').textContent='Normalizing and saving the new reference…';
+  try{
+    const same=$('replace-same').checked,transcript=$('replace-text').value;
+    if(!same&&(!transcript.trim()||transcript.length>4096)){
+      notice('Enter the exact spoken transcript for the NEW recording.',true);return;
+    }
+    if(!$('replace-consent').checked){notice('Confirm permission for the NEW recording.',true);return;}
     const form=new FormData(e.target);form.set('consent','owner-confirmed-local');
-    const result=await api.replaceAudio(editor,form);await loadVoices();editVoice(result.id);notice('Reference updated to version '+result.version+' (stable voice ID unchanged).');e.target.reset();
-  }catch(err){notice(safeError(err),true)}finally{$('replace-consent').checked=false;busy(b,false);}});
+    if(same){form.delete('ref_text');form.set('reuse_existing_transcript','true');}
+    else form.set('ref_text',transcript);
+    const result=await api.replaceAudio(target,form);
+    await loadVoices();
+    if(editor===target){
+      resetReplacement();editVoice(result.id);
+      $('replace-state').textContent='Saved version '+result.version+' with '+(same?'explicitly reconfirmed existing words':'the new exact transcript')+'.';
+    }
+    notice('Reference and transcript saved to version '+result.version+' (stable voice ID unchanged).');
+  }catch(err){notice(safeError(err),true);$('replace-state').textContent='Replacement failed. Previous saved version is unchanged.';}
+  finally{resetReplacement();busy(b,false);}
+});
 async function deleteVoice(purge){if(!editor)return;const id=editor;const words=purge?'delete this Lite profile AND its owned reference files':'remove this profile record while RETAINING its reference files';
   if(!window.confirm('Do you want to '+words+'? This never removes original VoiceStudio data.'))return;
   try{const result=await api.remove(id,purge);$('editor-panel').hidden=true;editor='';revoke('saved-preview');await loadVoices();
@@ -97,15 +133,18 @@ $('tts-form').addEventListener('submit',async e=>{e.preventDefault();if(working)
 function appendDetail(root,key,val){const d=document.createElement('div');d.className='detail';const label=document.createElement('span');label.textContent=key;
   const value=document.createElement('strong');value.textContent=val==null?'Not verified':String(val);d.append(label,value);root.append(d);}
 function metric(name,value){const d=document.createElement('div');d.className='metric';const a=document.createElement('span');a.textContent=name;const b=document.createElement('strong');b.textContent=String(value);d.append(a,b);return d;}
-async function refreshRuntime(){const b=$('runtime-refresh');busy(b,true);$('runtime-checked').textContent='Checking local artifacts. This may read the full Q8_0 weights…';
-  try{const [ready,quant,details,acceptance]=await Promise.all([
-    api.request('/lite/readiness'),api.request('/engines/omnivoice-gguf/quants'),
-    api.request('/models/licenses/details/Serveurperso/OmniVoice-GGUF'),
-    api.request('/models/licenses/acceptance/Serveurperso/OmniVoice-GGUF')]);
+async function refreshRuntime(){
+  if(runtimeChecking)return;
+  runtimeChecking=true;const b=$('runtime-refresh');busy(b,true);
+  $('runtime-checked').textContent='Checking local artifacts. This may read the full Q8_0 weights…';
+  try{const [ready,details]=await Promise.all([
+    api.request('/lite/readiness'),
+    api.request('/models/licenses/details/Serveurperso/OmniVoice-GGUF')]);
+    const quant=ready.quant||{},acceptance=details.acceptance||ready.licence||{};
     $('runtime-checked').textContent='Last checked: '+new Date().toLocaleString()+' · Manual refresh only';
-    const metrics=$('runtime-summary');metrics.replaceChildren(metric('Readiness',ready.ready?'Ready':'Not ready'),metric('GPU',ready.gpu?.name||'Not verified'),metric('Quantization','Q8_0'),metric('Native',ready.binary?'Files verified':'Not ready'));
+    const metrics=$('runtime-summary');metrics.replaceChildren(metric('Full Lite',ready.ready?'Ready':'Not ready'),metric('TTS',ready.tts_ready?'Ready':'Not ready'),metric('Cloning',ready.cloning_ready?'Ready':'Not ready'),metric('GPU',ready.gpu?.name||'Not verified'),metric('Quantization',quant.prepared_quant||'Q8_0'),metric('Native',ready.binary?'Files verified':'Not ready'));
     const output=$('runtime-details');output.replaceChildren();
-    [['Backend requested','Vulkan0'],['GPU0 vendor',ready.gpu?.vendor_id],['VRAM',ready.gpu?.vram_mib?ready.gpu.vram_mib+' MiB':null],['FFmpeg',ready.ffmpeg_installed===true?'Installed':ready.ffmpeg_installed===false?'Missing — install FFmpeg':'Not verified'],['Base',quant.base],['Tokenizer',quant.tokenizer],['Model revision',quant.revision],['Native revision',quant.runtime_revision],['Busy',ready.busy?'Yes':'No'],['Verified pair',quant.verified?'Yes':'No'],['Actual in use',quant.in_use||'Not running'],['Issues',ready.issues?.join('; ')||'None reported']].forEach(([key,value])=>appendDetail(output,key,value));
+    [['Runtime engine',ready.runtime_ready?'Verified':'Not ready'],['Backend requested','Vulkan0'],['GPU0 vendor',ready.gpu?.vendor_id],['VRAM',ready.gpu?.vram_mib?ready.gpu.vram_mib+' MiB':null],['FFmpeg',ready.ffmpeg_installed===true?'Installed':ready.ffmpeg_installed===false?'Missing — install FFmpeg':'Not verified'],['Base',quant.base],['Tokenizer',quant.tokenizer],['Model revision',quant.revision],['Native revision',quant.runtime_revision],['Busy',ready.busy?'Yes':'No'],['Verified pair',quant.verified?'Yes':'No'],['Actual in use',quant.in_use||'Not running'],['Issues',ready.issues?.join('; ')||'None reported']].forEach(([key,value])=>appendDetail(output,key,value));
     const rights=$('licence-details');rights.replaceChildren();
     const model=details.info||{},reviewed=details.reviewed_terms||{};
     [['Model ID',reviewed.model||acceptance.repo_id],['Pinned revision',reviewed.model_revision||acceptance.model_revision],
@@ -129,8 +168,14 @@ async function refreshRuntime(){const b=$('runtime-refresh');busy(b,true);$('run
     }
     licenceFingerprint=acceptance.fingerprint;licenceAccepted=acceptance.accepted;$('licence-review').checked=false;
     $('licence-accept').disabled=acceptance.accepted;$('licence-withdraw').disabled=!acceptance.accepted;
-    $('status-short').textContent=ready.ready?'Q8_0 runtime ready':'Runtime not ready';$('status-dot').className='status-dot'+(ready.ready?' ok':' bad');
-  }catch(err){$('runtime-checked').textContent='Readiness failed';notice(safeError(err),true);}finally{busy(b,false);}}
+    $('status-short').textContent=ready.ready?'Full Lite ready':ready.tts_ready?'TTS ready; cloning needs FFmpeg':'Lite not ready';$('status-dot').className='status-dot'+(ready.ready?' ok':' bad');
+  }catch(err){
+    $('runtime-checked').textContent='Readiness FAILED — previous results are stale and hidden';
+    $('runtime-summary').replaceChildren(metric('Verification','FAILED — NOT CURRENT'));
+    $('runtime-details').replaceChildren();
+    $('status-short').textContent='Readiness check failed';$('status-dot').className='status-dot bad';
+    notice(safeError(err),true);
+  }finally{runtimeChecking=false;busy(b,false);}}
 $('runtime-refresh').addEventListener('click',refreshRuntime);
 $('licence-form').addEventListener('submit',async e=>{e.preventDefault();
   if(!licenceFingerprint||!$('licence-review').checked){notice('Review the exact model terms before acceptance.',true);return;}
@@ -205,5 +250,5 @@ $('diagnostic-start').addEventListener('click',async()=>{
 });
 $('diagnostic-export').addEventListener('click',()=>{if(!diagnostic||diagnostic.status!=='complete')return;
   const url=URL.createObjectURL(new Blob([JSON.stringify(diagnostic,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='lite-ui-diagnostic.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
-window.addEventListener('beforeunload',()=>{if(controller)controller.abort();if(diagnosticController)diagnosticController.abort();if(ttsUrl)URL.revokeObjectURL(ttsUrl);if(refUrl)URL.revokeObjectURL(refUrl);if(cloneUrl)URL.revokeObjectURL(cloneUrl);});
+window.addEventListener('beforeunload',()=>{if(controller)controller.abort();if(diagnosticController)diagnosticController.abort();if(ttsUrl)URL.revokeObjectURL(ttsUrl);if(refUrl)URL.revokeObjectURL(refUrl);if(cloneUrl)URL.revokeObjectURL(cloneUrl);if(replaceUrl)URL.revokeObjectURL(replaceUrl);});
 loadVoices();cheapStatus();openView(['clone','library','tts','runtime'].includes(location.hash.slice(1))?location.hash.slice(1):'clone');

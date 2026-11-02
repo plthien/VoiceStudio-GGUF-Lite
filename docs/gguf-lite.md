@@ -146,3 +146,7 @@ replace trusted SHA verification with filename-only or mtime-only caching.
 ## New local Web UI
 
 Use `http://127.0.0.1:3900/ui` after launching the same localhost FastAPI service. See [UI, cloning, migration and rights guide](gguf-lite-ui.md). Existing YouTube HTTP callers remain unchanged; see the [future integration contract](integrations/youtube-ai-studio-tts-contract.md).
+
+## Full Lite readiness semantics (CLI and HTTP)
+
+The raw engine `runtime.preflight()` and `GET /engines/omnivoice-gguf/quants` keep **engine-only** readiness: pinned native files, Q8_0 base/tokenizer pair and observed NVIDIA GTX1650 Vulkan0. Both `python -m lite.preflight` and `GET /lite/readiness` now use the same `complete_readiness` evaluation: `runtime_ready` (engine), `tts_ready` (engine + accepted/reconciled terms + owned data directory), `cloning_ready` (TTS + FFmpeg available). The existing top-level `ready` is conservatively `cloning_ready` on both; `ffmpeg` and `ffmpeg_installed` are the same boolean. FFmpeg absence **does not** downgrade verified GPU engine or TTS prerequisites; external TTS clients must explicitly read `tts_ready` if they do not need cloning. `/health` remains liveness, `/lite/status` remains cheap without GPU/model scanning, and full readiness does not mean live inference succeeded.
