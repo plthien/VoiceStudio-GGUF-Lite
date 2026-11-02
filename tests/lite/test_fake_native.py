@@ -109,12 +109,17 @@ def test_concurrent_native_busy_rejects_without_queue(fixture):
     runner.settings=Settings(data_dir=root,cache_dir=root,bin_dir=runner.settings.bin_dir,timeout=10)
     async def execute():
         first=asyncio.create_task(runner.generate(**_params(root,"slow")))
-        await asyncio.sleep(0.05)
+        for _ in range(200):
+            if runner.process is not None and runner.process.returncode is None:
+                break
+            await asyncio.sleep(0.01)
+        assert runner.process is not None and runner.process.returncode is None
         with pytest.raises(NativeBusy):
             await runner.generate(**_params(root,"hello"))
         await runner.stop()
-        with pytest.raises((NativeFailure,Exception)):
+        with pytest.raises(NativeFailure):
             await first
+        assert runner.process is None and runner.active_id is None
     asyncio.run(execute())
     assert not list(root.glob("lite-*"))
 

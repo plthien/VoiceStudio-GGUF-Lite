@@ -249,3 +249,21 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         assert native.count>=5
         page.screenshot(path=str(shots/("runtime-"+str(viewport["width"])+".png")),full_page=True)
         browser.close()
+
+@pytest.mark.timeout(60)
+def test_runtime_ffmpeg_installed_and_missing_truth(ui_server,monkeypatch):
+    base,_=ui_server
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        page=browser.new_page(viewport={"width":390,"height":844})
+        import lite.app as appmodule
+        monkeypatch.setattr(appmodule.shutil,"which",lambda name:"/fake/ffmpeg" if name=="ffmpeg" else None)
+        page.goto(base+"/ui",wait_until="domcontentloaded")
+        page.locator('[data-view="runtime"]').click()
+        expect(page.locator("#runtime-details")).to_contain_text("Installed",timeout=10000)
+        assert page.request.get(base+"/lite/status").json()["ffmpeg_installed"] is True
+        monkeypatch.setattr(appmodule.shutil,"which",lambda _:None)
+        page.locator("#runtime-refresh").click()
+        expect(page.locator("#runtime-details")).to_contain_text("Missing — install FFmpeg",timeout=10000)
+        assert page.request.get(base+"/lite/status").json()["ffmpeg_installed"] is False
+        browser.close()

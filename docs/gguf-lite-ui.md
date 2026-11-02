@@ -21,3 +21,7 @@ Use manual **Refresh readiness** since this re-hashes multi-GB Q8 model files. L
 
 ## Owner-only host verification
 Browser CI uses deterministic fake native WAV/headers, NOT physical NVIDIA GTX1650. On the actual Windows host, upload a **fresh** reference (different from migrated Ink Explainer), produce verified native WAV with its new profile ID, inspect playback/download and edit/replace/delete. Keep private audio, logs, model weights and native binaries out of public Git.
+
+FFmpeg status is read from the boolean `ffmpeg_installed` returned by both `/lite/readiness` (manual verification) and cheap `/lite/status`. FFmpeg is needed to normalize newly uploaded references; it is not native GPU attestation. The reference replacement checkbox records an explicit acknowledgement per new recording. API clients omitting optional `consent` still work but result in a null/unconfirmed consent record; previous consent is never inherited.
+
+Speech admission is acquired before reading a mutable profile/reference and held through native completion or cancellation. Concurrent profile edits, replacement, deletion and selected migration fail with typed busy responses; the native runner retains its separate single-process lock. No automatic generation retry or durable server queue has been added.

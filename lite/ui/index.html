@@ -75,7 +75,7 @@
       </div>
       <div class="panel">
         <div class="panel-heading split"><div><span class="overline">READ-ONLY SOURCE</span><h2>Import legacy voices</h2><p>Configured locally on the server. No arbitrary browser paths.</p></div><button type="button" class="secondary" id="migration-preview">Preview migration</button></div>
-        <p class="muted">Set <code>GGUF_LITE_LEGACY_ROOT</code> on the server. Dry-run never changes original VoiceStudio files.</p>
+        <p class="muted">Default source: <code>%APPDATA%\\OmniVoice\\omnivoice.db</code> and <code>voices/</code>. Set <code>GGUF_LITE_LEGACY_ROOT</code> only for a custom trusted root. Preview never changes source files.</p>
         <div id="migration-feedback" role="status" aria-live="polite"></div><div id="migration-list" class="voice-list"></div>
         <div class="actions"><label for="migration-choice">Choose one eligible voice</label><select id="migration-choice" aria-label="Legacy voice to import"><option value="">Preview sources first</option></select><button type="button" id="migration-apply" class="primary" disabled>Import selected voice</button></div>
       </div>
