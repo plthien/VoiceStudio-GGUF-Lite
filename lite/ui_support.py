@@ -17,8 +17,18 @@ def legacy_sources() -> tuple[Path,Path]:
     root=root.resolve(strict=True)
     if not root.is_dir():
         raise ValueError("Legacy root unavailable")
-    database=Path(os.environ["GGUF_LITE_LEGACY_DB"]) if os.environ.get("GGUF_LITE_LEGACY_DB") else root/"voices.sqlite3"
-    voices=Path(os.environ["GGUF_LITE_LEGACY_VOICES"]) if os.environ.get("GGUF_LITE_LEGACY_VOICES") else root/"voices"
+    if os.name=="nt" and str(root).startswith("\\\\"):
+        raise ValueError("UNC legacy root is not permitted")
+    def inside_root(env_name,default):
+        raw=os.environ.get(env_name)
+        if not raw:
+            return root/default
+        candidate=Path(raw).expanduser()
+        if ".." in candidate.parts:
+            raise ValueError("Parent traversal is not permitted")
+        return candidate if candidate.is_absolute() else root/candidate
+    database=inside_root("GGUF_LITE_LEGACY_DB","omnivoice.db")
+    voices=inside_root("GGUF_LITE_LEGACY_VOICES","voices")
     for source in (database,voices):
         if source.is_symlink() or not source.resolve(strict=True).is_relative_to(root):
             raise ValueError("Legacy path outside server-configured root")

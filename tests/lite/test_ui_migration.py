@@ -16,7 +16,7 @@ def test_fixed_path_migration_without_browser_filesystem_paths(tmp_path,monkeypa
     with wave.open(str(original),"wb") as f:
         f.setnchannels(1);f.setsampwidth(2);f.setframerate(24000)
         f.writeframes(b"\x01\x00"*2400)
-    db=root/"voices.sqlite3"
+    db=root/"omnivoice.db"
     with sqlite3.connect(db) as conn:
         conn.execute("CREATE TABLE voice_profiles(id TEXT,name TEXT,ref_audio_path TEXT,ref_text TEXT,language TEXT,kind TEXT)")
         conn.execute("INSERT INTO voice_profiles VALUES(?,?,?,?,?,?)",

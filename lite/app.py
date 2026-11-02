@@ -144,6 +144,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
     app.state.store = store or Store(settings)
     app.state.licence = licence or Licence(settings)
     app.state.runner = runner or Runner(settings)
+    # Admission ownership begins BEFORE mutable profile/reference resolution.
+    # The runner retains its independent one-native-process lock.
+    app.state.admission = asyncio.Lock()
     app.include_router(ui_router)
 
     @app.middleware("http")
@@ -184,6 +187,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
     @app.get("/lite/readiness")
     async def readiness():
         state = await asyncio.to_thread(preflight, settings)
+        state["ffmpeg_installed"] = bool(shutil.which("ffmpeg"))
         state["licence"] = app.state.licence.status()
         state["voice_store"] = {"healthy": settings.data_dir.is_dir()}
         state["busy"] = app.state.runner.lock.locked()
@@ -213,15 +217,16 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
 
     @app.post("/lite/migration/apply")
     async def migration_selected(payload:MigrationSelection):
-        if app.state.runner.lock.locked():
+        if app.state.admission.locked() or app.state.runner.lock.locked():
             return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
-            db,voices=legacy_sources()
-            result=await asyncio.to_thread(migration_apply,db,voices,settings,payload.voice_id)
-            if result["failed"]:
-                return failure(409,"MIGRATION_FAILED","Migration failed; inspect local source and permissions")
-            return result
-        except (ValueError,OSError,RuntimeError) as exc:
+            async with app.state.admission:
+                db,voices=legacy_sources()
+                result=await asyncio.to_thread(migration_apply,db,voices,settings,payload.voice_id)
+                if result["failed"]:
+                    return failure(409,"MIGRATION_FAILED","Migration failed; inspect local source and permissions")
+                return result
+        except (ValueError,OSError,RuntimeError):
             return failure(409,"MIGRATION_FAILED","Legacy source changed or unavailable")
 
     @app.get("/v1/audio/voices")
@@ -252,7 +257,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         row = app.state.store.get(profile_id)
         return row if row else failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
 
-    async def upload(name: str, ref_text: str, language: str, ref_audio: UploadFile,
+    async def upload(name: str | None, ref_text: str | None, language: str | None, ref_audio: UploadFile,
                      profile_id: str | None = None, consent: str | None = None):
         if not ref_audio.filename:
             return failure(422, "AUDIO_REQUIRED", "WAV or MP3 is required")
@@ -260,12 +265,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         payload = await ref_audio.read(settings.max_ref_bytes + 1)
         if len(payload) > settings.max_ref_bytes:
             return failure(413, "AUDIO_TOO_LARGE", "Reference is too large")
-        if profile_id is not None and profile_id == app.state.runner.active_id:
-            return failure(409, "PROFILE_ACTIVE", "Voice in active inference")
+        if app.state.admission.locked() or app.state.runner.lock.locked():
+            return failure(409,"PROFILE_ACTIVE","Native inference or mutation is active")
         try:
-            if profile_id is not None and app.state.runner.lock.locked():
-                return failure(409,"PROFILE_ACTIVE","Native inference may be using this reference")
-            async with app.state.runner.lock:
+            async with app.state.admission:
+                if profile_id is not None:
+                    existing = app.state.store.get(profile_id)
+                    if existing is None:
+                        return failure(404,"PROFILE_NOT_FOUND","Unknown voice ID")
+                    name,ref_text,language=(existing[k] for k in ("name","ref_text","language"))
                 return await asyncio.to_thread(app.state.store.import_audio,
                     name=name, ref_text=ref_text, language=language, source=payload,
                     suffix=suffix, profile_id=profile_id, consent=consent)
@@ -281,18 +289,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         return await upload(name, ref_text, language, ref_audio,consent=consent)
 
     @app.put("/profiles/{profile_id}/audio")
-    async def replace_audio(profile_id: str, ref_audio: UploadFile = File(...)):
-        row = app.state.store.get(profile_id)
-        if not row:
-            return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
-        return await upload(row["name"], row["ref_text"], row["language"], ref_audio, profile_id)
+    async def replace_audio(profile_id: str, ref_audio: UploadFile = File(...),
+                            consent: str | None = Form(None)):
+        # Previous reference's consent NEVER transfers to a different recording.
+        return await upload(None, None, None, ref_audio, profile_id, consent=consent)
 
     @app.put("/profiles/{profile_id}")
     async def update_profile(profile_id: str, patch: ProfilePatch):
-        if app.state.runner.lock.locked():
+        if app.state.admission.locked() or app.state.runner.lock.locked():
             return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
-            async with app.state.runner.lock:
+            async with app.state.admission:
                 return await asyncio.to_thread(app.state.store.update,profile_id,
                     patch.model_dump(exclude_unset=True))
         except KeyError:
@@ -302,10 +309,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
 
     @app.delete("/profiles/{profile_id}")
     async def delete_profile(profile_id: str, purge: bool = False):
-        if app.state.runner.lock.locked():
+        if app.state.admission.locked() or app.state.runner.lock.locked():
             return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
-            async with app.state.runner.lock:
+            async with app.state.admission:
                 await asyncio.to_thread(app.state.store.delete,profile_id,
                     active_id=app.state.runner.active_id,purge=purge)
         except KeyError:
@@ -342,6 +349,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
 
     @app.post("/v1/audio/speech")
     async def speech(payload: Speech, request: Request):
+        # Non-queuing admission: once acquired, profile row/reference remain
+        # stable until native success, failure, disconnect or termination.
+        if app.state.admission.locked() or app.state.runner.lock.locked():
+            return failure(429,"NATIVE_BUSY","One native inference already active",retry=True)
+        async with app.state.admission:
+            return await _speech_admitted(payload,request)
+
+    async def _speech_admitted(payload:Speech,request:Request):
         state = app.state
         if state.runner.lock.locked():
             return failure(429, "NATIVE_BUSY", "One native inference already active", retry=True)

@@ -59,7 +59,7 @@ def ui_server(tmp_path,monkeypatch):
     root.mkdir()
     (root/"voices").mkdir()
     (root/"voices"/"legacy.wav").write_bytes(audio())
-    with sqlite3.connect(root/"voices.sqlite3") as db:
+    with sqlite3.connect(root/"omnivoice.db") as db:
         db.execute("CREATE TABLE voice_profiles(id TEXT,name TEXT,ref_audio_path TEXT,ref_text TEXT,language TEXT,kind TEXT)")
         db.execute("INSERT INTO voice_profiles VALUES(?,?,?,?,?,?)",
                    ("legacy-ink","Legacy Ink","legacy.wav","Old exact words","en","clone"))
