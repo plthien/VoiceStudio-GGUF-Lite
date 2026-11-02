@@ -80,7 +80,7 @@ function Assert-NativeManifest([string]$directory,[bool]$requireSpeed) {
         throw "Native component is not PE: $($file.Name)"
       }
     } finally { $stream.Dispose() }
-    if ((Get-NativeSha256 $file) -ne $entries[$file.Name]) {
+    if ((Get-NativeSha256 $file.FullName) -ne $entries[$file.Name]) {
       throw "Native file checksum mismatch: $($file.Name)"
     }
   }
