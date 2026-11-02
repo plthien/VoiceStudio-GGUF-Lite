@@ -1,5 +1,12 @@
 // Compiled against the EXACT patched pinned src/duration-estimator.h in CI.
 #include "duration-estimator.h"
+#include "omnivoice.h"
+#include <cstddef>
+#include <type_traits>
+static_assert(OV_ABI_VERSION==3,"Native speed requires ABI v3");
+static_assert(std::is_standard_layout<ov_tts_params>::value,"C ABI must be standard layout");
+static_assert(offsetof(ov_tts_params,speed)>offsetof(ov_tts_params,on_chunk_user_data),
+              "Speed must be an ABI-v3 TAIL field");
 // Included transitively from the patched pinned duration-estimator.h.
 #include <cassert>
 #include <climits>
