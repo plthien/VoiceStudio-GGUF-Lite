@@ -264,6 +264,7 @@ class Runner:
                       "speech_rtf":round(elapsed/speech_s,3),
                       "pause_s":counts["pause_frames"]/24000,
                       "speech_s":speech_s}
+                remaining()  # Whole-request deadline also bounds final assembly.
                 LOG.info("native_paused_complete request=%s segments=%d pause_frames=%d",
                          request_id,len(verified),counts["pause_frames"])
                 return assembled,info

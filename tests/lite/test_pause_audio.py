@@ -50,3 +50,11 @@ def test_reject_invalid_segment():
     s=parse_pause_script("A[pause]B")
     with pytest.raises(AudioError):
         assemble_pause_wav(s,[sample(),b"not a WAV"])
+
+def test_exact_600_second_final_limit():
+    # 599 seconds of valid PCM plus two explicit seconds must be rejected.
+    # The final allocation is checked before writing one enormous WAV.
+    original=sample(24000*599)
+    script=parse_pause_script("Speech[pause 2s]")
+    with pytest.raises(AudioError):
+        assemble_pause_wav(script,[original])

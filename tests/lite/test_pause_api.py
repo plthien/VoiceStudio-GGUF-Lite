@@ -224,3 +224,27 @@ def test_single_deadline_not_n_times_timeout(system):
         assert runner.process is None and not runner.lock.locked()
         assert not list(root.glob("lite-pause-*"))
     asyncio.run(run())
+
+def test_explicit_pause_duration_unchanged_at_two_native_speeds(system):
+    app,runner,settings,pairs,root=system
+    import lite.app as appmodule
+    with TestClient(app) as c:
+        base=c.post("/v1/audio/speech",json=body("Alpha[pause 1500ms]Beta",speed=1.0))
+        fast=c.post("/v1/audio/speech",json=body("Alpha[pause 1500ms]Beta",speed=1.15))
+    assert base.status_code==fast.status_code==200
+    assert base.headers["x-lite-pause-s"]==fast.headers["x-lite-pause-s"]=="1.5"
+    assert int(base.headers["x-lite-pause-count"])==int(fast.headers["x-lite-pause-count"])==1
+    assert wav_info(base.content)["frames"]==wav_info(fast.content)["frames"]
+    assert "x-lite-speech-segments" in fast.headers
+    observed=(root/"audit.txt").read_text().splitlines()
+    assert observed[0].split("|")[1]=="None"
+    assert observed[-1].split("|")[1]!="None"
+
+def test_same_native_untagged_wav_bytes_at_seed_42(system):
+    app,runner,settings,pairs,root=system
+    with TestClient(app) as c:
+        first=c.post("/v1/audio/speech",json=body("Same narration exactly",seed=42))
+        second=c.post("/v1/audio/speech",json=body("Same narration exactly",seed=42))
+    assert first.status_code==second.status_code==200
+    assert first.content==second.content
+    assert "x-lite-pause-count" not in first.headers
