@@ -38,6 +38,7 @@ class FakeNative:
         self.attempts=0
         self.fail_on=None
         self.slow_on=None
+        self.observed=[]
     async def generate(self,*,profile,reference,text,language,seed,request_id):
         self.attempts+=1
         if self.fail_on==self.attempts:
@@ -47,6 +48,8 @@ class FakeNative:
         if text=="failed":
             raise NativeFailure("Synthetic failure")
         async with self.lock:
+            self.observed.append({"id":profile["id"],"ref_text":profile["ref_text"],
+                                  "reference":reference.read_bytes(),"version":profile["version"]})
             self.active_id=profile["id"]
             try:
                 await asyncio.sleep(1.1 if text=="slow" or self.slow_on==self.attempts else .025)
@@ -203,13 +206,34 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#voice-list")).to_contain_text("Renamed voice")
         page.locator("#reference-play").click()
         expect(page.locator("#saved-preview")).to_be_visible()
+        # No UI submission without new transcript or a deliberate same-words choice.
         page.locator('#replace-consent').check()
         page.locator('#replace-form input[type=file]').set_input_files({
           "name":"replacement.wav","mimeType":"audio/wav","buffer":audio()})
+        expect(page.locator("#replace-preview")).to_be_visible()
+        page.locator("#replace-submit").click()
+        expect(page.locator("#editor-id")).to_contain_text("version 1")
+        page.locator("#replace-text").fill("Different spoken words on recording B")
+        stable_id=voice
         page.locator("#replace-submit").click()
         expect(page.locator("#editor-id")).to_contain_text("version 2")
+        expect(page.locator('#edit-form textarea[name="ref_text"]')).to_have_value("Different spoken words on recording B")
+        assert page.request.get(base+"/profiles/"+stable_id).json()["ref_text"]=="Different spoken words on recording B"
+        page.locator("#reference-play").click()
+        expect(page.locator("#saved-preview")).to_be_visible()
+        page.locator('[data-view="tts"]').click()
+        page.locator("#tts-text").fill("Use the replacement recording")
+        page.locator("#tts-submit").click()
+        expect(page.locator("#tts-output")).to_be_visible()
+        assert native.observed[-1]["id"]==stable_id
+        assert native.observed[-1]["ref_text"]=="Different spoken words on recording B"
+        assert native.observed[-1]["version"]==2
+        page.locator('[data-view="library"]').click()
+        expect(page.locator("#editor-panel")).to_be_visible()
         expect(page.locator("#editor-consent")).to_contain_text("acknowledged")
         assert not page.locator("#replace-consent").is_checked()
+        assert not page.locator("#replace-same").is_checked()
+        assert page.locator("#replace-text").input_value()==""
         page.locator("#migration-preview").click()
         expect(page.locator("#migration-list")).to_contain_text("legacy-ink")
         page.locator("#migration-choice").select_option("legacy-ink")

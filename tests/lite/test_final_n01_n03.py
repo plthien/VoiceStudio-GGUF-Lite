@@ -57,3 +57,60 @@ def test_n02_shared_cli_http_readiness_without_ffmpeg(tmp_path,monkeypatch,capsy
         assert api[key]==console[key],(key,api,console)
     assert api["runtime_ready"] is True and api["tts_ready"] is True
     assert api["cloning_ready"] is False and api["ready"] is False
+
+
+def test_n01_explicit_same_words_and_legacy_no_text_compatibility(tmp_path,monkeypatch):
+    import hashlib
+    from lite.profiles import Store
+    monkeypatch.setattr("lite.profiles.shutil.which",lambda _: "ffmpeg")
+    monkeypatch.setattr("lite.profiles.convert_reference",lambda src,dst,**kw:dst.write_bytes(wav()))
+    s=Settings(data_dir=tmp_path/"data",cache_dir=tmp_path/"cache",bin_dir=tmp_path/"bin",timeout=30)
+    with TestClient(create_app(s)) as c:
+        row=c.post("/profiles",data={"name":"Test","ref_text":"Old exact words","consent":"original"},
+            files={"ref_audio":("a.wav",wav(),"audio/wav")}).json()
+        url="/profiles/"+row["id"]+"/audio"
+        explicit=c.put(url,data={"reuse_existing_transcript":"true","consent":"new-acknowledgement"},
+            files={"ref_audio":("b.wav",wav(),"audio/wav")})
+        assert explicit.status_code==200,explicit.text
+        assert explicit.json()["ref_text"]=="Old exact words"
+        assert explicit.json()["consent"]=="new-acknowledgement"
+        assert explicit.json()["version"]==2
+        legacy=c.put(url,files={"ref_audio":("c.wav",wav(),"audio/wav")})
+        assert legacy.status_code==200,legacy.text
+        assert legacy.json()["version"]==3 and legacy.json()["ref_text"]=="Old exact words"
+        assert legacy.json()["consent"] is None
+        assert c.put(url,data={"ref_text":"  "},
+            files={"ref_audio":("d.wav",wav(),"audio/wav")}).status_code==422
+        assert c.put(url,data={"ref_text":"different","reuse_existing_transcript":"true"},
+            files={"ref_audio":("e.wav",wav(),"audio/wav")}).status_code==422
+        assert c.get("/profiles/"+row["id"]).json()["version"]==3
+        before=Store(s).reference(legacy.json()).read_bytes()
+        assert before==wav()
+        assert Store(s).reference(legacy.json()).exists()
+
+def test_n02_full_readiness_truth_table(tmp_path,monkeypatch):
+    import lite.app as appmod
+    from lite.readiness import complete_readiness
+    from lite.config import Settings
+    s=Settings(data_dir=tmp_path/"data",cache_dir=tmp_path/"cache",bin_dir=tmp_path/"bin",timeout=30)
+    engine={"ready":True,"gpu":{"verified":True},"quant":{"verified":True},"binary":True,"issues":[]}
+    for runtime,terms,ffmpeg,expected in (
+      (True,True,True,(True,True,True,True)),
+      (True,True,False,(True,True,False,False)),
+      (True,False,True,(True,False,False,False)),
+      (False,True,True,(False,False,False,False)),
+    ):
+        status={"accepted":terms,"provenance_reconciled":terms}
+        report=complete_readiness({**engine,"ready":runtime},status,store_healthy=True,ffmpeg_installed=ffmpeg)
+        assert tuple(report[k] for k in ("runtime_ready","tts_ready","cloning_ready","ready"))==expected
+        assert report["ffmpeg"]==report["ffmpeg_installed"]==ffmpeg
+    # Quant GET continues reporting raw ENGINE readiness, not full licence gate.
+    monkeypatch.setattr(appmod,"preflight",lambda settings:engine.copy())
+    monkeypatch.setattr(appmod.shutil,"which",lambda _:None)
+    app=create_app(s)
+    monkeypatch.setattr(app.state.licence,"status",lambda:{"accepted":True,"provenance_reconciled":True})
+    with TestClient(app) as c:
+        assert c.get("/engines/omnivoice-gguf/quants").json()["ready"] is True
+        result=c.get("/lite/readiness").json()
+        assert result["ready"] is False and result["tts_ready"] is True
+        assert c.get("/health").json()["ready"] is False
