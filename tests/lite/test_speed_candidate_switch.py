@@ -148,11 +148,28 @@ def case(tmp_path,ps_exe):
     tempfile.mkdir()
     env=os.environ.copy()
     env.update({"TEMP":str(tempfile),"TMP":str(tempfile)})
-    return {
+    context={
         "ps":ps_exe,"base":base,"cand":cand,"backup":backup,
         "private":private,"tmp":tempfile,"env":env,
         "baseline_sha":digest(original[0]),"candidate_sha":digest(cand/NATIVE_NAME),
     }
+    try:
+        yield context
+    finally:
+        # A broken cleanup implementation must not leave the test runner with
+        # orphaned binaries. This teardown is independent of the production
+        # helper; it still makes the regression FAIL with actual orphan PIDs.
+        orphaned=[]
+        for name in ("parent-pid.txt","child-pid.txt"):
+            file=cand/name
+            if file.is_file():
+                process_id=int(file.read_text())
+                if running(process_id):
+                    orphaned.append(process_id)
+                    subprocess.run(["taskkill.exe","/PID",str(process_id),"/T","/F"],
+                                   capture_output=True,text=True,timeout=10)
+        if orphaned:
+            pytest.fail("NS04 leaked real Windows candidate/child PID(s): "+repr(orphaned))
 
 def run_switch(c,mode="Activate",approve=True,timeout=25):
     command=[c["ps"],"-NoProfile","-File",str(SWITCH),
