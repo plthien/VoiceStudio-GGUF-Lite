@@ -33,6 +33,8 @@ jobs:
         run: |
           python -m compileall -q lite
           ffmpeg -version
+      - name: Compile and verify pinned native speed patch (no GPU)
+        run: python scripts/internal/verify-native-speed.py
       - name: Behavioral tests
         run: python -m pytest tests/lite -vv -ra --timeout=30
       - name: Synthetic streaming SHA overhead (not user-host benchmark)
