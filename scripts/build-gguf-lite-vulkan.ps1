@@ -4,6 +4,17 @@ param(
 )
 # Lite-only, pinned Windows x64 Vulkan source build. Never overwrite the baseline.
 $ErrorActionPreference="Stop"
+# Require the Lite-owned Python before any clone, rather than relying on
+# a generic Python executable in the Git Bash PATH.
+$pythonExe=Join-Path $Root ".venv-lite\Scripts\python.exe"
+if (!(Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
+  throw "Lite Python 3.11 not found at $pythonExe. Run .\scripts\install-gguf-lite.ps1 -Root '$Root' first."
+}
+& $pythonExe -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 11) else 2)'
+if ($LASTEXITCODE -ne 0) { throw "Lite build requires the installed Python 3.11 interpreter: $pythonExe" }
+# WSL bash is not supported: the build requires Git Bash and cygpath.
+& $GitBash -c 'command -v cygpath >/dev/null 2>&1'
+if ($LASTEXITCODE -ne 0) { throw "Git Bash with cygpath is required. Pass -GitBash 'C:\Program Files\Git\bin\bash.exe'." }
 $source=(Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $version="886fc079838ca7400cb2b42b36e2a65aa1daabe8"
 $stage=Join-Path $Root ("native-build-" + [guid]::NewGuid().ToString("N"))
@@ -15,8 +26,11 @@ foreach ($helper in @("build-gguf-lite.sh","omnivoice-vulkan.sh","instrument-att
   if (!(Test-Path -PathType Leaf $from)) { throw "Lite build helper missing: $helper" }
   Copy-Item $from $stageScripts
 }
+$previousBuildPython=[Environment]::GetEnvironmentVariable("GGUF_LITE_BUILD_PYTHON","Process")
 Push-Location $stage
 try {
+  # Git Bash converts this Windows path via cygpath before invoking Python.
+  [Environment]::SetEnvironmentVariable("GGUF_LITE_BUILD_PYTHON",$pythonExe,"Process")
   & $GitBash scripts/internal/build-gguf-lite.sh --platform windows-x86_64 --commit-sha $version
   if ($LASTEXITCODE -ne 0) { throw "Pinned Vulkan native build failed; no CPU fallback" }
   $bin=Join-Path $stage "bin"
@@ -57,6 +71,7 @@ try {
   Move-Item $bin $targetBin
   Write-Host "Pinned Vulkan-only runtime installed to $targetBin"
 } finally {
+  [Environment]::SetEnvironmentVariable("GGUF_LITE_BUILD_PYTHON",$previousBuildPython,"Process")
   Pop-Location
   if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 }

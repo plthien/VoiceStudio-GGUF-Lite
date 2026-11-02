@@ -8,7 +8,13 @@ Bun, Torch, ASR or cloud inference. Model Q8_0 revision
 Install with scripts/install-gguf-lite.ps1 and run
 scripts/run-gguf-lite.ps1 -Preflight before service launch.
 Native runtime build: scripts/build-gguf-lite-vulkan.ps1 using Lite-only
-scripts/internal/build-gguf-lite.sh. CPU fallback is forbidden.
+scripts/internal/build-gguf-lite.sh. Install Lite first: the builder requires
+`D:\VoiceStudioBuild\lite\.venv-lite\Scripts\python.exe` (Python 3.11) and
+Git Bash (not WSL bash). If using a custom installer `-Root`, use the same
+`-Root` when building. The PowerShell script verifies Python and Git Bash
+before cloning, passes the explicit executable to Bash, and restores the
+previous environment variable. When necessary, pass
+`-GitBash 'C:\Program Files\Git\bin\bash.exe'`. CPU fallback is forbidden.
 Confirm ggml-vulkan.dll, EXE and checksum manifest on Windows.
 Preinstall exactly Q8_0 base/tokenizer at the pinned HF revision under
 D:\VoiceStudioBuild\models; no Generate-time downloads.

@@ -45,6 +45,32 @@ case "$PLATFORM" in
         ;;
 esac
 
+# Resolve the exact Lite Python before network access or native build.
+if [[ -z "${GGUF_LITE_BUILD_PYTHON:-}" ]]; then
+    echo "GGUF_LITE_BUILD_PYTHON is missing; run scripts/install-gguf-lite.ps1 and use build-gguf-lite-vulkan.ps1" >&2
+    exit 2
+fi
+if [[ "$GGUF_LITE_BUILD_PYTHON" == /* ]]; then
+    PYTHON_BIN="$GGUF_LITE_BUILD_PYTHON"
+else
+    if ! command -v cygpath >/dev/null 2>&1; then
+        echo "Git Bash cygpath is required to resolve Lite Python" >&2
+        exit 2
+    fi
+    PYTHON_BIN="$(cygpath -u "$GGUF_LITE_BUILD_PYTHON")" || {
+        echo "Could not convert GGUF_LITE_BUILD_PYTHON to a Git Bash path" >&2
+        exit 2
+    }
+fi
+if [[ ! -f "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
+    echo "Lite Python executable is unavailable: $GGUF_LITE_BUILD_PYTHON" >&2
+    exit 2
+fi
+if ! "$PYTHON_BIN" -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 11) else 2)'; then
+    echo "Lite build requires a working Python 3.11 interpreter: $GGUF_LITE_BUILD_PYTHON" >&2
+    exit 2
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 # A bare `-j` runs every compile at once. With GGML_CPU_ALL_VARIANTS that is
@@ -63,7 +89,7 @@ git clone --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.cpp.
 git -C "$WORK/src" checkout --detach "$COMMIT_SHA"
 [[ "$(git -C "$WORK/src" rev-parse HEAD)" == "886fc079838ca7400cb2b42b36e2a65aa1daabe8" ]] || exit 2
 git -C "$WORK/src" submodule update --init --recursive
-python "$REPO_ROOT/scripts/internal/instrument-attestation.py" "$WORK/src/src/backend.h"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-attestation.py" "$WORK/src/src/backend.h"
 
 cd "$WORK/src"
 
