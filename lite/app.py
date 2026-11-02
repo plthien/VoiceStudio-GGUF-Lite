@@ -460,6 +460,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                         await generation
                     return failure(499,"CLIENT_DISCONNECTED","Native generation cancelled")
                 data,info=await generation
+                if pause_script is not None:
+                    # Even external disk tampering (outside the localhost API)
+                    # must not change the reference between native spans.
+                    try:
+                        if state.store.reference(row).resolve(strict=True)!=reference.resolve(strict=True):
+                            return failure(409,"REFERENCE_INVALID","Stored reference changed during generation")
+                    except (ProfileError,OSError,ValueError):
+                        return failure(409,"REFERENCE_INVALID","Stored reference changed during generation")
                 # Defense in depth: never publish a WAV on a proofless or conflicting runner result.
                 if (info.get("verification_status")!="verified" or
                     info.get("observed_native_backend")!="Vulkan0" or
