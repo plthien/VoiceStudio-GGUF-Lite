@@ -148,6 +148,8 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#licence-details")).to_contain_text("MISMATCH")
         page.locator("#licence-review").check()
         page.locator("#licence-accept").click()
+        # Busy-disabled is not proof the persisted acceptance POST completed.
+        expect(page.locator("#licence-details")).to_contain_text("Accepted locally",timeout=15000)
         expect(page.locator("#licence-accept")).to_be_disabled()
         page.locator('[data-view="tts"]').click()
         page.locator("#tts-text").fill("A new owner controlled clone")
