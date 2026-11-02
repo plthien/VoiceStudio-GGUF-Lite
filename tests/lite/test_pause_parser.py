@@ -52,3 +52,8 @@ def test_preserves_internal_unicode_and_punctuation():
     value="  Café\tnoir! [pause 800ms] こんにちは、 世界 [pause] 🤖?"
     s=parse_pause_script(value)
     assert [x.text for x in s.parts if isinstance(x,SpeechPart)]==["Café\tnoir!","こんにちは、 世界","🤖?"]
+
+def test_hostile_oversized_numeric_literals_have_typed_error():
+    for tag in ("[pause "+"9"*4000+"ms]","[pause "+"9"*4000+"s]"):
+        with pytest.raises(PauseError,match="INVALID_PAUSE_MARKER"):
+            parse_pause_script("A"+tag+"B")

@@ -56,6 +56,10 @@ def parse_pause_script(text: str) -> PauseScript | None:
         if value is None:
             ms = 350
         else:
+            # Avoid unbounded integer/Decimal work on a hostile, 4096-char value:
+            # values exceeding 10 seconds can be rejected lexically first.
+            if len(value) > (6 if unit.lower()=="ms" else 8):
+                raise PauseError("INVALID_PAUSE_MARKER")
             # The grammar forbids exponents/NaN and over-precise decimals.
             if unit.lower() == "ms":
                 if "." in value:
