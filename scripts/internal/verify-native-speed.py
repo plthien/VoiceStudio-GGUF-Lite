@@ -7,7 +7,7 @@ import hashlib,os,shutil,subprocess,sys,tempfile
 
 ROOT=Path(__file__).resolve().parents[2]
 PIN="886fc079838ca7400cb2b42b36e2a65aa1daabe8"
-SOURCES=["src/duration-estimator.h","src/omnivoice.h","src/omnivoice.cpp",
+SOURCES=["CMakeLists.txt","src/duration-estimator.h","src/omnivoice.h","src/omnivoice.cpp",
          "src/pipeline-tts.cpp","src/pipeline-tts.h","src/backend.h","tools/omnivoice-tts.cpp"]
 def command(args,**kwargs):
     return subprocess.run([str(a) for a in args],check=True,timeout=180,**kwargs)
