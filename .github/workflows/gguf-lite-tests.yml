@@ -31,6 +31,8 @@ jobs:
           ffmpeg -version
       - name: Behavioral tests
         run: python -m pytest tests/lite -vv -ra --timeout=30
+      - name: Synthetic streaming SHA overhead (not user-host benchmark)
+        run: python -m lite.hash_benchmark
       - name: Repo structural gate
         run: python tests/lite/check_repo_layout.py
       - name: Windows PowerShell parser (no host execution)

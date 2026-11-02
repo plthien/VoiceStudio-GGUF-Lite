@@ -97,3 +97,16 @@ def test_cli_reports_nonzero_for_bad_apply(tmp_path,monkeypatch,capsys):
     monkeypatch.setenv("GGUF_LITE_MIGRATE_VOICE_ID","nonexistent")
     assert main()==2
     assert '"migrated": 0' in capsys.readouterr().out
+
+def test_database_failure_on_second_profile_rolls_back_everything(tmp_path):
+    db,voices,settings=setup(tmp_path,[("ink","one"),("two","two")])
+    target=Store(settings)
+    with target.connect() as con:
+        con.execute("""CREATE TRIGGER reject_two BEFORE INSERT ON profiles
+                     WHEN NEW.id='two'
+                     BEGIN SELECT RAISE(ABORT,'synthetic SQLite disk-full'); END;""")
+    result=migrate(db,voices,settings=settings,apply=True)
+    assert result["failed"] and result["migrated"]==0 and result["rolled_back"]
+    assert target.list()==[]
+    assert not (target.root/"ink"/"1").exists()
+    assert not (target.root/"two"/"1").exists()

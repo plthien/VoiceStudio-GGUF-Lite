@@ -116,3 +116,10 @@ Record H01-H06 in a private review note. Human A/B rubric:
 
 Use PASS, FAIL or NOT VERIFIED for each H gate. The licence review fingerprint
 is not independent legal approval, and no commercial clearance is implied.
+
+SHA-256 verification is intentionally full-file at readiness and immediately
+before/after native inference. This can add substantial I/O overhead.
+CI runs `python -m lite.hash_benchmark` against a disposable 8 MiB fixture and
+prints measured time for each OS; **that is not a substitute** for measuring
+the real pinned ~945 MB pair and real native RTF on the owner's host. Do not
+replace trusted SHA verification with filename-only or mtime-only caching.
