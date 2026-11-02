@@ -80,16 +80,16 @@ async function performSpeech(voice,text,language,seed,signal){const now=performa
 $('tts-form').addEventListener('submit',async e=>{e.preventDefault();if(working)return;const voice=$('tts-voice').value,text=$('tts-text').value;
   if(!voice||!text.trim()){notice('Select a saved voice and enter text.',true);return;}
   const value=$('tts-seed').value,seed=value===''?null:Number(value);if(seed!==null&&(!Number.isInteger(seed)||seed<0||seed>2147483647)){notice('Seed must be a nonnegative integer.',true);return;}
-  clearOutput();controller=new AbortController();working=true;busy($('tts-submit'),true);busy($('tts-cancel'),false);$('tts-state').textContent='Generating…';$('tts-native-summary').textContent='Waiting for native attestation…';
-  try{const result=await performSpeech(voice,text,$('tts-language').value,seed,controller.signal);
-    if(controller.signal.aborted)return;
+  clearOutput();controller=new AbortController();const current=controller;working=true;busy($('tts-submit'),true);busy($('tts-cancel'),false);$('tts-state').textContent='Generating…';$('tts-native-summary').textContent='Waiting for native attestation…';
+  try{const result=await performSpeech(voice,text,$('tts-language').value,seed,current.signal);
+    if(current.signal.aborted)return;
     ttsUrl=URL.createObjectURL(result.blob);$('tts-player').src=ttsUrl;$('tts-download').href=ttsUrl;$('tts-download').download='lite-'+voice+'.wav';
     $('tts-proof').textContent='Verified · '+result.proof.device+' · Vulkan0';
     $('tts-native-summary').textContent='Verified from native response headers: '+result.proof.device+' / '+result.proof.backend;
     $('tts-timing').textContent='Audio '+result.seconds.toFixed(2)+' s · Client '+result.clientSeconds.toFixed(2)+' s'+(result.proof.serverRtf?' · Server RTF '+result.proof.serverRtf:'');
     $('tts-output').hidden=false;$('tts-state').textContent='Completed';notice('Verified 24 kHz WAV is ready.');
   }catch(err){$('tts-state').textContent=err.name==='AbortError'?'Cancelled':'Failed';notice(safeError(err)+(err.retryAfter?' Retry after '+err.retryAfter+'s.':''),true);
-  }finally{controller=null;working=false;busy($('tts-submit'),false);busy($('tts-cancel'),true);}});
+  }finally{if(controller===current){controller=null;working=false;busy($('tts-submit'),false);busy($('tts-cancel'),true);}}});
 function appendDetail(root,key,val){const d=document.createElement('div');d.className='detail';const label=document.createElement('span');label.textContent=key;
   const value=document.createElement('strong');value.textContent=val==null?'Not verified':String(val);d.append(label,value);root.append(d);}
 function metric(name,value){const d=document.createElement('div');d.className='metric';const a=document.createElement('span');a.textContent=name;const b=document.createElement('strong');b.textContent=String(value);d.append(a,b);return d;}
