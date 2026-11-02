@@ -191,3 +191,146 @@ class Runner:
                         raise
                 self.process = None
                 self.active_id = None
+
+    async def generate_paused(self, *, script, profile:dict, reference:Path,
+                              language:str|None, seed:int|None, request_id:str,
+                              speed:float=1.0) -> tuple[bytes,dict]:
+        """Atomic request-owned GPU lock, one preflight, N native-attested spans.
+
+        The pre-existing generate() path is not called or modified; it remains
+        the byte-identical no-marker single-native path.
+        """
+        from .pause import SpeechPart
+        from .pause_audio import assemble_pause_wav
+        from .audio import AudioError, wav_info
+        from .speed import speed_to_native
+        if self.lock.locked():
+            raise NativeBusy("GPU is busy with another request")
+        _, speed_arg = speed_to_native(speed)
+        if speed!=1.0 and not native_speed_capability(self.settings)["supported"]:
+            raise RuntimeErrorLite("NATIVE_SPEED_UNAVAILABLE")
+        async with self.lock:
+            self.active_id=profile["id"]
+            started=time.monotonic()
+            deadline=started+self.settings.timeout
+            def remaining():
+                left=deadline-time.monotonic()
+                if left<=0:
+                    raise NativeTimeout("Whole paused script exceeded native deadline")
+                return left
+            segments=[]
+            verified=[]
+            try:
+                try:
+                    state=await asyncio.wait_for(asyncio.to_thread(preflight,self.settings),timeout=remaining())
+                except asyncio.TimeoutError as exc:
+                    raise NativeTimeout("Whole paused script preflight timed out") from exc
+                if not state["ready"]:
+                    raise RuntimeErrorLite("Runtime is not ready")
+                exe,_=native_files(self.settings)
+                base,codec=model_pair(self.settings)
+                for index,part in enumerate(p for p in script.parts if isinstance(p,SpeechPart)):
+                    # Distinct and guaranteed collision-free for <=17 spans,
+                    # including wraparound at signed 31-bit native-seed bound.
+                    segment_seed=None if seed is None else (seed+index) % 2147483648
+                    data, proof=await self._paused_span(
+                        exe=exe,base=base,codec=codec,gpu=state["gpu"],
+                        profile=profile,reference=reference,language=language,
+                        text=part.text,seed=segment_seed,speed_arg=speed_arg,
+                        speed=speed,remaining=remaining)
+                    segments.append(data)
+                    verified.append(proof)
+                # Assert that both weights remain pinned and unchanged across
+                # the entire set (not only at the beginning).
+                await asyncio.wait_for(asyncio.to_thread(model_pair,self.settings),timeout=remaining())
+                if not verified or any(p.get("verification_status")!="verified"
+                    or p.get("observed_native_backend")!="Vulkan0"
+                    or "NVIDIA" not in p.get("observed_device_identity","")
+                    or "GTX 1650" not in p.get("observed_device_identity","")
+                    for p in verified):
+                    raise NativeFailure("One or more speech segments lack native GPU proof")
+                try:
+                    assembled,counts=assemble_pause_wav(
+                        script,segments,max_bytes=self.settings.max_output_bytes)
+                except AudioError as exc:
+                    raise NativeFailure("Paused WAV assembly failed") from exc
+                elapsed=time.monotonic()-started
+                total=counts["audio_frames"]/24000
+                speech_s=counts["speech_frames"]/24000
+                info={"request_id":request_id,"profile_id":profile["id"],
+                      "quant":"Q8_0",**verified[0],**counts,
+                      "elapsed_s":round(elapsed,3),"audio_s":total,
+                      "rtf":round(elapsed/total,3),
+                      "speech_rtf":round(elapsed/speech_s,3),
+                      "pause_s":counts["pause_frames"]/24000,
+                      "speech_s":speech_s}
+                LOG.info("native_paused_complete request=%s segments=%d pause_frames=%d",
+                         request_id,len(verified),counts["pause_frames"])
+                return assembled,info
+            except asyncio.TimeoutError as exc:
+                raise NativeTimeout("Whole paused script deadline exceeded") from exc
+            finally:
+                if self.process is not None and self.process.returncode is None:
+                    cleanup=asyncio.create_task(self._terminate(self.process))
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        await cleanup
+                        raise
+                self.process=None
+                self.active_id=None
+
+    async def _paused_span(self, *, exe:Path, base:Path, codec:Path, gpu:dict,
+                           profile:dict,reference:Path,language:str|None,
+                           text:str,seed:int|None,speed:float,speed_arg:str,
+                           remaining) -> tuple[bytes,dict]:
+        """Private per-span native process; caller already owns GPU lock."""
+        with tempfile.TemporaryDirectory(prefix="lite-pause-",dir=self.settings.data_dir) as work:
+            root=Path(work)
+            out,ref_text=root/"out.wav",root/"reference.txt"
+            ref_text.write_text(profile["ref_text"],encoding="utf-8")
+            argv=[str(exe),"--model",str(base),"--codec",str(codec),
+                  "-o",str(out),"--ref-wav",str(reference),"--ref-text",str(ref_text)]
+            lang=(language or profile["language"]).strip().lower()
+            if lang not in {"auto","en","english","fr","french","es","spanish",
+                            "de","german","it","italian","pt","portuguese",
+                            "ja","japanese","zh","chinese","ko","korean"}:
+                raise NativeFailure("Unsupported GGUF language")
+            if lang not in ("auto",""):
+                labels={"en":"English","fr":"French","es":"Spanish","de":"German",
+                        "it":"Italian","pt":"Portuguese","ja":"Japanese",
+                        "zh":"Chinese","ko":"Korean"}
+                argv+=["--lang",labels.get(lang,lang.capitalize())]
+            if seed is not None:
+                argv+=["--seed",str(seed)]
+            if speed!=1.0:
+                argv+=["--speed",speed_arg]
+            self.process=await asyncio.create_subprocess_exec(
+                *native_command(exe),*argv[1:],
+                cwd=str(self.settings.bin_dir),env=native_env(self.settings),
+                stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,start_new_session=(os.name!="nt"),
+                creationflags=(getattr(__import__("subprocess"),"CREATE_NEW_PROCESS_GROUP",0)
+                               if os.name=="nt" else 0))
+            proc=self.process
+            try:
+                try:
+                    stderr=await asyncio.wait_for(
+                        _bounded_communicate(proc,text.encode("utf-8")),
+                        timeout=remaining())
+                except asyncio.TimeoutError as exc:
+                    raise NativeTimeout("Whole paused script timed out") from exc
+                if proc.returncode!=0:
+                    raise NativeFailure("Native span failed")
+                proof=native_attestation(stderr,gpu)
+                wav_file(out,max_bytes=self.settings.max_output_bytes)
+                return out.read_bytes(),proof
+            finally:
+                if proc.returncode is None:
+                    cleanup=asyncio.create_task(self._terminate(proc))
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        await cleanup
+                        raise
+                self.process=None
