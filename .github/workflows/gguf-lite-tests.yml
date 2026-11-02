@@ -18,6 +18,10 @@ jobs:
           python-version: '3.11'
       - name: Lite-only dependencies
         run: python -m pip install -r requirements-lite-dev.txt
+      - name: Playwright browser test dependencies
+        run: python -m pip install -r requirements-lite-ui-test.txt
+      - name: Playwright Chromium
+        run: python -m playwright install chromium
       - name: FFmpeg Linux
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
