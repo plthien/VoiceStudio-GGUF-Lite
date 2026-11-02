@@ -24,8 +24,11 @@ def main():
         command(["git","-C",upstream,"checkout","FETCH_HEAD","--",*SOURCES])
         before={name:hashlib.sha256((upstream/name).read_bytes()).hexdigest() for name in SOURCES}
         def run_patch():
-            return command([sys.executable,ROOT/"scripts/internal/instrument-native-speed.py",upstream],
-                           capture_output=True,text=True)
+            check=subprocess.run([sys.executable,ROOT/"scripts/internal/instrument-native-speed.py",upstream],
+                                 capture_output=True,text=True,timeout=120)
+            if check.returncode!=0:
+                raise RuntimeError("Native pinned patch failed: "+check.stderr+check.stdout)
+            return check
         response=run_patch()
         assert "LiteNativeSpeed/v1 patched" in response.stdout
         assert "LiteNativeSpeed/v1" in (upstream/"tools/omnivoice-tts.cpp").read_text()
