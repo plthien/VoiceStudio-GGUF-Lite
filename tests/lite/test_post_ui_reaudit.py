@@ -159,3 +159,42 @@ def test_f03_invalid_replacement_rolls_back_consent_and_audio(tmp_path,monkeypat
         now=c.get("/profiles/"+sid).json()
         assert now["version"]==1 and now["consent"]=="yes"
         assert app.state.store.reference(now).read_bytes()==wav()
+
+def test_f04_cancelled_profile_write_keeps_admission_until_thread_finishes(tmp_path,monkeypatch):
+    import threading
+    app,s=setup(tmp_path,monkeypatch)
+    row=app.state.store.import_audio(name="Old",ref_text="Old reference",language="en",
+        source=wav(),suffix=".wav")
+    original_update=app.state.store.update
+    entered=threading.Event()
+    finish=threading.Event()
+    def delayed_update(*args,**kwargs):
+        entered.set()
+        if not finish.wait(5):
+            raise RuntimeError("Synthetic worker was never released")
+        return original_update(*args,**kwargs)
+    app.state.store.update=delayed_update
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1:3900") as client:
+            first=asyncio.create_task(client.put("/profiles/"+row["id"],json={"name":"New"}))
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(.01)
+            assert entered.is_set()
+            assert app.state.admission.locked()
+            first.cancel()
+            try:
+                await asyncio.sleep(.05)
+                assert app.state.admission.locked(), "Client cancel released active SQLite write"
+                second=await client.delete("/profiles/"+row["id"]+"?purge=true")
+                assert second.status_code==409
+            finally:
+                finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert not app.state.admission.locked()
+            assert app.state.store.get(row["id"])["name"]=="New"
+            assert app.state.store.reference(row).exists()
+    asyncio.run(scenario())
