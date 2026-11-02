@@ -178,6 +178,14 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#voice-list")).not_to_contain_text("Renamed voice")
         page.locator('[data-view="runtime"]').click()
         expect(page.locator("#runtime-summary")).to_contain_text("Q8_0")
-        assert native.count>=2
+        page.locator("#diagnostic-start").click()
+        expect(page.locator("#diagnostic-state")).to_contain_text("3/3 verified",timeout=15000)
+        assert page.locator("#diagnostic-export").is_enabled()
+        with page.expect_download() as exported:
+            page.locator("#diagnostic-export").click()
+        assert exported.value.suggested_filename=="lite-ui-diagnostic.json"
+        page.locator("#licence-withdraw").click()
+        expect(page.locator("#licence-accept")).to_be_enabled()
+        assert native.count>=5
         page.screenshot(path=str(shots/("runtime-"+str(viewport["width"])+".png")),full_page=True)
         browser.close()
