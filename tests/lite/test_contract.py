@@ -22,7 +22,7 @@ def test_health_not_readiness(client):
 def test_speech_contract(client):
     base={"model":"omnivoice-gguf","voice":"unknown","input":"Hello"}
     assert client.post("/v1/audio/speech",json=base).status_code==404
-    for bad in ({"model":"other"},{"speed":1.1},{"response_format":"mp3"},
+    for bad in ({"model":"other"},{"speed":1.26},{"response_format":"mp3"},
                 {"input":"x"*4097},{"input":"   "}):
         response=client.post("/v1/audio/speech",json=base|bad)
         assert response.status_code==422

@@ -59,9 +59,17 @@ def test_speed_invalid_rejected_before_native_admission(tmp_path,bad):
     s=settings(tmp_path)
     app=create_app(s)
     with TestClient(app) as c:
-        r=c.post("/v1/audio/speech",json={"model":"omnivoice-gguf",
-            "voice":"safe","input":"something","speed":bad})
-        assert r.status_code==422
+        payload={"model":"omnivoice-gguf","voice":"safe","input":"something","speed":bad}
+        if not math.isfinite(bad):
+            # JSON standard forbids nonfinite numeric literals; validate model
+            # directly rather than expecting TestClient to emit invalid JSON.
+            from pydantic import ValidationError
+            from lite.app import Speech
+            with pytest.raises(ValidationError):
+                Speech.model_validate(payload)
+        else:
+            r=c.post("/v1/audio/speech",json=payload)
+            assert r.status_code==422
 
 def test_speed_nondefault_old_binary_fails_before_native_or_gpu(tmp_path,monkeypatch):
     s=settings(tmp_path);app=create_app(s)

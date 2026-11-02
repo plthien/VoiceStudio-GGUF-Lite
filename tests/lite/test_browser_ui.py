@@ -419,7 +419,7 @@ def test_native_speed_browser_real_json_request_and_measured_display(ui_server,m
         page.locator("#clone-submit").click()
         expect(page.locator("#view-tts")).to_be_visible()
         expect(page.locator("#tts-speed")).to_be_enabled(timeout=10000)
-        assert page.locator("#tts-speed").input_value()=="1.00"
+        assert float(page.locator("#tts-speed").input_value())==1.0
         page.locator("#tts-speed").fill("1.20")
         expect(page.locator("#tts-speed-value")).to_have_text("1.20×")
         page.locator("#tts-text").fill("Five words to measure speech")
@@ -458,7 +458,7 @@ def test_old_binary_disables_native_speed_ui_but_preserves_baseline(ui_server,mo
         expect(page.locator("#view-tts")).to_be_visible()
         expect(page.locator("#tts-speed")).to_be_disabled()
         expect(page.locator("#tts-speed-notice")).to_contain_text("requires rebuilt")
-        assert page.locator("#tts-speed").input_value()=="1.00"
+        assert float(page.locator("#tts-speed").input_value())==1.0
         page.locator("#tts-text").fill("Old binary can still speak at baseline")
         page.locator("#tts-submit").click()
         expect(page.locator("#tts-output")).to_be_visible(timeout=15000)
