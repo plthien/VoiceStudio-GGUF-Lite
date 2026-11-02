@@ -27,8 +27,8 @@ def test_model_pair_must_be_exact_q8(config):
     path.mkdir(parents=True)
     (path/BASE_NAME).write_bytes(b"base")
     (path/TOKENIZER_NAME).write_bytes(b"token")
-    a,b=model_pair(config)
-    assert a.name==BASE_NAME and b.name==TOKENIZER_NAME
+    with pytest.raises(RuntimeErrorLite):
+        model_pair(config)  # fake file names cannot pass trusted Q8 digest
     (path/TOKENIZER_NAME).unlink()
     with pytest.raises(RuntimeErrorLite):
         model_pair(config)

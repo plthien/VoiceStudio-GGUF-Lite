@@ -9,12 +9,12 @@ $source = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $version = "886fc079838ca7400cb2b42b36e2a65aa1daabe8"
 $stage = Join-Path $Root ("native-build-" + [guid]::NewGuid().ToString("N"))
 $target = Join-Path $Root "runtime"
-New-Item -ItemType Directory -Force -Path (Join-Path $stage "scripts/lib") | Out-Null
-Copy-Item (Join-Path $source "scripts/build-omnivoice-tts.sh") (Join-Path $stage "scripts")
-Copy-Item (Join-Path $source "scripts/lib/omnivoice-vulkan.sh") (Join-Path $stage "scripts/lib")
+New-Item -ItemType Directory -Force -Path (Join-Path $stage "scripts/internal") | Out-Null
+Copy-Item (Join-Path $source "scripts/internal/build-gguf-lite.sh") (Join-Path $stage "scripts/internal")
+Copy-Item (Join-Path $source "scripts/internal/omnivoice-vulkan.sh") (Join-Path $stage "scripts/internal")
 Push-Location $stage
 try {
-  & $GitBash scripts/build-omnivoice-tts.sh --platform windows-x86_64 --commit-sha $version
+  & $GitBash scripts/internal/build-gguf-lite.sh --platform windows-x86_64 --commit-sha $version
   if ($LASTEXITCODE -ne 0) { throw "Pinned native build failed" }
   $bin = Join-Path $stage "bin"
   $exe = Join-Path $bin "omnivoice-tts-windows-x86_64.exe"

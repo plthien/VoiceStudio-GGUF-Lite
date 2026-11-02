@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-10-03",
+  "source_commit": "06c6e077f0fc35149efefc3561e9be5ae835d916",
+  "model": {
+    "id": "Serveurperso/OmniVoice-GGUF",
+    "license": "CC-BY-NC-4.0; Higgs Audio 2; Meta Llama 3",
+    "commercial_use": false,
+    "review_status": "noncommercial",
+    "credit": "OmniVoice — Han Zhu and coauthors; GGUF conversion by Serveurperso; tokenizer by Boson AI / Meta",
+    "source_url": "https://huggingface.co/Serveurperso/OmniVoice-GGUF",
+    "evidence_url": "https://huggingface.co/Serveurperso/OmniVoice-GGUF/blob/017094167b5c9ed565a5076ac9b3b93c5ecf5c73/README.md",
+    "revision": "017094167b5c9ed565a5076ac9b3b93c5ecf5c73",
+    "engines": [
+      "omnivoice-gguf"
+    ],
+    "configured_at": "backend/engines/omnivoice_gguf/backend.py:76",
+    "notes": "Conversion card names CC-BY-NC-4.0; its codec description does not override the actual tokenizer terms. See docs/model-credits.md.",
+    "runtime_revision": null,
+    "runtime_pin_scope": "external",
+    "runtime_pin_source": null,
+    "component_closure": "incomplete",
+    "commercial_inference": "restricted",
+    "commercial_outputs": "unknown",
+    "documents": [],
+    "artifacts": [],
+    "required_components": [],
+    "upstream_access": "unknown",
+    "audit_observations": {
+      "commercial_inference": {
+        "status": "noncommercial_reported",
+        "scope": "Selected weight/component only; not complete workflow clearance."
+      },
+      "output_terms": {
+        "status": "not_assessed",
+        "ownership_or_all_rights_cleared": false
+      },
+      "sources": [],
+      "open_questions": [
+        "Governing terms at installed revision and relevant required components",
+        "Attribution/NOTICE/redistribution duties",
+        "Reference voice and input rights, consent, training-provenance scope"
+      ],
+      "identified_components": []
+    }
+  },
+  "warning": "Historical evidence revision mismatch remains unresolved; this is not legal or commercial clearance."
+}

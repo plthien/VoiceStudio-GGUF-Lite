@@ -9,6 +9,7 @@ import signal
 import tempfile
 import time
 from pathlib import Path
+import re
 
 from .audio import wav_file
 from .config import Settings
@@ -22,6 +23,30 @@ class NativeTimeout(RuntimeError):
     pass
 class NativeFailure(RuntimeError):
     pass
+
+def native_command(exe: Path) -> list[str]:
+    return [str(exe)]  # tests replace with [sys.executable, fake_py]
+
+def native_attestation(stderr: bytes, detected: dict) -> dict:
+    """Captured from this process, emitted by audited LiteAttest/v1 C++ instrumentation."""
+    if not isinstance(stderr,bytes) or len(stderr)>131072:
+        raise NativeFailure("Native stderr missing/truncated/oversize")
+    lines=stderr.decode("utf-8","replace").splitlines()
+    matches=[s.strip() for s in lines if "[LiteAttest/v1]" in s]
+    if len(matches)!=1:
+        raise NativeFailure("Native GPU evidence missing/ambiguous")
+    match=re.fullmatch(r"\[LiteAttest/v1\] backend=Vulkan0; device=Vulkan0; description=(NVIDIA[^\r\n]{1,160})",matches[0])
+    if not match:
+        raise NativeFailure("Native did not use NVIDIA Vulkan0")
+    native_name=match.group(1).upper()
+    preflight_name=detected.get("name","").upper()
+    if ("GTX 1650" not in native_name or "GTX 1650" not in preflight_name or
+        detected.get("vendor_id") not in ("0x10de","4318")):
+        raise NativeFailure("Native device conflicts with GTX 1650 evidence")
+    return {"requested_backend":"Vulkan0","observed_native_backend":"Vulkan0",
+            "observed_device_identity":match.group(1),
+            "verification_evidence":"native-stderr:LiteAttest/v1",
+            "verification_status":"verified"}
 
 class Runner:
     def __init__(self, settings: Settings):
@@ -88,7 +113,7 @@ class Runner:
                     if seed is not None:
                         argv += ["--seed", str(seed)]
                     self.process = await asyncio.create_subprocess_exec(
-                        *argv, cwd=str(self.settings.bin_dir), env=native_env(self.settings),
+                        *native_command(exe), *argv[1:], cwd=str(self.settings.bin_dir), env=native_env(self.settings),
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.PIPE,
                         start_new_session=(os.name != "nt"),
@@ -106,11 +131,14 @@ class Runner:
                         raise
                     if self.process.returncode != 0:
                         raise NativeFailure("Native inference failed")
+                    proof=native_attestation(stderr,state["gpu"])
+                    # Check both pinned GGUFs again: change-during-request is not successful.
+                    model_pair(self.settings)
                     info = wav_file(out, max_bytes=self.settings.max_output_bytes)
                     data = out.read_bytes()
                     elapsed = time.monotonic() - started
                     details = {"request_id": request_id, "profile_id": profile["id"],
-                               "quant": "Q8_0", "gpu": "Vulkan0",
+                               "quant": "Q8_0", **proof,
                                "elapsed_s": round(elapsed, 3),
                                "audio_s": info["seconds"],
                                "rtf": round(elapsed / info["seconds"], 3),
@@ -119,5 +147,8 @@ class Runner:
                              request_id, profile["id"], elapsed, info["seconds"], details["rtf"])
                     return data, details
             finally:
+                # Reap the whole owned tree even if cancellation happens before communicate().
+                if self.process is not None and self.process.returncode is None:
+                    await asyncio.shield(self._terminate(self.process))
                 self.process = None
                 self.active_id = None

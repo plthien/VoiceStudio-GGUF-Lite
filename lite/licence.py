@@ -14,8 +14,10 @@ from pathlib import Path
 from .config import ROOT, REPO_ID, MODEL_REVISION
 
 def disclosure() -> dict:
-    document=json.loads((ROOT/"backend/config/model_licenses.json").read_text(encoding="utf-8"))
-    return next(x for x in document["models"] if x["id"]==REPO_ID)
+    document=json.loads((ROOT/"lite/resources/model_notice.json").read_text(encoding="utf-8"))
+    record=document["model"]
+    if record["id"]!=REPO_ID: raise ValueError("Pinned GGUF notice mismatch")
+    return record
 
 def receipt(settings) -> dict | None:
     """Validate local evidence receipt content, not merely an unchecked flag."""

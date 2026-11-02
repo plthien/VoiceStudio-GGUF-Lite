@@ -6,6 +6,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -24,6 +25,49 @@ def failure(status: int, code: str, message: str, retry: bool = False):
     headers = {"Retry-After": "3"} if retry else None
     return JSONResponse(status_code=status, content={"error": {
         "message": message, "type": "lite_error", "code": code}}, headers=headers)
+
+class BodyLimitExceeded(Exception):
+    pass
+
+class BoundedBodyASGI:
+    """Enforce actual received bytes before Starlette's multipart spool parser."""
+    def __init__(self,app,limit:int):
+        self.app,self.limit=app,limit
+
+    async def __call__(self,scope,receive,send):
+        if scope["type"]!="http":
+            return await self.app(scope,receive,send)
+        length=next((value for name,value in scope.get("headers",[]) if name.lower()==b"content-length"),None)
+        if length is not None:
+            try:
+                declared=int(length.decode("ascii"))
+                if declared<0:
+                    raise ValueError()
+            except (UnicodeDecodeError,ValueError):
+                return await failure(400,"BAD_LENGTH","Invalid Content-Length")(scope,receive,send)
+            if declared>self.limit:
+                return await failure(413,"BODY_TOO_LARGE","Request body exceeds limit")(scope,receive,send)
+        received=0
+        started=False
+        async def bounded_receive():
+            nonlocal received
+            event=await receive()
+            if event["type"]=="http.request":
+                received+=len(event.get("body",b""))
+                if received>self.limit:
+                    raise BodyLimitExceeded()
+            return event
+        async def guarded_send(event):
+            nonlocal started
+            if event["type"]=="http.response.start":
+                started=True
+            await send(event)
+        try:
+            await self.app(scope,bounded_receive,guarded_send)
+        except BodyLimitExceeded:
+            if started:
+                raise
+            await failure(413,"BODY_TOO_LARGE","Request body exceeds limit")(scope,receive,send)
 
 class Speech(BaseModel):
     model: str
@@ -89,15 +133,29 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
 
     @app.middleware("http")
     async def local_only(request: Request, call_next):
-        host = request.client.host if request.client else "127.0.0.1"
-        if host not in ("127.0.0.1", "::1", "testclient"):
-            return failure(403, "LOCAL_ONLY", "Loopback clients only")
-        if request.headers.get("content-length"):
-            try:
-                if int(request.headers["content-length"]) > settings.max_ref_bytes + 65536:
-                    return failure(413, "BODY_TOO_LARGE", "Upload too large")
-            except ValueError:
-                return failure(400, "BAD_LENGTH", "Invalid content length")
+        peer=request.client.host if request.client else ""
+        if peer not in ("127.0.0.1","::1","testclient"):
+            return failure(403,"LOCAL_ONLY","Loopback clients only")
+        host=request.headers.get("host","").lower()
+        authority=host.split(":")[0] if not host.startswith("[") else host.split("]")[0]+"]"
+        allowed=("127.0.0.1","localhost","[::1]")
+        if authority not in allowed and not (peer=="testclient" and authority=="testserver"):
+            return failure(403,"UNTRUSTED_HOST","Untrusted Host authority")
+        if host.endswith(":"):
+            return failure(400,"INVALID_HOST","Malformed Host")
+        mutating=request.method in ("POST","PUT","PATCH","DELETE")
+        if mutating:
+            origin=request.headers.get("origin")
+            site=request.headers.get("sec-fetch-site","").lower()
+            if site not in ("","none","same-origin"):
+                return failure(403,"CROSS_SITE_BLOCKED","Cross-site mutation forbidden")
+            if origin:
+                try:
+                    parsed=urlsplit(origin)
+                    if parsed.scheme!="http" or parsed.netloc.lower()!=host or parsed.path or parsed.query:
+                        return failure(403,"CROSS_ORIGIN_BLOCKED","Cross-origin mutation forbidden")
+                except ValueError:
+                    return failure(403,"CROSS_ORIGIN_BLOCKED","Invalid Origin")
         return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
@@ -120,8 +178,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
     @app.get("/engines/omnivoice-gguf/quants")
     async def quants():
         state = await asyncio.to_thread(preflight, settings)
-        return {"selected": BASE_NAME, "in_use": BASE_NAME if state["ready"] else None,
-                "base": BASE_NAME, "tokenizer": TOKENIZER_NAME, "ready": state["ready"]}
+        return {**state["quant"], "base": BASE_NAME, "tokenizer": TOKENIZER_NAME, "ready": state["ready"]}
 
     @app.get("/v1/audio/voices")
     def voices():
@@ -213,7 +270,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
             return failure(409, "TERMS_CHANGED", "Licence terms fingerprint mismatch")
 
     @app.post("/v1/audio/speech")
-    async def speech(payload: Speech):
+    async def speech(payload: Speech, request: Request):
         state = app.state
         if state.runner.lock.locked():
             return failure(429, "NATIVE_BUSY", "One native inference already active", retry=True)
@@ -227,12 +284,35 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         except ProfileError:
             return failure(409, "REFERENCE_INVALID", "Stored reference is invalid")
         try:
-            data, info = await state.runner.generate(
+            async def detect_disconnect():
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    await asyncio.sleep(0.1)
+            generation=asyncio.create_task(state.runner.generate(
                 profile=row, reference=reference, text=payload.input,
                 language=payload.language, seed=payload.seed,
-                request_id=str(uuid.uuid4()))
-            return Response(data, media_type="audio/wav", headers={
-                "X-Lite-Request-Id": info["request_id"], "Cache-Control": "no-store"})
+                request_id=str(uuid.uuid4())))
+            watcher=asyncio.create_task(detect_disconnect())
+            try:
+                done,_=await asyncio.wait({generation,watcher},
+                    return_when=asyncio.FIRST_COMPLETED)
+                if watcher in done and generation not in done:
+                    generation.cancel()
+                    with contextlib.suppress(BaseException):
+                        await generation
+                    return failure(499,"CLIENT_DISCONNECTED","Native generation cancelled")
+                data,info=await generation
+                return Response(data, media_type="audio/wav", headers={
+                    "X-Lite-Request-Id": info["request_id"], "Cache-Control": "no-store"})
+            finally:
+                watcher.cancel()
+                if not generation.done():
+                    generation.cancel()
+                    with contextlib.suppress(BaseException):
+                        await generation
+                with contextlib.suppress(BaseException):
+                    await watcher
         except NativeBusy:
             return failure(429, "NATIVE_BUSY", "One native inference already active", retry=True)
         except NativeTimeout:
@@ -244,6 +324,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         except (OSError, ValueError):
             logger.exception("native failure request=<redacted>")
             return failure(500, "INTERNAL_ERROR", "Native operation failed")
+    app.add_middleware(BoundedBodyASGI,limit=settings.max_ref_bytes+65536)
     return app
 
 # Lazy: no native model load, no network and no heavy ML modules.

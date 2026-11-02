@@ -28,6 +28,7 @@ if b"slow" in data:
     time.sleep(4)
 if b"failed" in data:
     sys.exit(9)
+print("[LiteAttest/v1] backend=Vulkan0; device=Vulkan0; description=NVIDIA GeForce GTX 1650",file=sys.stderr)
 with wave.open(args.o, "wb") as out:
     out.setnchannels(1)
     out.setsampwidth(2)
@@ -41,11 +42,12 @@ def fixture(tmp_path, monkeypatch):
     bin_dir.mkdir()
     path=bin_dir/"fake-native"
     path.write_text(FAKE)
-    path.chmod(0o755)
+    # Explicit Python interpreter is used on both Windows and Linux.
     settings=Settings(data_dir=tmp_path,cache_dir=tmp_path,bin_dir=bin_dir,timeout=0.1)
-    monkeypatch.setattr("lite.native_runner.preflight",lambda settings: {"ready":True})
+    monkeypatch.setattr("lite.native_runner.preflight",lambda settings: {"ready":True,"gpu":{"name":"NVIDIA GeForce GTX 1650","vendor_id":"0x10de"}})
     monkeypatch.setattr("lite.native_runner.native_files",lambda settings: (path,bin_dir/"ggml-vulkan.dll"))
     monkeypatch.setattr("lite.native_runner.model_pair",lambda settings: (tmp_path/"base.gguf",tmp_path/"codec.gguf"))
+    monkeypatch.setattr("lite.native_runner.native_command",lambda exe: [sys.executable,str(exe)])
     return Runner(settings), tmp_path
 
 def _params(root, text):

@@ -7,9 +7,8 @@ Bun, Torch, ASR or cloud inference. Model Q8_0 revision
 
 Install with scripts/install-gguf-lite.ps1 and run
 scripts/run-gguf-lite.ps1 -Preflight before service launch.
-Native runtime build: bash scripts/build-omnivoice-tts.sh
---platform windows-x86_64 --commit-sha 886fc079838ca7400cb2b42b36e2a65aa1daabe8.
-The original build script may fall back to CPU; do not accept that output.
+Native runtime build: scripts/build-gguf-lite-vulkan.ps1 using Lite-only
+scripts/internal/build-gguf-lite.sh. CPU fallback is forbidden.
 Confirm ggml-vulkan.dll, EXE and checksum manifest on Windows.
 Preinstall exactly Q8_0 base/tokenizer at the pinned HF revision under
 D:\VoiceStudioBuild\models; no Generate-time downloads.
@@ -17,13 +16,13 @@ NVIDIA Vulkan0 (GTX 1650) must be independently verified.
 On some host configs VK_LOADER_LAYERS_DISABLE can disable AMD
 switchable_graphics layers, but validate before enabling host-specifically.
 
-Known legal blocker: model licence registry cites revision 0170941...
+Known legal blocker: lite/resources/model_notice.json cites revision 0170941...
 but weights use 3616093.... Manual acknowledgement cannot resolve this
 unreviewed provenance mismatch. Terms include CC-BY-NC/Higgs/Meta.
 No commercial inference or output rights are warranted, and AGPL-3.0
 source obligations remain separate.
 
-Native WAV is 24 kHz mono PCM16. Lite does not apply the legacy
+Native WAV is 24 kHz mono PCM16. The standalone Vulkan build instruments the exact pinned upstream backend source; every successful generation must include native-selected GGML device evidence. Lite does not apply the legacy
 trim/master/normalization/watermark chain; quality parity and 3-run
 Ink Explainer Windows benchmark are NOT VERIFIED. Prior original
 VoiceStudio Q8_0 mean RTF 3.291 is a baseline, not a Lite result.
@@ -51,7 +50,7 @@ The Lite launcher resolves D:\VoiceStudioBuild\lite\runtime\bin.
 ## Manually reviewed model provenance receipt (no auto-clearance)
 
 Do **not** invent evidence or simply change the legacy registry revision.
-The source registry remains unchanged. A human who has inspected the *exact*
+The relocated GGUF-only notice preserves original evidence and mismatch. A human who has inspected the *exact*
 pinned revision and the component terms can place the fetched full model-card
 bytes into D:\VoiceStudioBuild\lite\data\provenance\README.md and a
 D:\VoiceStudioBuild\lite\data\provenance\review.json record:

@@ -67,17 +67,17 @@ def native_files(settings: Settings) -> tuple[Path, Path]:
                 raise RuntimeErrorLite("Untrusted GGML runtime dependency")
     return exe, dll
 
-def _expected_quantmap() -> None:
-    quant = json.loads((ROOT / "backend/engines/omnivoice_gguf/quant_map.json").read_text(encoding="utf-8"))
-    meta = quant["_meta"]
-    selected = quant["mid-vram"]
-    if (meta["source_commit_sha"] != MODEL_REVISION or
-        meta["runtime_commit_sha"] != RUNTIME_REVISION or
-        selected["base"] != BASE_NAME or selected["tokenizer"] != TOKENIZER_NAME):
-        raise RuntimeErrorLite("Q8_0 revision or quant-map integrity mismatch")
+def _expected_quantmap() -> dict:
+    pins=json.loads((ROOT/"lite/resources/q8_pins.json").read_text(encoding="utf-8"))
+    if (pins.get("schema_version")!=2 or pins.get("model_revision")!=MODEL_REVISION or
+        pins.get("runtime_revision")!=RUNTIME_REVISION or pins.get("quant")!="Q8_0" or
+        pins.get("base",{}).get("name")!=BASE_NAME or pins.get("tokenizer",{}).get("name")!=TOKENIZER_NAME or
+        not all(_HEX.fullmatch(pins[k].get("sha256","")) for k in ("base","tokenizer"))):
+        raise RuntimeErrorLite("Pinned Q8_0 metadata mismatch")
+    return pins
 
 def model_pair(settings: Settings) -> tuple[Path, Path]:
-    _expected_quantmap()
+    pins=_expected_quantmap()
     repo_cache = settings.cache_dir / "models--Serveurperso--OmniVoice-GGUF" / "snapshots" / MODEL_REVISION
     # Explicit direct install or standard Hugging Face revision-pinned snapshot.
     candidates = [repo_cache, settings.cache_dir / MODEL_REVISION]
@@ -87,8 +87,15 @@ def model_pair(settings: Settings) -> tuple[Path, Path]:
             # HF snapshots contain relative symlinks into cache/blobs.
             if not all(p.resolve().is_relative_to(settings.cache_dir.resolve()) for p in (a, b)):
                 raise RuntimeErrorLite("Model cache symlink escapes configured cache")
-            if a.stat().st_size <= 0 or b.stat().st_size <= 0:
-                raise RuntimeErrorLite("Empty pinned Q8_0 weight file")
+            for p,key in ((a,"base"),(b,"tokenizer")):
+                if p.stat().st_size<64:
+                    raise RuntimeErrorLite("Truncated pinned Q8 GGUF")
+                with p.open("rb") as fd: header=fd.read(24)
+                if (header[:4]!=b"GGUF" or int.from_bytes(header[4:8],"little") not in (2,3)
+                    or not 0<int.from_bytes(header[8:16],"little")<1000000):
+                    raise RuntimeErrorLite("Invalid GGUF header")
+                if sha256(p)!=pins[key]["sha256"]:
+                    raise RuntimeErrorLite("Q8 trusted SHA256 mismatch")
             return a.resolve(), b.resolve()
     raise RuntimeErrorLite("Offline pinned Q8_0 base/tokenizer missing; preinstall both at exact revision")
 
@@ -107,12 +114,12 @@ def parse_vulkan_devices(output: str) -> list[dict]:
                         "type": kind.group(1)})
     return devices
 
-def nvidia_device() -> dict:
-    path = shutil.which("vulkaninfo")
+def nvidia_device(*, run=subprocess.run, which=shutil.which) -> dict:
+    path = which("vulkaninfo")
     if not path:
         raise RuntimeErrorLite("vulkaninfo --summary unavailable")
     try:
-        result = subprocess.run([path, "--summary"], capture_output=True, text=True,
+        result = run([path, "--summary"], capture_output=True, text=True,
                                 errors="replace", timeout=65, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeErrorLite("vulkaninfo probe failed") from exc
@@ -128,11 +135,11 @@ def nvidia_device() -> dict:
         "DISCRETE_GPU" not in gpu["type"]):
         raise RuntimeErrorLite("Vulkan0 is not the verified NVIDIA GTX 1650")
     # Fail when no independent VRAM evidence is available, rather than inventing 4 GB.
-    smi = shutil.which("nvidia-smi")
+    smi = which("nvidia-smi")
     if not smi:
         raise RuntimeErrorLite("nvidia-smi required for GTX 1650 VRAM verification")
     try:
-        probe = subprocess.run([smi, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+        probe = run([smi, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
                                capture_output=True, text=True, errors="replace", timeout=15, check=False)
         rows = [line.strip() for line in probe.stdout.splitlines() if line.strip()]
         same = [x for x in rows if "GTX 1650" in x.upper()]
@@ -146,7 +153,8 @@ def nvidia_device() -> dict:
     return {**gpu, "vram_mib": vram, "backend": "Vulkan0", "verified": True}
 
 def preflight(settings: Settings) -> dict:
-    result = {"ready": False, "quant": {"selected": BASE_NAME, "in_use": None,
+    result = {"ready": False, "quant": {"selected": BASE_NAME, "installed": False, "verified": False,
+                                      "prepared_quant": None, "in_use": None,
                                       "base": BASE_NAME, "tokenizer": TOKENIZER_NAME,
                                       "revision": MODEL_REVISION, "runtime_revision": RUNTIME_REVISION},
               "gpu": None, "binary": False, "model_pair": False, "issues": []}
@@ -158,6 +166,7 @@ def preflight(settings: Settings) -> dict:
     try:
         model_pair(settings)
         result["model_pair"] = True
+        result["quant"].update(installed=True,verified=True,prepared_quant="Q8_0")
     except (OSError, ValueError, RuntimeErrorLite) as exc:
         result["issues"].append(str(exc))
     try:
@@ -165,8 +174,7 @@ def preflight(settings: Settings) -> dict:
     except (OSError, ValueError, RuntimeErrorLite) as exc:
         result["issues"].append(str(exc))
     result["ready"] = bool(result["binary"] and result["model_pair"] and result["gpu"])
-    if result["ready"]:
-        result["quant"]["in_use"] = BASE_NAME
+    # Preflight cannot assert in_use absent successful native inference.
     return result
 
 def native_env(settings: Settings) -> dict[str, str]:

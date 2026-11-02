@@ -1,25 +1,31 @@
 name: GGUF Lite deterministic tests
 on:
   pull_request:
-    paths:
-      - 'lite/**'
-      - 'tests/lite/**'
-      - 'requirements-lite.txt'
-      - '.github/workflows/gguf-lite-tests.yml'
+  push:
+    branches: [feat/gguf-lite-tts-service]
   workflow_dispatch:
 jobs:
   lite:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install isolated Lite deps
+      - name: Lite-only dependencies
         run: python -m pip install -r requirements-lite-dev.txt
-      - name: Install real FFmpeg for decoding regression
+      - name: FFmpeg Linux
+        if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-      - name: Compile all Lite modules
-        run: python -m compileall -q lite
+      - name: Compile and FFmpeg
+        run: |
+          python -m compileall -q lite
+          ffmpeg -version
       - name: Behavioral tests
         run: python -m pytest tests/lite -q -ra
+      - name: Repo structural gate
+        run: python tests/lite/check_repo_layout.py
