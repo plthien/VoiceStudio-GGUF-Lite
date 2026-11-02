@@ -25,7 +25,7 @@ def test_rejects_spoofed_host(client):
     assert response.json()["error"]["code"]=="UNTRUSTED_HOST"
 
 def test_body_bounds_even_with_no_content_length(client):
-    result=client.post("/v1/audio/speech",content=b"x"*70000,headers={"Content-Type":"application/json"})
+    result=client.post("/v1/audio/speech",content=b"x"*2048,headers={"Content-Type":"application/json"})
     assert result.status_code==413
     assert result.json()["error"]["code"]=="BODY_TOO_LARGE"
 

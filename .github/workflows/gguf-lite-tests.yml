@@ -30,6 +30,6 @@ jobs:
           python -m compileall -q lite
           ffmpeg -version
       - name: Behavioral tests
-        run: python -m pytest tests/lite -q -ra
+        run: python -m pytest tests/lite -vv -ra --timeout=30
       - name: Repo structural gate
         run: python tests/lite/check_repo_layout.py
