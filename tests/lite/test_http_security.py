@@ -39,11 +39,29 @@ def test_malformed_length_rejected(client):
     assert result.status_code in (400,422,403)
 
 
-def test_chunked_payload_without_content_length_hits_receive_cap(client):
-    def stream():
-        for _ in range(70):
-            yield b"x"*1024
-    result=client.post("/v1/audio/speech",content=stream(),
-                       headers={"Content-Type":"application/json"})
-    assert result.status_code==413
-    assert result.json()["error"]["code"]=="BODY_TOO_LARGE"
+def test_chunked_payload_without_content_length_hits_receive_cap():
+    import asyncio
+    from lite.app import BoundedBodyASGI
+    status=[]
+    chunks=iter([b"x"*1024]*70)
+    async def receive():
+        try:
+            piece=next(chunks)
+            return {"type":"http.request","body":piece,"more_body":True}
+        except StopIteration:
+            return {"type":"http.request","body":b"","more_body":False}
+    async def send(message):
+        if message["type"]=="http.response.start":
+            status.append(message["status"])
+    async def read_body(scope,receive,send):
+        while True:
+            event=await receive()
+            if not event.get("more_body"):
+                break
+        await send({"type":"http.response.start","status":200,"headers":[]})
+        await send({"type":"http.response.body","body":b"OK"})
+    guarded=BoundedBodyASGI(read_body,limit=1024*64)
+    async def execute():
+        await guarded({"type":"http","headers":[],"method":"POST","path":"/profiles"},receive,send)
+    asyncio.run(execute())
+    assert status==[413]

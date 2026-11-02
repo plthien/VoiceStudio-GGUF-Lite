@@ -122,7 +122,7 @@ def migrate(dbpath,voices,*,apply=False,only_id=None,settings=None):
             published.append(target)
             conn.execute("INSERT INTO profiles VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (identity,row["name"],row["language"] or "en",row["ref_text"],
-                 str(Path(identity)/"1"/"reference.wav"),wav_hash,source_hash,1,
+                 (Path(identity)/"1"/"reference.wav").as_posix(),wav_hash,source_hash,1,
                  None,timestamp,timestamp))
         if _digest(dbpath)!=original_db:
             raise ValueError("Legacy DB changed before commit")
