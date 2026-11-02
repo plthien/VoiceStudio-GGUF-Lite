@@ -57,3 +57,7 @@ def test_hostile_oversized_numeric_literals_have_typed_error():
     for tag in ("[pause "+"9"*4000+"ms]","[pause "+"9"*4000+"s]"):
         with pytest.raises(PauseError,match="INVALID_PAUSE_MARKER"):
             parse_pause_script("A"+tag+"B")
+
+def test_ascii_case_insensitive_not_unicode_casefold():
+    # Unicode LONG S looks similar but is not ASCII S and must not become a pause.
+    assert parse_pause_script("A [pauſe 2s] B") is None

@@ -7,8 +7,8 @@ from decimal import Decimal, InvalidOperation
 
 MAX_MARKERS = 16
 MAX_TOTAL_MS = 60_000
-MARKER_START = re.compile(r"\[[ \t]*pause(?=[ \t\]\r\n]|$)", re.I)
-COMPLETE = re.compile(r"\[[ \t]*pause(?:[ \t]+([0-9]+(?:\.[0-9]+)?)[ \t]*(ms|s))?[ \t]*\]", re.I)
+MARKER_START = re.compile(r"\[[ \t]*pause(?=[ \t\]\r\n]|$)", re.I | re.ASCII)
+COMPLETE = re.compile(r"\[[ \t]*pause(?:[ \t]+([0-9]+(?:\.[0-9]+)?)[ \t]*(ms|s))?[ \t]*\]", re.I | re.ASCII)
 
 class PauseError(ValueError):
     def __init__(self, code: str):
