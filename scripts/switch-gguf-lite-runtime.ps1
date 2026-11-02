@@ -80,6 +80,10 @@ if ($Mode -eq "Activate") {
   foreach ($file in (Get-ChildItem -LiteralPath $directory -File | Where-Object {
       $_.Extension -in @('.exe','.dll')
   })) {
+    $sig=[IO.File]::ReadAllBytes($file.FullName)
+    if ($sig.Length -lt 64 -or $sig[0] -ne 77 -or $sig[1] -ne 90) {
+      throw "Invalid PE executable or dependency: $($file.Name)"
+    }
     if (!$entries.ContainsKey($file.Name)) { throw "Unmanifested EXE/DLL: $($file.Name)" }
     if ($entries[$file.Name] -ne (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()) {
       throw "Native file checksum invalid: $($file.Name)"
