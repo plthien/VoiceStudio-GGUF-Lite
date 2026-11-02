@@ -159,6 +159,7 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         page.locator('[data-view="library"]').click()
         expect(page.locator("#view-library")).to_be_visible()
         expect(page.locator("#tts-output")).to_be_hidden()
+        page.wait_for_function("() => fetch('/lite/status').then(r=>r.json()).then(s=>!s.busy)",timeout=8000)
         page.locator('[data-view="tts"]').click()
         expect(page.locator("#tts-submit")).to_be_enabled()
         page.locator("#tts-text").fill("Recovered after navigation cancellation")
