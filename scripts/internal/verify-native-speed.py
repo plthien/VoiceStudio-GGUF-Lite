@@ -35,7 +35,7 @@ def main():
         assert "OV_ABI_VERSION 3" in (upstream/"src/omnivoice.h").read_text()
         p=(upstream/"src/pipeline-tts.cpp").read_text()
         assert p.count("duration_estimate_tokens_speed(")==4
-        assert p.count("lite_speed, params->denoise")==1
+        assert p.count("lite_speed, params->denoise")==2
         assert p.count("params->chunk_threshold_sec, lite_speed")==1
         assert "LiteAttest/v1" not in p
         rejected=subprocess.run([sys.executable,ROOT/"scripts/internal/instrument-native-speed.py",upstream],
