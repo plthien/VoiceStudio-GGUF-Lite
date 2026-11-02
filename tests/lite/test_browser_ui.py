@@ -223,6 +223,13 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#diagnostic-state")).to_contain_text("3/3 verified",timeout=15000)
         assert page.locator("#diagnostic-rows tr").count()==3
         expect(page.locator("#diagnostic-rows")).to_contain_text("NVIDIA GeForce GTX 1650")
+        expect(page.locator("#diagnostic-export")).to_be_enabled()
+        with page.expect_download() as exported:
+            page.locator("#diagnostic-export").click()
+        report=json.loads(Path(exported.value.path()).read_text(encoding="utf-8"))
+        assert report["status"]=="complete" and len(report["runs"])==3
+        assert all(row["verified"] and row["client_rtf"]>0 for row in report["runs"])
+        assert report["comparable"] is False and "input" not in report
         native.fail_on=native.attempts+2
         page.locator("#diagnostic-start").click()
         expect(page.locator("#diagnostic-state")).to_contain_text("failed after 1/3",timeout=15000)
@@ -240,10 +247,8 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         expect(page.locator("#diagnostic-export")).to_be_disabled()
         page.locator('[data-view="runtime"]').click()
         native.slow_on=None
-        assert page.locator("#diagnostic-export").is_enabled()
-        with page.expect_download() as exported:
-            page.locator("#diagnostic-export").click()
-        assert exported.value.suggested_filename=="lite-ui-diagnostic.json"
+        expect(page.locator("#diagnostic-export")).to_be_disabled()
+        expect(page.locator("#diagnostic-state")).to_contain_text("cancelled")
         page.locator("#licence-withdraw").click()
         expect(page.locator("#licence-accept")).to_be_enabled()
         assert native.count>=5
