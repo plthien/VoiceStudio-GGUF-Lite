@@ -7,6 +7,11 @@ from lite.app import create_app
 from lite.config import Settings
 from lite import preflight as cli
 
+def wav_b():
+    b=bytearray(wav())
+    b[-2]=7
+    return bytes(b)
+
 def wav():
     f=io.BytesIO()
     with wave.open(f,"wb") as w:
@@ -18,22 +23,26 @@ def test_n01_new_audio_and_explicit_new_transcript_atomic(tmp_path,monkeypatch):
     import hashlib
     from lite.profiles import Store
     monkeypatch.setattr("lite.profiles.shutil.which",lambda _: "ffmpeg")
-    monkeypatch.setattr("lite.profiles.convert_reference",lambda src,dst,**kw:dst.write_bytes(wav()))
+    monkeypatch.setattr("lite.profiles.convert_reference",
+        lambda src,dst,**kw:dst.write_bytes(wav_b() if src.read_bytes()==wav_b() else wav()))
     s=Settings(data_dir=tmp_path/"data",cache_dir=tmp_path/"cache",bin_dir=tmp_path/"bin",timeout=30)
     with TestClient(create_app(s)) as c:
         created=c.post("/profiles",data={"name":"Owned","ref_text":"Transcript A","consent":"owner-confirmed-local"},
             files={"ref_audio":("a.wav",wav(),"audio/wav")}).json()
         stable=created["id"]
         changed=c.put("/profiles/"+stable+"/audio",data={"ref_text":"New exact transcript B","consent":"owner-confirmed-local"},
-            files={"ref_audio":("b.wav",wav(),"audio/wav")})
+            files={"ref_audio":("b.wav",wav_b(),"audio/wav")})
         assert changed.status_code==200,changed.text
         row=changed.json()
         assert row["id"]==stable and row["version"]==2
         assert row["ref_text"]=="New exact transcript B"
         assert row["consent"]=="owner-confirmed-local"
-        assert row["ref_sha256"]==hashlib.sha256(wav()).hexdigest()
+        assert row["ref_sha256"]==hashlib.sha256(wav_b()).hexdigest()
+        assert row["source_sha256"]==hashlib.sha256(wav_b()).hexdigest()
+        assert row["ref_sha256"]!=created["ref_sha256"]
         assert c.get("/profiles/"+stable).json()["ref_text"]=="New exact transcript B"
-        assert Store(s).reference(row).read_bytes()==wav()
+        assert Store(s).reference(row).read_bytes()==wav_b()
+        assert Store(s).reference(created).read_bytes()==wav()
 
 def test_n02_shared_cli_http_readiness_without_ffmpeg(tmp_path,monkeypatch,capsys):
     import lite.app as appmod

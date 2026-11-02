@@ -14,6 +14,7 @@ function revoke(id){const a=$(id);if(a.src){URL.revokeObjectURL(a.src);a.removeA
 function clearOutput(){if(ttsUrl){URL.revokeObjectURL(ttsUrl);ttsUrl=null;}$('tts-player').removeAttribute('src');$('tts-player').load();$('tts-output').hidden=true;}
 function setVoice(id){chosen=voices.some(p=>p.id===id)?id:'';const v=voices.find(p=>p.id===chosen);$('selected-voice').textContent=v?v.name+' · '+v.id:'No voice selected';$('tts-voice').value=chosen;}
 function openView(view){if(!titles[view])return;
+  if(view!=='library')resetReplacement();
   if(diagnosticController){diagnosticController.abort();diagnosticController=null;busy($('diagnostic-start'),false);$('diagnostic-export').disabled=true;if(diagnostic)diagnostic.status='cancelled';$('diagnostic-state').textContent='UI diagnostic cancelled on navigation.';}
   if(controller){controller.abort();controller=null;working=false;busy($('tts-submit'),false);busy($('tts-cancel'),true);$('tts-state').textContent='Request cancelled.';}
   if(view!=='tts')clearOutput();
@@ -51,11 +52,11 @@ $('clone-form').addEventListener('submit',async e=>{e.preventDefault();const b=$
     notice('Voice profile saved locally. Select it in Text to Speech.');
     openView('tts');
   }catch(e){notice(safeError(e),true);$('clone-result').textContent='Not created';}finally{busy(b,false);}});
-function resetReplacement(){
+function resetReplacement(message='No new recording selected.'){
   $('replace-form').reset();$('replace-text').disabled=false;$('replace-text').required=true;
   if(replaceUrl){URL.revokeObjectURL(replaceUrl);replaceUrl=null;}
   $('replace-preview').removeAttribute('src');$('replace-preview').load();$('replace-preview').hidden=true;
-  $('replace-state').textContent='No new recording selected.';
+  $('replace-state').textContent=message;
 }
 $('replace-file').addEventListener('change',e=>{
   if(replaceUrl){URL.revokeObjectURL(replaceUrl);replaceUrl=null;}
@@ -104,7 +105,7 @@ $('replace-form').addEventListener('submit',async e=>{
     }
     notice('Reference and transcript saved to version '+result.version+' (stable voice ID unchanged).');
   }catch(err){notice(safeError(err),true);$('replace-state').textContent='Replacement failed. Previous saved version is unchanged.';}
-  finally{resetReplacement();busy(b,false);}
+  finally{resetReplacement($('replace-state').textContent);busy(b,false);}
 });
 async function deleteVoice(purge){if(!editor)return;const id=editor;const words=purge?'delete this Lite profile AND its owned reference files':'remove this profile record while RETAINING its reference files';
   if(!window.confirm('Do you want to '+words+'? This never removes original VoiceStudio data.'))return;
@@ -140,7 +141,11 @@ async function refreshRuntime(){
   try{const [ready,details]=await Promise.all([
     api.request('/lite/readiness'),
     api.request('/models/licenses/details/Serveurperso/OmniVoice-GGUF')]);
-    const quant=ready.quant||{},acceptance=details.acceptance||ready.licence||{};
+    const quant=ready.quant||{},acceptance=ready.licence||details.acceptance||{};
+    if(details.acceptance?.fingerprint&&ready.licence?.fingerprint&&
+       details.acceptance.fingerprint!==ready.licence.fingerprint){
+      throw new Error('Licence snapshot changed during verification');
+    }
     $('runtime-checked').textContent='Last checked: '+new Date().toLocaleString()+' · Manual refresh only';
     const metrics=$('runtime-summary');metrics.replaceChildren(metric('Full Lite',ready.ready?'Ready':'Not ready'),metric('TTS',ready.tts_ready?'Ready':'Not ready'),metric('Cloning',ready.cloning_ready?'Ready':'Not ready'),metric('GPU',ready.gpu?.name||'Not verified'),metric('Quantization',quant.prepared_quant||'Q8_0'),metric('Native',ready.binary?'Files verified':'Not ready'));
     const output=$('runtime-details');output.replaceChildren();
@@ -173,6 +178,8 @@ async function refreshRuntime(){
     $('runtime-checked').textContent='Readiness FAILED — previous results are stale and hidden';
     $('runtime-summary').replaceChildren(metric('Verification','FAILED — NOT CURRENT'));
     $('runtime-details').replaceChildren();
+    $('licence-details').replaceChildren();$('licence-notice').replaceChildren();
+    licenceFingerprint=null;licenceAccepted=false;$('licence-accept').disabled=true;
     $('status-short').textContent='Readiness check failed';$('status-dot').className='status-dot bad';
     notice(safeError(err),true);
   }finally{runtimeChecking=false;busy(b,false);}}

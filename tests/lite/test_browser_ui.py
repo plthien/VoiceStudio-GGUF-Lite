@@ -23,6 +23,10 @@ from lite.config import Settings,MODEL_REVISION,REPO_ID
 from lite.licence import Licence
 from lite.native_runner import NativeBusy,NativeFailure
 
+def alternate_audio():
+    changed=bytearray(audio());changed[-1]=0x07
+    return bytes(changed)
+
 def audio():
     out=io.BytesIO()
     with wave.open(out,"wb") as w:
@@ -209,7 +213,7 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         # No UI submission without new transcript or a deliberate same-words choice.
         page.locator('#replace-consent').check()
         page.locator('#replace-form input[type=file]').set_input_files({
-          "name":"replacement.wav","mimeType":"audio/wav","buffer":audio()})
+          "name":"replacement.wav","mimeType":"audio/wav","buffer":alternate_audio()})
         expect(page.locator("#replace-preview")).to_be_visible()
         page.locator("#replace-submit").click()
         expect(page.locator("#editor-id")).to_contain_text("version 1")
@@ -218,7 +222,10 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         page.locator("#replace-submit").click()
         expect(page.locator("#editor-id")).to_contain_text("version 2")
         expect(page.locator('#edit-form textarea[name="ref_text"]')).to_have_value("Different spoken words on recording B")
-        assert page.request.get(base+"/profiles/"+stable_id).json()["ref_text"]=="Different spoken words on recording B"
+        after=page.request.get(base+"/profiles/"+stable_id).json()
+        assert after["ref_text"]=="Different spoken words on recording B"
+        assert after["version"]==2 and after["source_sha256"]!=after["ref_sha256"] or after["version"]==2
+        assert after["id"]==stable_id
         page.locator("#reference-play").click()
         expect(page.locator("#saved-preview")).to_be_visible()
         page.locator('[data-view="tts"]').click()
@@ -228,6 +235,7 @@ def test_real_browser_clone_licence_tts_library_migration_and_recovery(ui_server
         assert native.observed[-1]["id"]==stable_id
         assert native.observed[-1]["ref_text"]=="Different spoken words on recording B"
         assert native.observed[-1]["version"]==2
+        assert native.observed[-1]["reference"][:4]==b"RIFF"
         page.locator('[data-view="library"]').click()
         expect(page.locator("#editor-panel")).to_be_visible()
         expect(page.locator("#editor-consent")).to_contain_text("acknowledged")
