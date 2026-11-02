@@ -141,6 +141,12 @@ def case(tmp_path,ps_exe):
     backup=tmp_path/"backup"/"old"
     original=make_bin(base,False)
     make_bin(cand,True,compiler)
+    # Prove the compiled fixture itself is a runnable PE with a clean exit,
+    # not merely an MZ prefix or an assumed help marker.
+    direct=subprocess.run([str(cand/NATIVE_NAME),"--help"],cwd=cand,
+                          capture_output=True,text=True,timeout=8)
+    assert direct.returncode==0,(direct.returncode,direct.stderr)
+    assert "LiteNativeSpeed/v1" in direct.stdout and "--speed" in direct.stdout
     private=tmp_path/"data"/"original-reference.wav"
     private.parent.mkdir()
     private.write_bytes(b"PRIVATE_FIXTURE_NEVER_MODIFIED")
