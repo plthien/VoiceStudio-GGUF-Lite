@@ -15,7 +15,7 @@ required=("LICENSE","LICENSE-NOTICE.md","README.md","lite/resources/q8_pins.json
           "scripts/internal/omnivoice-vulkan.sh","scripts/internal/instrument-attestation.py",
           "scripts/internal/instrument-native-speed.py","scripts/internal/lite-native-speed.h",
           "scripts/internal/native-speed-ci.cpp","scripts/internal/verify-native-speed.py",
-          "scripts/switch-gguf-lite-runtime.ps1","lite/speed.py",
+          "scripts/switch-gguf-lite-runtime.ps1","scripts/internal/speed-help-process.ps1","lite/speed.py",
           "scripts/build-gguf-lite-vulkan.ps1","scripts/benchmark-gguf-lite.ps1",
           "lite/ui/index.html","lite/ui/assets/app.css","lite/ui/assets/app.js",
           "lite/ui/assets/api.js","lite/ui_routes.py","lite/ui_support.py")
