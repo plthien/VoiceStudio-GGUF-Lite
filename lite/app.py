@@ -24,20 +24,32 @@ from .runtime import preflight, RuntimeErrorLite
 
 logger = logging.getLogger("gguf_lite")
 
-async def _finish_owned_write(function, *args, **kwargs):
-    """Cancelled HTTP handlers must not release admission while a DB/FFmpeg
-    worker is still modifying a reference. Never replay a completed write.
+async def _owned_write(state, function, *args, **kwargs):
+    """Nonqueued mutation admission, owned by its worker task, not HTTP caller.
+
+    Even if Starlette cancels the HTTP request, the owned worker keeps the
+    gate until FFmpeg/SQLite finishes, and no second request can observe a
+    half-published voice. This does not retry or queue the operation.
     """
-    task=asyncio.create_task(asyncio.to_thread(function,*args,**kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        # Ownership survives client disconnect until the one existing worker
-        # finishes; response remains cancelled and no background queue is made.
+    if state.admission.locked() or state.runner.lock.locked():
+        raise NativeBusy("Reference operation or GPU is active")
+    await state.admission.acquire()
+    async def owner():
         try:
-            await asyncio.shield(task)
+            return await asyncio.to_thread(function,*args,**kwargs)
         finally:
-            raise
+            state.admission.release()
+    try:
+        task=asyncio.create_task(owner())
+    except BaseException:
+        state.admission.release()
+        raise
+    # Read exceptions even when the caller was cancelled; no private source log.
+    def harvest(done):
+        if not done.cancelled():
+            done.exception()
+    task.add_done_callback(harvest)
+    return await asyncio.shield(task)
 
 def failure(status: int, code: str, message: str, retry: bool = False):
     headers = {"Retry-After": "3"} if retry else None
@@ -232,15 +244,16 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
 
     @app.post("/lite/migration/apply")
     async def migration_selected(payload:MigrationSelection):
-        if app.state.admission.locked() or app.state.runner.lock.locked():
-            return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
-            async with app.state.admission:
+            def selected_migration():
                 db,voices=legacy_sources()
-                result=await _finish_owned_write(migration_apply,db,voices,settings,payload.voice_id)
-                if result["failed"]:
-                    return failure(409,"MIGRATION_FAILED","Migration failed; inspect local source and permissions")
-                return result
+                return migration_apply(db,voices,settings,payload.voice_id)
+            result=await _owned_write(app.state, selected_migration)
+            if result["failed"]:
+                return failure(409,"MIGRATION_FAILED","Migration failed; inspect local source and permissions")
+            return result
+        except NativeBusy:
+            return failure(409,"PROFILE_ACTIVE","Native inference is active")
         except (ValueError,OSError,RuntimeError):
             return failure(409,"MIGRATION_FAILED","Legacy source changed or unavailable")
 
@@ -283,15 +296,19 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         if app.state.admission.locked() or app.state.runner.lock.locked():
             return failure(409,"PROFILE_ACTIVE","Native inference or mutation is active")
         try:
-            async with app.state.admission:
+            def perform_import():
+                actual_name,actual_text,actual_language=name,ref_text,language
                 if profile_id is not None:
-                    existing = app.state.store.get(profile_id)
+                    existing=app.state.store.get(profile_id)
                     if existing is None:
-                        return failure(404,"PROFILE_NOT_FOUND","Unknown voice ID")
-                    name,ref_text,language=(existing[k] for k in ("name","ref_text","language"))
-                return await _finish_owned_write(app.state.store.import_audio,
-                    name=name, ref_text=ref_text, language=language, source=payload,
-                    suffix=suffix, profile_id=profile_id, consent=consent)
+                        raise KeyError(profile_id)
+                    actual_name,actual_text,actual_language=(existing[k] for k in ("name","ref_text","language"))
+                return app.state.store.import_audio(name=actual_name,ref_text=actual_text,
+                    language=actual_language,source=payload,suffix=suffix,
+                    profile_id=profile_id,consent=consent)
+            return await _owned_write(app.state,perform_import)
+        except NativeBusy:
+            return failure(409,"PROFILE_ACTIVE","Native inference or mutation is active")
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         except (ValueError, OSError) as exc:
@@ -314,9 +331,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         if app.state.admission.locked() or app.state.runner.lock.locked():
             return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
-            async with app.state.admission:
-                return await _finish_owned_write(app.state.store.update,profile_id,
-                    patch.model_dump(exclude_unset=True))
+            return await _owned_write(app.state,app.state.store.update,profile_id,
+                patch.model_dump(exclude_unset=True))
+        except NativeBusy:
+            return failure(409,"PROFILE_ACTIVE","Native inference or mutation is active")
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         except ProfileError as exc:
@@ -327,9 +345,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         if app.state.admission.locked() or app.state.runner.lock.locked():
             return failure(409,"PROFILE_ACTIVE","Native inference is active")
         try:
-            async with app.state.admission:
-                await _finish_owned_write(app.state.store.delete,profile_id,
-                    active_id=app.state.runner.active_id,purge=purge)
+            await _owned_write(app.state,app.state.store.delete,profile_id,
+                active_id=app.state.runner.active_id,purge=purge)
+        except NativeBusy:
+            return failure(409,"PROFILE_ACTIVE","Native inference or mutation is active")
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND", "Unknown voice ID")
         except ProfileError as exc:
