@@ -19,3 +19,11 @@ Precision rule: JSON `speed` accepts every finite value from 0.75 to 1.25 withou
 ## Deterministic inline pause (Lite-local API, no Studio code changes)
 
 The unchanged `POST /v1/audio/speech` JSON `input` accepts `[pause]` (350ms), `[pause 800ms]` and `[pause 1.5s]`. Units are ms or s, ASCII-case-insensitive; seconds support up to three decimal places. Durations 1–10000ms, 16 markers, 60000ms total, 4096 input characters including tags. These tags insert precise zero PCM16 samples into the final verified mono/24000Hz WAV. Leading/trailing/adjacent markers are preserved; surrounding boundary whitespace may be stripped only in tagged requests. Unrecognized expression tags remain unchanged (not interpreted). No `pause` JSON field and no second output. Tagged success includes `X-Lite-Pause-Count`, `X-Lite-Pause-S`, `X-Lite-Speech-S`, `X-Lite-Speech-Segments`, `X-Lite-Audio-S` (final), `X-Lite-RTF` (elapsed/final duration), and `X-Lite-Speech-RTF` (elapsed/speech duration). Each speech span uses the same voice/language/native speed with deterministic derived seed `(seed + zero_based_speech_index) % 2147483648` if seed is set; seed=null is nondeterministic. Speed never changes explicit silence duration. Untagged requests use the unchanged native generation/seed/WAV path. Errors: `422 INVALID_PAUSE_MARKER`, `422 PAUSE_LIMIT_EXCEEDED`, `422 INVALID_REQUEST`, and existing 429/499/503/504/500. Studio integration is not implemented here. WPM is an approximate whitespace word count and is not forced alignment; emotions/reactions remain deferred.
+
+## Cheap pre-submit pause capability handshake
+
+`GET /lite/pause-capability` returns a versioned, read-only capability document without GPU/weight preflight:
+```json
+{"policy_version":"lite_inline_pause_pcm16_v1","supports_tagged_input":true,"tagged_audio_mode":"atomic_pcm16_wav","default_pause_ms":350,"max_event_ms":10000,"max_markers":16,"max_total_ms":60000,"sample_rate_hz":24000}
+```
+Before sending any `[pause ...]` input, Studio MUST verify the exact policy, flags, bounds and sample rate. Older servers without this endpoint MUST fail closed for tagged Studio operations; untagged synthesis remains compatible. This handshake attests the running parser contract, **not** real GPU/audio quality or a reference-profile licence. No pause checksum response header is claimed.

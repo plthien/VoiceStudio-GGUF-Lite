@@ -24,7 +24,10 @@ from .profiles import Store, ProfileError
 from .runtime import preflight, RuntimeErrorLite
 from .readiness import complete_readiness
 from .speed import native_speed_capability, speed_to_native
-from .pause import parse_pause_script, PauseError
+from .pause import (
+    parse_pause_script, PauseError, MAX_MARKERS, MAX_TOTAL_MS,
+    DEFAULT_PAUSE_MS, MAX_EVENT_MS, PAUSE_POLICY_VERSION,
+)
 
 logger = logging.getLogger("gguf_lite")
 
@@ -243,6 +246,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
     @app.get("/lite/speed-capability")
     async def speed_capability():
         return await asyncio.to_thread(native_speed_capability,settings)
+
+    @app.get("/lite/pause-capability")
+    def pause_capability():
+        """Cheap, read-only parser/PCM contract proof; never probes GPU or weights."""
+        return {
+            "policy_version": PAUSE_POLICY_VERSION,
+            "supports_tagged_input": True,
+            "tagged_audio_mode": "atomic_pcm16_wav",
+            "default_pause_ms": DEFAULT_PAUSE_MS,
+            "max_event_ms": MAX_EVENT_MS,
+            "max_markers": MAX_MARKERS,
+            "max_total_ms": MAX_TOTAL_MS,
+            "sample_rate_hz": 24_000,
+        }
 
     @app.get("/lite/migration/preview")
     def migration_dry_run():

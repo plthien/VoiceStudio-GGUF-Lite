@@ -7,6 +7,10 @@ from decimal import Decimal, InvalidOperation
 
 MAX_MARKERS = 16
 MAX_TOTAL_MS = 60_000
+# Read-only capability discovery for same-host integrations; parser policy unchanged.
+DEFAULT_PAUSE_MS = 350
+MAX_EVENT_MS = 10_000
+PAUSE_POLICY_VERSION = "lite_inline_pause_pcm16_v1"
 MARKER_START = re.compile(r"\[[ \t]*pause(?=[ \t\]\r\n]|$)", re.I | re.ASCII)
 COMPLETE = re.compile(r"\[[ \t]*pause(?:[ \t]+([0-9]+(?:\.[0-9]+)?)[ \t]*(ms|s))?[ \t]*\]", re.I | re.ASCII)
 

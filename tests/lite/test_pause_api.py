@@ -295,3 +295,32 @@ def test_reference_integrity_rechecked_before_final_wav(system):
     assert response.headers["content-type"].startswith("application/json")
     assert calls[0]==2
     assert runner.process is None and not runner.lock.locked()
+
+
+def test_pause_capability_is_cheap_versioned_and_matches_parser(system, monkeypatch):
+    from lite.pause import parse_pause_script, PausePart
+    app, runner, settings, pairs, root = system
+    def no_gpu_or_model(_):
+        raise AssertionError("Pause capability must never load weights or probe GPU")
+    import lite.app as app_module
+    monkeypatch.setattr(app_module, "preflight", no_gpu_or_model)
+    with TestClient(app) as client:
+        response = client.get("/lite/pause-capability")
+        openapi = client.get("/openapi.json")
+    assert response.status_code == 200
+    assert response.json() == {
+        "policy_version": "lite_inline_pause_pcm16_v1",
+        "supports_tagged_input": True,
+        "tagged_audio_mode": "atomic_pcm16_wav",
+        "default_pause_ms": 350,
+        "max_event_ms": 10_000,
+        "max_markers": 16,
+        "max_total_ms": 60_000,
+        "sample_rate_hz": 24_000,
+    }
+    assert "/lite/pause-capability" in openapi.json()["paths"]
+    assert parse_pause_script("A[pause]B").pause_frames == 350 * 24
+    assert parse_pause_script("A[pause 10s]B").pause_frames == 10_000 * 24
+    assert len([p for p in parse_pause_script("A[pause]B").parts if isinstance(p, PausePart)]) == 1
+    assert not pairs
+    assert not (root / "audit.txt").exists()
