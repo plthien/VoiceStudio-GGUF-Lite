@@ -75,3 +75,44 @@ inspect GET /models/licenses/details/Serveurperso/OmniVoice-GGUF,
 then POST /models/licenses/accept with repo_id, fingerprint and accepted:true.
 Any later local receipt or document change invalidates the old acceptance.
 Commercial rights remain restricted/uncleared regardless of acknowledgement.
+
+## V3 user-only Windows host validation
+
+These commands are **owner-run examples**, not CI evidence. Start from the final PR #1
+commit in a clean checkout. All native binaries, model weights, logs, WAVs and voice data
+remain private under `D:\VoiceStudioBuild\lite`. Do not upload reference recordings,
+model files, generated audio or secrets into the public PR.
+
+```powershell
+.\scripts\install-gguf-lite.ps1
+.\scripts\build-gguf-lite-vulkan.ps1
+.\scripts\run-gguf-lite.ps1 -Preflight
+
+# Inspect pinned model/component rights before explicit manual acceptance.
+# Then, in another terminal, run:
+.\scripts\run-gguf-lite.ps1
+.\scripts\migrate-gguf-voices.ps1 -LegacyDb "<old-db>" -LegacyVoices "<old-voices>" -TargetData "D:\VoiceStudioBuild\lite\data" -VoiceId "<Ink-ID>"
+.\scripts\migrate-gguf-voices.ps1 -LegacyDb "<old-db>" -LegacyVoices "<old-voices>" -TargetData "D:\VoiceStudioBuild\lite\data" -VoiceId "<Ink-ID>" -Apply
+.\scripts\benchmark-gguf-lite.ps1 -VoiceId "<Ink-ID>" -Repetitions 3 -Policy warm
+```
+
+The benchmark writes `benchmark.json` and `run-01.wav` through `run-03.wav`.
+It verifies the per-request response header that carries the native-selected
+NVIDIA Vulkan0 evidence; 3/3 valid WAVs are mandatory. The frozen narration
+is 306 characters and seed 42. The report records the source/reference SHA-256,
+revision, executable/DLL hashes, 24k mono PCM16 metrics, RTF mean/median,
+source host context and DSP/comparability caveats. If the original reference
+bytes, text and preprocessing are not demonstrably identical, the old mean
+RTF 3.291 is **historical only**, not a direct performance parity result.
+
+Record H01-H06 in a private review note. Human A/B rubric:
+- H01: pinned Windows Vulkan build, EXE/DLL checksums and dependency manifest
+- H02: actual GGML selected NVIDIA GTX1650 Vulkan0 for all successful runs
+- H03: stable ID/transcript/audio hash; old database unchanged after migration
+- H04: three complete audio files and mean/median RTF
+- H05: narration coverage; pronunciation; timbre; pacing/expression;
+  silence/clipping; differences in trim/mastering/normalisation/watermark
+- H06: actual model/codec/voice-reference rights and attribution reviewed
+
+Use PASS, FAIL or NOT VERIFIED for each H gate. The licence review fingerprint
+is not independent legal approval, and no commercial clearance is implied.

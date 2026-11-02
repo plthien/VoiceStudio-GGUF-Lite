@@ -87,3 +87,13 @@ def test_reference_change_before_commit_is_rejected(tmp_path,monkeypatch):
     monkeypatch.setattr("lite.migrate.convert_reference",mutate)
     report=migrate(db,voices,settings=settings,apply=True)
     assert report["failed"]==1 and report["migrated"]==0
+
+def test_cli_reports_nonzero_for_bad_apply(tmp_path,monkeypatch,capsys):
+    from lite.migrate import main
+    db,voices,settings=setup(tmp_path,[("ink","valid")])
+    monkeypatch.setenv("GGUF_LITE_LEGACY_DB",str(db))
+    monkeypatch.setenv("GGUF_LITE_LEGACY_VOICES",str(voices))
+    monkeypatch.setenv("GGUF_LITE_MIGRATE_APPLY","1")
+    monkeypatch.setenv("GGUF_LITE_MIGRATE_VOICE_ID","nonexistent")
+    assert main()==2
+    assert '"migrated": 0' in capsys.readouterr().out
