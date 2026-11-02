@@ -126,6 +126,9 @@ def migrate(dbpath,voices,*,apply=False,only_id=None,settings=None):
                  None,timestamp,timestamp))
         if _digest(dbpath)!=original_db:
             raise ValueError("Legacy DB changed before commit")
+        for _, source, digest, size in valid:
+            if source.stat().st_size!=size or _digest(source)!=digest:
+                raise ValueError("Legacy reference changed before commit")
         conn.commit()
         result["migrated"]=len(published)
     except BaseException as exc:

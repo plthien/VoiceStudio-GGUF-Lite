@@ -304,7 +304,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                     return failure(499,"CLIENT_DISCONNECTED","Native generation cancelled")
                 data,info=await generation
                 return Response(data, media_type="audio/wav", headers={
-                    "X-Lite-Request-Id": info["request_id"], "Cache-Control": "no-store"})
+                    "X-Lite-Request-Id": info["request_id"], "Cache-Control": "no-store",
+                    **({"X-Lite-Verified-Backend":info["observed_native_backend"],
+                        "X-Lite-Observed-Device":info["observed_device_identity"],
+                        "X-Lite-Verification-Status":info["verification_status"]}
+                       if info.get("verification_status")=="verified" else {})})
             finally:
                 watcher.cancel()
                 if not generation.done():

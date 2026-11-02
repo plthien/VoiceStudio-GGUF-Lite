@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -64,6 +65,8 @@ class Store:
             raise ProfileError("Invalid reference byte count")
         if not language or len(language) > 32:
             raise ProfileError("Invalid language")
+        if profile_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}",profile_id):
+            raise ProfileError("Unsafe voice identifier")
         with self.lock:
             existing = self.get(profile_id) if profile_id else None
             if profile_id is not None and existing is None:

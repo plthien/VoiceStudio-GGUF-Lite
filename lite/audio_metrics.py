@@ -23,7 +23,8 @@ def measure(path: Path) -> dict:
     silence_limit = int(0.01*32768)
     start = next((i for i,s in enumerate(pcm) if abs(s)>silence_limit),len(pcm))
     end = next((i for i,s in enumerate(reversed(pcm)) if abs(s)>silence_limit),len(pcm))
-    return {"duration_s":len(pcm)/rate,"peak":max(amplitude),"rms":rms,
+    return {"duration_s":len(pcm)/rate,"sample_rate":rate,"channels":1,"bit_depth":16,
+        "peak":max(amplitude),"rms":rms,
         "clipped_frames":sum(abs(s)>=32767 for s in pcm),
         "begin_silence_s":start/rate,"end_silence_s":end/rate}
 
