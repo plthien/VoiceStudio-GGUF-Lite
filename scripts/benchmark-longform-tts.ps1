@@ -119,6 +119,7 @@ if($VoiceVersion -gt 0 -and $VoiceVersion -ne $profile.version){
 }
 $actualVoiceVersion=$profile.version
 $profileBinding=Get-ProfileBinding $profile
+$runtimeBinding=Get-RuntimeBinding
 
 if($resuming){
   if(!(Test-Path -LiteralPath $RunDir -PathType Container)){throw "RunDir must be an existing benchmark directory"}
@@ -131,11 +132,30 @@ if($resuming){
 }
 $manifest=Join-Path $run "manifest.json"
 Write-Output ("START longform utc="+$started.ToString("o")+" resume="+$resuming.ToString().ToLowerInvariant()+" run="+$run)
-python -m lite.longform_benchmark prepare --sections-file $SectionsFile --output $manifest --voice-version $actualVoiceVersion --profile-binding-sha256 $profileBinding --seed $Seed --speed $Speed
+python -m lite.longform_benchmark prepare --sections-file $SectionsFile --output $manifest --voice-version $actualVoiceVersion --profile-binding-sha256 $profileBinding --runtime-binding-sha256 $runtimeBinding.identity_sha256 --seed $Seed --speed $Speed
 if($LASTEXITCODE -ne 0){throw "Manifest preparation or resume validation failed"}
 $spec=Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json
-if($spec.schema -ne "lite-longform-manifest-v2" -or $spec.profile_binding_sha256 -cne $profileBinding){throw "Manifest profile binding mismatch"}
+if($spec.schema -ne "lite-longform-manifest-v2" -or
+   $spec.profile_binding_sha256 -cne $profileBinding -or
+   $spec.runtime_binding_sha256 -cne $runtimeBinding.identity_sha256){
+  throw "Manifest profile/runtime binding mismatch"
+}
 $rows=New-Object System.Collections.Generic.List[object]
+function Flush-LongformMetrics {
+  $elapsed=$clock.Elapsed.TotalSeconds
+  $complete=@($rows|Where-Object{$_.status -eq "PASS"})
+  $audio=($complete|Measure-Object -Property audio_s -Sum).Sum
+  $speech=($complete|Measure-Object -Property speech_s -Sum).Sum
+  Write-AtomicJson (Join-Path $run "metrics.json") @{
+    schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;
+    audio_s=$audio;speech_s=$speech;qualified_fresh_run=$false;resumed_run=$resuming;
+    overall_status="IN_PROGRESS";restore_status="PENDING";sections=@($rows);
+    privacy="No voice IDs, text or private filesystem paths"}
+  $names=@($rows|ForEach-Object{$_.PSObject.Properties.Name}|Select-Object -Unique)
+  if(!$names.Count){$names=@("index","status")}
+  $csv=(@($rows|Select-Object -Property $names|ConvertTo-Csv -NoTypeInformation) -join "`r`n")+"`r`n"
+  Write-AtomicText (Join-Path $run "metrics.csv") $csv
+}
 $wavs=New-Object System.Collections.Generic.List[string]
 $original=Invoke-RestMethod -Uri "$base/lite/worker/settings"
 $final=Join-Path $run "final.wav"
@@ -147,6 +167,7 @@ try {
   Invoke-RestMethod -Method Put -Uri "$base/lite/worker/settings" -ContentType "application/json" -Body $settings|Out-Null
   foreach($section in $spec.sections){
     Assert-ProfileUnchanged $profile
+    Assert-RuntimeUnchanged $runtimeBinding | Out-Null
     $wav=Join-Path $run ("section-{0:d4}.wav" -f [int]$section.index)
     $sectionReceipt=$wav+".json"
     $journalPath=$wav+".attempt.json"
@@ -158,7 +179,8 @@ try {
          [int]$journal.index -ne [int]$section.index -or
          $journal.text_sha256 -cne $section.text_sha256 -or
          $journal.manifest_sha256 -cne $spec.manifest_sha256 -or
-         $journal.profile_binding_sha256 -cne $profileBinding){
+         $journal.profile_binding_sha256 -cne $profileBinding -or
+         $journal.runtime_binding_sha256 -cne $runtimeBinding.identity_sha256){
         throw "UNCERTAIN_SECTION_REQUIRES_OWNER_DECISION: invalid section journal"
       }
     } elseif((Test-Path -LiteralPath $wav) -or (Test-Path -LiteralPath $sectionReceipt) -or (Test-Path -LiteralPath $tmp)){
@@ -185,7 +207,8 @@ try {
       if(!(Test-Path -LiteralPath $sectionReceipt)){throw "Resume receipt missing for section $($section.index)"}
       $saved=Get-Content -Raw -LiteralPath $sectionReceipt|ConvertFrom-Json
       $digest=Get-FileSha256 $wav
-      if($journal.wav_sha256 -cne $digest -or $journal.attempt_id -cne $saved.attempt_id){
+      if($journal.wav_sha256 -cne $digest -or $journal.attempt_id -cne $saved.attempt_id -or
+         $saved.runtime_binding_sha256 -cne $runtimeBinding.identity_sha256){
         throw "Resume journal/receipt mismatch for section $($section.index)"
       }
       $wavInfoJson=python -m lite.longform_benchmark inspect --wav $wav
@@ -199,6 +222,7 @@ try {
       }
       $wavs.Add($wav)
       $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=[double]$saved.wall_s;audio_s=[double]$saved.audio_s;speech_s=[double]$saved.speech_s;rtf=[double]$saved.rtf;native_total_us=$saved.native_total_us;ref_codec_encode_us=$saved.ref_codec_encode_us;cache_hit=$saved.cache_hit;maskgit_steps=$saved.maskgit_steps;status="PASS";resumed=$true})
+      Flush-LongformMetrics
       Write-Output ("PASS resume section="+$section.index)
       continue
     }
@@ -207,46 +231,84 @@ try {
       $attemptId=[guid]::NewGuid().ToString("N")
       $record=@{schema="lite-longform-attempt-v1";index=[int]$section.index;
         text_sha256=[string]$section.text_sha256;manifest_sha256=[string]$spec.manifest_sha256;
-        profile_binding_sha256=$profileBinding;attempt_id=$attemptId;
+        profile_binding_sha256=$profileBinding;runtime_binding_sha256=$runtimeBinding.identity_sha256;attempt_id=$attemptId;
         prior_attempt_id=$(if($journal){$journal.prior_attempt_id}else{$null});
         attempts=$(if($journal){[int]$journal.attempts+1}else{1});
         owner_retry_approved=[bool]($journal -and $resuming);
         start_utc=[DateTime]::UtcNow.ToString("o");state="IN_FLIGHT"}
       Write-AtomicJson $journalPath $record
+      Assert-RuntimeUnchanged $runtimeBinding | Out-Null
       $payload=@{model="omnivoice-gguf";voice=$Voice;input=$section.text;response_format="wav";speed=$Speed;seed=[int]$section.seed}|ConvertTo-Json -Compress
       $response=Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/v1/audio/speech" -ContentType "application/json" -Body $payload -OutFile $tmp -PassThru
       $timer.Stop()
-      if($response.Headers['X-Lite-Verification-Status'] -ne 'verified'){throw "Unverified native response"}
+      if((Get-HeaderValue $response "X-Lite-Verification-Status") -cne "verified" -or
+         (Get-HeaderValue $response "X-Lite-Verified-Backend") -cne "Vulkan0" -or
+         (Get-HeaderValue $response "X-Lite-Observed-Device") -notmatch "NVIDIA.*GTX 1650"){
+        throw "NATIVE_GPU_PROOF_INVALID"
+      }
+      if((Get-HeaderValue $response "Content-Type") -notmatch "^audio/wav"){
+        throw "AUDIO_CONTENT_TYPE_INVALID"
+      }
+      $effectiveSpeed=Get-HeaderValue $response "X-Lite-Effective-Speed"
+      $speedValue=0.0
+      if(![double]::TryParse($effectiveSpeed,[Globalization.NumberStyles]::Float,
+        [cultureinfo]::InvariantCulture,[ref]$speedValue) -or
+         [math]::Abs($speedValue-$Speed) -gt 0.001){
+        throw "EFFECTIVE_SPEED_MISMATCH"
+      }
       $wavInfoJson=python -m lite.longform_benchmark inspect --wav $tmp
       if($LASTEXITCODE -ne 0){throw "Section WAV integrity validation failed"}
       $wavInfo=$wavInfoJson|ConvertFrom-Json
       $audioSeconds=[double]$wavInfo.audio_s
-      $headerAudio=[string]$response.Headers['X-Lite-Audio-S']
+      $headerAudio=Get-HeaderValue $response "X-Lite-Audio-S"
       if([string]::IsNullOrWhiteSpace($headerAudio) -or [Math]::Abs([double]$headerAudio-$audioSeconds) -gt 0.001){throw "Audio duration header does not match verified WAV"}
-      $speechHeader=[string]$response.Headers['X-Lite-Speech-S']
+      $speechHeader=Get-HeaderValue $response "X-Lite-Speech-S"
       $speechSeconds=$(if([string]::IsNullOrWhiteSpace($speechHeader)){$audioSeconds}else{[double]$speechHeader})
       if($speechSeconds -le 0 -or $speechSeconds -gt ($audioSeconds+(1.0/24000.0))){throw "Invalid speech duration header"}
+      $expectedPause=[double]$section.pause_ms/1000.0
+      $pauseSeconds=0.0
+      $pauseHeader=Get-HeaderValue $response "X-Lite-Pause-S"
+      $pauseCountHeader=Get-HeaderValue $response "X-Lite-Pause-Count"
+      if([int]$section.pauses -gt 0){
+        if([string]::IsNullOrWhiteSpace($pauseHeader) -or
+           [string]::IsNullOrWhiteSpace($pauseCountHeader)){throw "PAUSE_PROOF_MISSING"}
+        $pauseSeconds=[double]::Parse($pauseHeader,[cultureinfo]::InvariantCulture)
+        if([int]$pauseCountHeader -ne [int]$section.pauses){throw "PAUSE_COUNT_MISMATCH"}
+      } elseif($pauseHeader -or $pauseCountHeader){
+        if([double]$pauseHeader -ne 0 -or [int]$pauseCountHeader -ne 0){throw "UNEXPECTED_PAUSE_METADATA"}
+      }
+      if([math]::Abs($pauseSeconds-$expectedPause) -gt (1.0/24000.0) -or
+         [math]::Abs(($speechSeconds+$pauseSeconds)-$audioSeconds) -gt 0.001){
+        throw "PAUSE_DURATION_MISMATCH"
+      }
       Assert-ProfileUnchanged $profile
+      $observed=Assert-RuntimeUnchanged $runtimeBinding
+      if($observed.candidate_kind -eq "verified_candidate" -and $observed.settings_verification -ne "observed"){
+        throw "NATIVE_EFFECTIVE_SETTINGS_NOT_VERIFIED"
+      }
       Sync-File $tmp
       Move-Item -LiteralPath $tmp -Destination $wav
       $state=Invoke-RestMethod -Uri "$base/lite/worker/status"
       $digest=Get-FileSha256 $wav
-      $receipt=@{schema="lite-longform-section-v2";index=[int]$section.index;text_sha256=$section.text_sha256;manifest_sha256=$spec.manifest_sha256;profile_binding_sha256=$profileBinding;wav_sha256=$digest;verification_status="verified";attempt_id=$attemptId;wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps}
+      $receipt=@{schema="lite-longform-section-v2";index=[int]$section.index;text_sha256=$section.text_sha256;manifest_sha256=$spec.manifest_sha256;profile_binding_sha256=$profileBinding;runtime_binding_sha256=$runtimeBinding.identity_sha256;wav_sha256=$digest;verification_status="verified";attempt_id=$attemptId;wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps}
       Write-AtomicJson $sectionReceipt $receipt
       $record.state="VERIFIED_COMMITTED"
       $record.wav_sha256=$digest
       Write-AtomicJson $journalPath $record
       $wavs.Add($wav)
       $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=[double]$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps;status="PASS";resumed=$false})
+      Flush-LongformMetrics
       Write-Output ("PASS section="+$section.index+" elapsed_s="+$timer.Elapsed.TotalSeconds.ToString('0.000',[cultureinfo]::InvariantCulture))
     } catch {
       if(Test-Path -LiteralPath $tmp){Remove-Item -LiteralPath $tmp -Force}
-      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;status="FAIL";error=$_.Exception.GetType().Name})
+      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;status="FAIL";error=$_.Exception.GetType().Name;stage="post_or_validation";utc=[DateTime]::UtcNow.ToString("o")})
+      Flush-LongformMetrics
       Write-Output ("FAIL section="+$section.index+" error="+$_.Exception.GetType().Name)
       if(!$ContinueOnFailure){throw}
     }
   }
   Assert-ProfileUnchanged $profile
+  Assert-RuntimeUnchanged $runtimeBinding | Out-Null
   if($wavs.Count -ne $spec.sections.Count){throw "Not all sections completed; final WAV withheld"}
   python -m lite.longform_benchmark assemble --output (Join-Path $run "final.wav") @wavs
   if($LASTEXITCODE -ne 0){throw "Final streaming assembly failed"}
@@ -261,13 +323,13 @@ try {
     $restoreFailed=$true
     Write-Output ("FAIL longform stage=restore error=SETTINGS_RESTORE_FAILED")
   }
-  $rows|Export-Csv -NoTypeInformation -Encoding UTF8 (Join-Path $run "metrics.csv")
+  Flush-LongformMetrics
   $audioTotal=($rows|Where-Object{$_.status -eq 'PASS'}|Measure-Object -Property audio_s -Sum).Sum
   $speechTotal=($rows|Where-Object{$_.status -eq 'PASS'}|Measure-Object -Property speech_s -Sum).Sum
   $elapsed=$clock.Elapsed.TotalSeconds
   $success=(-not $restoreFailed -and !$runError -and $wavs.Count -eq $spec.sections.Count -and (Test-Path -LiteralPath (Join-Path $run "final.wav")))
   $qualified=(-not $resuming -and $success -and @($rows|Where-Object{$_.status -ne 'PASS' -or $_.resumed -eq $true}).Count -eq 0)
-  @{schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;audio_s=$audioTotal;speech_s=$speechTotal;final_rtf=$(if($audioTotal){$elapsed/$audioTotal}else{$null});speech_rtf=$(if($speechTotal){$elapsed/$speechTotal}else{$null});qualified_fresh_run=$qualified;resumed_run=$resuming;overall_status=$(if($success){"PASS"}else{"FAIL"});restore_status=$(if($restoreFailed){"FAIL"}else{"PASS"});errors=@($runError,$(if($restoreFailed){"SETTINGS_RESTORE_FAILED"}else{$null})|Where-Object{$_});sections=$rows;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 (Join-Path $run "metrics.json")
+  @{schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;audio_s=$audioTotal;speech_s=$speechTotal;final_rtf=$(if($audioTotal){$elapsed/$audioTotal}else{$null});speech_rtf=$(if($speechTotal){$elapsed/$speechTotal}else{$null});qualified_fresh_run=$qualified;resumed_run=$resuming;overall_status=$(if($success){"PASS"}else{"FAIL"});restore_status=$(if($restoreFailed){"FAIL"}else{"PASS"});errors=@($runError,$(if($restoreFailed){"SETTINGS_RESTORE_FAILED"}else{$null})|Where-Object{$_});sections=$rows;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ForEach-Object{ Write-AtomicJson (Join-Path $run "metrics.json") $_ }
 }
 $clock.Stop()
 if($restoreFailed -or $runError){
