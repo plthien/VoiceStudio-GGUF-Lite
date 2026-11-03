@@ -7,7 +7,8 @@ param(
   [int]$VoiceVersion=0,
   [int]$Seed=42,
   [double]$Speed=1.0,
-  [switch]$ContinueOnFailure
+  [switch]$ContinueOnFailure,
+  [int[]]$RetryUncertainSections=@()
 )
 # OWNER LIVE ONLY. Section sources, manifests and WAVs stay in the owner-selected directory.
 $ErrorActionPreference="Stop"
@@ -53,6 +54,20 @@ function Get-FileSha256([string]$path) {
   }
 }
 
+function Write-AtomicJson([string]$path,[object]$value) {
+  $temp=$path+"."+[guid]::NewGuid().ToString("N")+".partial"
+  $bytes=[Text.Encoding]::UTF8.GetBytes(($value|ConvertTo-Json -Depth 12 -Compress))
+  $stream=New-Object IO.FileStream($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  try {$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)} finally {$stream.Dispose()}
+  try {
+    if([IO.File]::Exists($path)){[IO.File]::Replace($temp,$path,$null)}
+    else{[IO.File]::Move($temp,$path)}
+  } finally {if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
+}
+function Sync-File([string]$path){
+  $stream=New-Object IO.FileStream($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+  try {$stream.Flush($true)} finally {$stream.Dispose()}
+}
 function Assert-ProfileUnchanged([object]$expected) {
   $actual=Get-ProfileSnapshot
   if($actual.id -cne $expected.id -or $actual.version -ne $expected.version -or
@@ -87,6 +102,8 @@ if($spec.schema -ne "lite-longform-manifest-v2" -or $spec.profile_binding_sha256
 $rows=New-Object System.Collections.Generic.List[object]
 $wavs=New-Object System.Collections.Generic.List[string]
 $original=Invoke-RestMethod -Uri "$base/lite/worker/settings"
+$final=Join-Path $run "final.wav"
+if(Test-Path -LiteralPath $final){Remove-Item -LiteralPath $final -Force}
 $restoreFailed=$false
 $runError=$null
 try {
