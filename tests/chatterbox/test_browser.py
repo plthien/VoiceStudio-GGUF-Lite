@@ -145,3 +145,37 @@ def test_longform_http_resume_end_to_end(live, tmp_path):
         assert newer.status_code == 200
         with pytest.raises(RuntimeError, match="RESUME_PROVENANCE_CHANGED"):
             do_job(manifest, target, base=url, resume=True)
+
+
+
+def test_benchmark_longform_forces_cold_start(live, tmp_path, monkeypatch):
+    """A warm Smoke run must not exclude cold model load from LongForm RTF."""
+    import sys
+    from lite.chatterbox_benchmark import main as benchmark_main
+    url, fake = live
+    with httpx.Client(timeout=20) as client:
+        response=client.post(url+"/profiles",
+                   data={"name":"Owned","ref_text":"Original audio words", "language":"en",
+                         "consent":"confirmed"},
+                   files={"ref_audio":("owned.wav",audio(6),"audio/wav")})
+        assert response.status_code==200
+        voice=response.json()["id"]
+        warm=client.post(url+"/v1/audio/speech",json={
+            "model":"chatterbox-turbo", "voice":voice, "input":"Warm the model.",
+            "response_format":"wav", "speed":1.0, "language":"en"})
+        assert warm.status_code==200
+        assert fake.loads==1
+        manifest=tmp_path/"narration.json"
+        manifest.write_text(json.dumps({"voice":voice,"sections":[
+            {"id":"sec_001","input":"This is a separate cold-start narration."}
+        ]}),encoding="utf8")
+        output=tmp_path/"benchmark"
+        monkeypatch.setattr(sys,"argv",["benchmark","--mode","LongForm",
+                    "--voice-id",voice,"--manifest",str(manifest),
+                    "--output",str(output),"--base",url])
+        assert benchmark_main()==0
+        assert fake.loads==2
+        report=json.loads((output/"owner-metrics.json").read_text())
+        assert report[0]["cold_start_included"] is True
+        assert report[0]["sla_checked"] is False
+        assert (output/"longform"/"final.wav").is_file()

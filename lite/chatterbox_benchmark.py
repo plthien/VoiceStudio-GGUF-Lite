@@ -61,15 +61,18 @@ def main():
     if a.mode in ("Pause","All"):
         cases.append(("pause", "He opened the door. [pause 250ms] It moved. [pause 1.5s] Run."))
     records=[]
+    def force_cold_start():
+        req = urllib.request.Request(a.base+"/chatterbox/runtime/unload", data=b"{}",
+                   headers={"Content-Type":"application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as response:
+            if response.status != 200:
+                raise RuntimeError("COLD_UNLOAD_FAILED")
+
     for name,text in cases:
         print(f"START {name}",flush=True)
         if name=="cold":
             try:
-                req=urllib.request.Request(a.base+"/chatterbox/runtime/unload",data=b"{}",
-                                           headers={"Content-Type":"application/json"},method="POST")
-                with urllib.request.urlopen(req,timeout=15) as response:
-                    if response.status!=200:
-                        raise RuntimeError("UNLOAD_FAILED")
+                force_cold_start()
             except Exception:
                 records.append({"case":name,"state":"FAIL","error":"COLD_UNLOAD_FAILED"})
                 atomic(folder/"owner-metrics.json",json.dumps(records,indent=2).encode())
@@ -80,17 +83,26 @@ def main():
         if a.manifest is None:
             records.append({"case":"longform","state":"FAIL","error":"MANIFEST_REQUIRED"})
         else:
-            started=time.monotonic()
+            print("START longform cold-start (unload resident Turbo before timing)",flush=True)
             try:
-                result=do_job(a.manifest,folder/"longform",a.base,resume=False,report=folder/"sections.json")
-                elapsed=time.monotonic()-started
-                records.append({"case":"longform","state":"PASS","wall_s":elapsed,
-                                "rtf":elapsed/result["audio_s"], "sla_checked":result["audio_s"]>=600,
-                                "sla_under_1800s": elapsed<=1800 if result["audio_s"]>=600 else None,
-                                **result})
-            except Exception as exc:
-                records.append({"case":"longform","state":"FAIL","wall_s":time.monotonic()-started,
-                                "error":type(exc).__name__})
+                force_cold_start()
+            except Exception:
+                records.append({"case":"longform","state":"FAIL","error":"COLD_UNLOAD_FAILED"})
+            else:
+                started=time.monotonic()
+                try:
+                    result=do_job(a.manifest,folder/"longform",a.base,resume=False,report=folder/"sections.json")
+                    elapsed=time.monotonic()-started
+                    records.append({"case":"longform","state":"PASS","wall_s":elapsed,
+                                    "cold_start_included":True,
+                                    "rtf":elapsed/result["audio_s"], "sla_checked":result["audio_s"]>=600,
+                                    "sla_under_1800s": elapsed<=1800 if result["audio_s"]>=600 else None,
+                                    **result})
+                except Exception as exc:
+                    records.append({"case":"longform","state":"FAIL",
+                                    "cold_start_included":True,
+                                    "wall_s":time.monotonic()-started,
+                                    "error":type(exc).__name__})
     atomic(folder/"owner-metrics.json",json.dumps(records,indent=2).encode())
     # Always write CSV including failures and empty results.
     fields=["case","state","wall_s","audio_s","speech_s","pause_s","rtf","backend",
