@@ -71,6 +71,6 @@ def test_benchmark_http_helper_is_noninteractive_and_private(host):
     assert len(observed)==2 and observed[0] == {"input": "CI smoke", "model": "omnivoice-gguf",
                          "response_format": "wav", "seed": 42,
                          "speed": 1.0, "voice": "ci-smoke"}
-    assert skipped.returncode==0 and "selected=0" in skipped.stdout
+    assert skipped.returncode!=0 and "UNKNOWN_CASE_SELECTOR: different" in (skipped.stdout+skipped.stderr)
     assert failed.returncode==2 and "START case=ci-http" in failed.stdout and "FAIL case=ci-http" in failed.stdout
     assert "PASS settings-restore unchanged" in failed.stdout
