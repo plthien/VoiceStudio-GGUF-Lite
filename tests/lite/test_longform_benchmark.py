@@ -147,7 +147,7 @@ def test_inspect_wav_is_bounded_and_rejects_corruption(tmp_path):
     with wave.open(str(wav), "wb") as out:
         out.setnchannels(1); out.setsampwidth(2); out.setframerate(24000)
         for _ in range(60):
-            out.writeframesraw(b"\\0\\0" * 24000)
+            out.writeframesraw(b"\x00\x00" * 24000)
     tracemalloc.start()
     result = inspect_wav(wav)
     _, peak = tracemalloc.get_traced_memory()

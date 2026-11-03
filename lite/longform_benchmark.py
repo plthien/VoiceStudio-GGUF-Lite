@@ -259,8 +259,8 @@ def metrics_row(*, index: int, wall_s: float, audio_s: float,
 
 def write_metrics(directory: Path, rows: list[dict], started: float) -> dict:
     total_wall = time.monotonic() - started
-    audio = sum(float(x["audio_s"]) for x in rows)
-    speech = sum(float(x["speech_s"]) for x in rows)
+    audio = sum(float(x["audio_s"]) for x in rows if x.get("audio_s") is not None)
+    speech = sum(float(x["speech_s"]) for x in rows if x.get("speech_s") is not None)
     report = {"schema": "lite-longform-metrics-v1", "sections": rows,
               "total_wall_s": total_wall, "audio_s": audio,
               "speech_s": speech,
