@@ -249,9 +249,11 @@ class TurboService:
                 last_memory = {}
                 max_segment_peak = None
                 measured_segments = 0
+                total_speech_generations = 0
                 for i, part in enumerate(parts):
                     if not isinstance(part, SpeechPart):
                         continue
+                    total_speech_generations += 1
                     self.state = "GENERATING"
                     answer = await self._rpc({
                         "cmd": "SYNTH", "voice": profile["id"], "version": profile["version"],
@@ -298,10 +300,14 @@ class TurboService:
                     raise TurboError("DEADLINE_EXCEEDED") from exc
                 if time.monotonic()>=deadline:
                     raise TurboError("DEADLINE_EXCEEDED")
-                if max_segment_peak is not None:
+                if max_segment_peak is not None and measured_segments == total_speech_generations:
                     last_memory["peak_bytes"]=max_segment_peak
                     last_memory["peak_scope"]=(
                         "generation" if measured_segments==1 else "max_generation_in_request")
+                else:
+                    # A partial sample must not masquerade as the request peak.
+                    last_memory.pop("peak_bytes",None)
+                    last_memory.pop("peak_scope",None)
                 elapsed = time.monotonic() - started
                 speech_s = meta["speech_frames"] / 24000
                 audio_s = info["seconds"]

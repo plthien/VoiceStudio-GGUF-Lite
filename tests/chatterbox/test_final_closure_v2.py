@@ -524,3 +524,25 @@ def test_report_archive_write_error_keeps_previous_latest(tmp_path,monkeypatch):
         bench.save_reports(folder,[{"case":"longform","state":"FAIL"}],run_folder)
     assert (folder/"owner-metrics.json").read_bytes()==old_json
     assert (folder/"owner-metrics.csv").read_bytes()==old_csv
+
+
+def test_multisegment_missing_cuda_peak_never_claims_request_peak(api,monkeypatch):
+    from .test_contracts import profile,gen
+    client,svc,_=api
+    voice=profile(client)["id"]
+    original=svc._rpc
+    count=[0]
+    async def incomplete(message,deadline):
+        result=await original(message,deadline)
+        if message.get("cmd")=="SYNTH":
+            count[0]+=1
+            if count[0]==2:
+                result["memory"].pop("peak_bytes",None)
+                result["memory"].pop("peak_scope",None)
+        return result
+    monkeypatch.setattr(svc,"_rpc",incomplete)
+    response=gen(client,voice,"One. [pause 250ms] Two.")
+    assert response.status_code==200
+    assert "X-TTS-CUDA-Peak-Bytes" not in response.headers
+    assert "X-TTS-CUDA-Peak-Scope" not in response.headers
+    assert count[0]==2
