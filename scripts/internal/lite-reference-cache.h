@@ -1,4 +1,5 @@
 #pragma once
+#include "lite-native-perf.h"
 // Exact single-slot reference-conditioning cache helpers.
 #include <cstdlib>
 #include <cstring>
