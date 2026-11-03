@@ -168,6 +168,15 @@ try {
     }
     $timer=[Diagnostics.Stopwatch]::StartNew()
     try {
+      $attemptId=[guid]::NewGuid().ToString("N")
+      $record=@{schema="lite-longform-attempt-v1";index=[int]$section.index;
+        text_sha256=[string]$section.text_sha256;manifest_sha256=[string]$spec.manifest_sha256;
+        profile_binding_sha256=$profileBinding;attempt_id=$attemptId;
+        prior_attempt_id=$(if($journal){$journal.prior_attempt_id}else{$null});
+        attempts=$(if($journal){[int]$journal.attempts+1}else{1});
+        owner_retry_approved=[bool]($journal -and $resuming);
+        start_utc=[DateTime]::UtcNow.ToString("o");state="IN_FLIGHT"}
+      Write-AtomicJson $journalPath $record
       $payload=@{model="omnivoice-gguf";voice=$Voice;input=$section.text;response_format="wav";speed=$Speed;seed=[int]$section.seed}|ConvertTo-Json -Compress
       $response=Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/v1/audio/speech" -ContentType "application/json" -Body $payload -OutFile $tmp -PassThru
       $timer.Stop()
@@ -182,12 +191,15 @@ try {
       $speechSeconds=$(if([string]::IsNullOrWhiteSpace($speechHeader)){$audioSeconds}else{[double]$speechHeader})
       if($speechSeconds -le 0 -or $speechSeconds -gt ($audioSeconds+(1.0/24000.0))){throw "Invalid speech duration header"}
       Assert-ProfileUnchanged $profile
+      Sync-File $tmp
       Move-Item -LiteralPath $tmp -Destination $wav
       $state=Invoke-RestMethod -Uri "$base/lite/worker/status"
       $digest=Get-FileSha256 $wav
-      $receiptTemp=$sectionReceipt+".partial"
-      @{schema="lite-longform-section-v2";index=[int]$section.index;text_sha256=$section.text_sha256;manifest_sha256=$spec.manifest_sha256;profile_binding_sha256=$profileBinding;wav_sha256=$digest;verification_status="verified";wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps}|ConvertTo-Json -Compress|Set-Content -Encoding UTF8 -LiteralPath $receiptTemp
-      Move-Item -LiteralPath $receiptTemp -Destination $sectionReceipt
+      $receipt=@{schema="lite-longform-section-v2";index=[int]$section.index;text_sha256=$section.text_sha256;manifest_sha256=$spec.manifest_sha256;profile_binding_sha256=$profileBinding;wav_sha256=$digest;verification_status="verified";attempt_id=$attemptId;wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps}
+      Write-AtomicJson $sectionReceipt $receipt
+      $record.state="VERIFIED_COMMITTED"
+      $record.wav_sha256=$digest
+      Write-AtomicJson $journalPath $record
       $wavs.Add($wav)
       $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=[double]$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps;status="PASS";resumed=$false})
       Write-Output ("PASS section="+$section.index+" elapsed_s="+$timer.Elapsed.TotalSeconds.ToString('0.000',[cultureinfo]::InvariantCulture))
