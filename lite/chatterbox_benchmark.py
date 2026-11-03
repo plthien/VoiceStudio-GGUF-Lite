@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import csv
+import hashlib
 import io
 import json
 import os
@@ -68,7 +69,7 @@ def save_reports(folder,records,run_dir=None):
     atomic(folder/"owner-metrics.json",payload)
     if run_dir is not None:
         atomic(run_dir/"owner-metrics.json",payload)
-    fields=["case","run_id","run_directory","state","generation_state","h07_status","h07_reason",
+    fields=["case","run_id","run_directory","manifest_sha256","state","generation_state","h07_status","h07_reason",
             "cold_start_included","wall_s","audio_s","end_to_end_rtf","rtf",
             "voice_version","model_revision","speech_s","pause_s","backend",
             "cuda_allocated_bytes","cuda_peak_bytes","cuda_peak_scope",
@@ -105,6 +106,8 @@ def main():
 
 def run_benchmark_locked(a,folder):
     records=[]
+    frozen_manifest=None
+    manifest_digest=None
     run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"-"+secrets.token_hex(10)
     run_dir=folder/"runs"/run_id
     run_dir.mkdir(parents=True,exist_ok=False)
@@ -114,7 +117,12 @@ def run_benchmark_locked(a,folder):
         if a.mode in ("LongForm","All"):
             if a.manifest is None:
                 raise ValueError("MANIFEST_REQUIRED")
-            load_source(a.manifest,expected_voice=a.voice_id)
+            source=load_source(a.manifest,expected_voice=a.voice_id)
+            # One immutable, owner-local input snapshot for the entire cold run.
+            frozen_bytes=json.dumps(source,sort_keys=True,separators=(",",":")).encode("utf-8")
+            manifest_digest=hashlib.sha256(frozen_bytes).hexdigest()
+            frozen_manifest=run_dir/"frozen-manifest.private.json"
+            atomic(frozen_manifest,frozen_bytes)
         def force_cold_start():
             req=urllib.request.Request(a.base+"/chatterbox/runtime/unload",data=b"{}",
                     headers={"Content-Type":"application/json"},method="POST")
@@ -152,7 +160,7 @@ def run_benchmark_locked(a,folder):
             else:
                 started=time.monotonic()
                 try:
-                    result=do_job(a.manifest,run_dir/"longform",a.base,resume=False,
+                    result=do_job(frozen_manifest,run_dir/"longform",a.base,resume=False,
                                   report=run_dir/"sections.json",expected_voice=a.voice_id)
                     elapsed=time.monotonic()-started
                     assessment=evaluate_h07(result["audio_s"],elapsed,True)
@@ -176,6 +184,8 @@ def run_benchmark_locked(a,folder):
         for row in records:
             row["run_id"]=run_id
             row["run_directory"]="runs/"+run_id
+            if manifest_digest is not None:
+                row["manifest_sha256"]=manifest_digest
         save_reports(folder,records,run_dir)
         print("RESULTS",str(folder/"owner-metrics.json"),flush=True)
     return 0 if records and all(r.get("state")=="PASS" and
