@@ -455,3 +455,38 @@ def test_multisegment_request_cuda_peak_uses_max_not_last(api,monkeypatch):
     assert response.headers["X-TTS-CUDA-Peak-Scope"]=="max_generation_in_request"
     assert response.headers["X-Lite-Pause-Count"]=="1"
     assert float(response.headers["X-Lite-Pause-S"])==.25
+
+
+def test_all_benchmark_freezes_owner_manifest_before_warming(tmp_path,monkeypatch):
+    import lite.chatterbox_benchmark as bench
+    manifest=tmp_path/"owner.json"
+    original={"voice":"owned","sections":[{"id":"s1","input":"Original frozen text"}]}
+    manifest.write_text(json.dumps(original))
+    folder=tmp_path/"output"
+    class OK:
+        status=200
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+    monkeypatch.setattr(bench.urllib.request,"urlopen",lambda *args,**kwargs:OK())
+    changed=[False]
+    def run_smoke(name,text,voice,base,output):
+        if not changed[0]:
+            manifest.write_text(json.dumps({"voice":"owned","sections":[
+                {"id":"s1","input":"Untrusted late mutation"}]}))
+            changed[0]=True
+        return {"case":name,"state":"PASS","wall_s":0.01}
+    monkeypatch.setattr(bench,"run_case",run_smoke)
+    def fake_longform(snapshot,output,*args,**kwargs):
+        assert snapshot != manifest
+        assert json.loads(snapshot.read_text()) == original
+        return {"state":"PASS","audio_s":610,"model_revision":MODEL_REVISION}
+    monkeypatch.setattr(bench,"do_job",fake_longform)
+    monkeypatch.setattr(sys,"argv",["benchmark","--mode","All",
+         "--voice-id","owned","--manifest",str(manifest),"--output",str(folder)])
+    assert bench.main()==0
+    rows=json.loads((folder/"owner-metrics.json").read_text())
+    archive=folder/rows[0]["run_directory"]
+    frozen=(archive/"frozen-manifest.private.json").read_bytes()
+    assert json.loads(frozen)==original
+    assert rows[0]["manifest_sha256"]==hashlib.sha256(frozen).hexdigest()
+    assert "Original frozen text" not in json.dumps(rows)
