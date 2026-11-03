@@ -88,6 +88,53 @@ function Get-HeaderValue([object]$response,[string]$name){
   }
   return ""
 }
+function Start-GpuMonitor([int]$index) {
+  $tool=Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
+  if(!$tool){return $null}
+  $stamp=[guid]::NewGuid().ToString("N")
+  $samples=Join-Path $run ("private-gpu-"+$index+"-"+$stamp+".csv")
+  $errors=Join-Path $run ("private-gpu-"+$index+"-"+$stamp+".err")
+  try {
+    $proc=Start-Process -FilePath $tool.Source -ArgumentList @(
+      "--query-gpu=index,name,memory.used,temperature.gpu,clocks.sm",
+      "--format=csv,noheader,nounits","--loop-ms=250"
+    ) -WindowStyle Hidden -RedirectStandardOutput $samples -RedirectStandardError $errors -PassThru
+    return [pscustomobject]@{process=$proc;samples=$samples;errors=$errors}
+  } catch {return $null}
+}
+function Stop-GpuMonitor([object]$monitor) {
+  $stats=[ordered]@{status="GPU_STATS_UNAVAILABLE";index=$null;device=$null;
+    board_used_peak_mib=$null;temperature_peak_c=$null;clock_sm_peak_mhz=$null;
+    metric_kind="WDDM total board usage, sampled; not process VRAM"}
+  if(!$monitor){return $stats}
+  try {$monitor.process.Kill()} catch {}
+  try {$monitor.process.WaitForExit(5000)|Out-Null} catch {}
+  try {
+    foreach($line in @(Get-Content -LiteralPath $monitor.samples -ErrorAction Stop)){
+      $parts=@($line.Split(",")|ForEach-Object{$_.Trim()})
+      if($parts.Count -lt 5 -or $parts[1] -notmatch "NVIDIA.*GTX 1650" -or $parts[0] -ne "0"){continue}
+      $used=0; $temp=0; $clock=0
+      if(![int]::TryParse($parts[2],[ref]$used)){continue}
+      $stats.status="GPU_STATS_SAMPLED"
+      $stats.index=0
+      $stats.device="NVIDIA GeForce GTX 1650"
+      if($null -eq $stats.board_used_peak_mib -or $used -gt $stats.board_used_peak_mib){
+        $stats.board_used_peak_mib=$used
+      }
+      if([int]::TryParse($parts[3],[ref]$temp)){
+        if($null -eq $stats.temperature_peak_c -or $temp -gt $stats.temperature_peak_c){
+          $stats.temperature_peak_c=$temp
+        }
+      }
+      if([int]::TryParse($parts[4],[ref]$clock)){
+        if($null -eq $stats.clock_sm_peak_mhz -or $clock -gt $stats.clock_sm_peak_mhz){
+          $stats.clock_sm_peak_mhz=$clock
+        }
+      }
+    }
+  } catch {}
+  return $stats
+}
 function Get-RuntimeBinding {
   $state=Invoke-RestMethod -Uri "$base/lite/worker/status"
   $binding=$state.runtime_binding
@@ -233,6 +280,8 @@ try {
       continue
     }
     $timer=[Diagnostics.Stopwatch]::StartNew()
+    $gpuMonitor=$null
+    $gpuStats=@{status="GPU_STATS_UNAVAILABLE";metric_kind="WDDM total board usage, sampled"}
     try {
       $attemptId=[guid]::NewGuid().ToString("N")
       $record=@{schema="lite-longform-attempt-v1";index=[int]$section.index;
@@ -244,9 +293,12 @@ try {
         start_utc=[DateTime]::UtcNow.ToString("o");state="IN_FLIGHT"}
       Write-AtomicJson $journalPath $record
       Assert-RuntimeUnchanged $runtimeBinding | Out-Null
+      $gpuMonitor=Start-GpuMonitor ([int]$section.index)
       $payload=@{model="omnivoice-gguf";voice=$Voice;input=$section.text;response_format="wav";speed=$Speed;seed=[int]$section.seed}|ConvertTo-Json -Compress
       $response=Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/v1/audio/speech" -ContentType "application/json" -Body $payload -OutFile $tmp -PassThru -TimeoutSec $ClientTimeoutSeconds
       $timer.Stop()
+      $gpuStats=Stop-GpuMonitor $gpuMonitor
+      $gpuMonitor=$null
       if((Get-HeaderValue $response "X-Lite-Verification-Status") -cne "verified" -or
          (Get-HeaderValue $response "X-Lite-Verified-Backend") -cne "Vulkan0" -or
          (Get-HeaderValue $response "X-Lite-Observed-Device") -notmatch "NVIDIA.*GTX 1650"){
@@ -302,12 +354,13 @@ try {
       $record.wav_sha256=$digest
       Write-AtomicJson $journalPath $record
       $wavs.Add($wav)
-      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=[double]$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps;status="PASS";resumed=$false})
+      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=[double]$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps;status="PASS";resumed=$false;gpu=$gpuStats})
       Flush-LongformMetrics
       Write-Output ("PASS section="+$section.index+" elapsed_s="+$timer.Elapsed.TotalSeconds.ToString('0.000',[cultureinfo]::InvariantCulture))
     } catch {
+      if($gpuMonitor){$gpuStats=Stop-GpuMonitor $gpuMonitor;$gpuMonitor=$null}
       if(Test-Path -LiteralPath $tmp){Remove-Item -LiteralPath $tmp -Force}
-      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;status="FAIL";error=$_.Exception.GetType().Name;stage="post_or_validation";utc=[DateTime]::UtcNow.ToString("o")})
+      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;status="FAIL";error=$_.Exception.GetType().Name;stage="post_or_validation";utc=[DateTime]::UtcNow.ToString("o");gpu=$gpuStats})
       Flush-LongformMetrics
       Write-Output ("FAIL section="+$section.index+" error="+$_.Exception.GetType().Name)
       if(!$ContinueOnFailure){throw}
