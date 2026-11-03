@@ -64,6 +64,16 @@ function Write-AtomicJson([string]$path,[object]$value) {
     else{[IO.File]::Move($temp,$path)}
   } finally {if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
 }
+function Write-AtomicText([string]$path,[string]$text){
+  $temp=$path+"."+[guid]::NewGuid().ToString("N")+".partial"
+  $bytes=[Text.Encoding]::UTF8.GetBytes($text)
+  $stream=New-Object IO.FileStream($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  try {$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)} finally {$stream.Dispose()}
+  try {
+    if([IO.File]::Exists($path)){[IO.File]::Replace($temp,$path,$null)}
+    else{[IO.File]::Move($temp,$path)}
+  } finally {if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
+}
 function Sync-File([string]$path){
   $stream=New-Object IO.FileStream($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
   try {$stream.Flush($true)} finally {$stream.Dispose()}
@@ -115,6 +125,21 @@ if($spec.schema -ne "lite-longform-manifest-v2" -or
   throw "Manifest profile/runtime binding mismatch"
 }
 $rows=New-Object System.Collections.Generic.List[object]
+function Flush-LongformMetrics {
+  $elapsed=$clock.Elapsed.TotalSeconds
+  $complete=@($rows|Where-Object{$_.status -eq "PASS"})
+  $audio=($complete|Measure-Object -Property audio_s -Sum).Sum
+  $speech=($complete|Measure-Object -Property speech_s -Sum).Sum
+  Write-AtomicJson (Join-Path $run "metrics.json") @{
+    schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;
+    audio_s=$audio;speech_s=$speech;qualified_fresh_run=$false;resumed_run=$resuming;
+    overall_status="IN_PROGRESS";restore_status="PENDING";sections=@($rows);
+    privacy="No voice IDs, text or private filesystem paths"}
+  $names=@($rows|ForEach-Object{$_.PSObject.Properties.Name}|Select-Object -Unique)
+  if(!$names.Count){$names=@("index","status")}
+  $csv=(@($rows|Select-Object -Property $names|ConvertTo-Csv -NoTypeInformation) -join "`r`n")+"`r`n"
+  Write-AtomicText (Join-Path $run "metrics.csv") $csv
+}
 $wavs=New-Object System.Collections.Generic.List[string]
 $original=Invoke-RestMethod -Uri "$base/lite/worker/settings"
 $final=Join-Path $run "final.wav"
@@ -181,6 +206,7 @@ try {
       }
       $wavs.Add($wav)
       $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=[double]$saved.wall_s;audio_s=[double]$saved.audio_s;speech_s=[double]$saved.speech_s;rtf=[double]$saved.rtf;native_total_us=$saved.native_total_us;ref_codec_encode_us=$saved.ref_codec_encode_us;cache_hit=$saved.cache_hit;maskgit_steps=$saved.maskgit_steps;status="PASS";resumed=$true})
+      Flush-LongformMetrics
       Write-Output ("PASS resume section="+$section.index)
       continue
     }
@@ -255,10 +281,12 @@ try {
       Write-AtomicJson $journalPath $record
       $wavs.Add($wav)
       $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=[double]$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps;status="PASS";resumed=$false})
+      Flush-LongformMetrics
       Write-Output ("PASS section="+$section.index+" elapsed_s="+$timer.Elapsed.TotalSeconds.ToString('0.000',[cultureinfo]::InvariantCulture))
     } catch {
       if(Test-Path -LiteralPath $tmp){Remove-Item -LiteralPath $tmp -Force}
-      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;status="FAIL";error=$_.Exception.GetType().Name})
+      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=$timer.Elapsed.TotalSeconds;status="FAIL";error=$_.Exception.GetType().Name;stage="post_or_validation";utc=[DateTime]::UtcNow.ToString("o")})
+      Flush-LongformMetrics
       Write-Output ("FAIL section="+$section.index+" error="+$_.Exception.GetType().Name)
       if(!$ContinueOnFailure){throw}
     }
@@ -279,13 +307,13 @@ try {
     $restoreFailed=$true
     Write-Output ("FAIL longform stage=restore error=SETTINGS_RESTORE_FAILED")
   }
-  $rows|Export-Csv -NoTypeInformation -Encoding UTF8 (Join-Path $run "metrics.csv")
+  Flush-LongformMetrics
   $audioTotal=($rows|Where-Object{$_.status -eq 'PASS'}|Measure-Object -Property audio_s -Sum).Sum
   $speechTotal=($rows|Where-Object{$_.status -eq 'PASS'}|Measure-Object -Property speech_s -Sum).Sum
   $elapsed=$clock.Elapsed.TotalSeconds
   $success=(-not $restoreFailed -and !$runError -and $wavs.Count -eq $spec.sections.Count -and (Test-Path -LiteralPath (Join-Path $run "final.wav")))
   $qualified=(-not $resuming -and $success -and @($rows|Where-Object{$_.status -ne 'PASS' -or $_.resumed -eq $true}).Count -eq 0)
-  @{schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;audio_s=$audioTotal;speech_s=$speechTotal;final_rtf=$(if($audioTotal){$elapsed/$audioTotal}else{$null});speech_rtf=$(if($speechTotal){$elapsed/$speechTotal}else{$null});qualified_fresh_run=$qualified;resumed_run=$resuming;overall_status=$(if($success){"PASS"}else{"FAIL"});restore_status=$(if($restoreFailed){"FAIL"}else{"PASS"});errors=@($runError,$(if($restoreFailed){"SETTINGS_RESTORE_FAILED"}else{$null})|Where-Object{$_});sections=$rows;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 (Join-Path $run "metrics.json")
+  @{schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;audio_s=$audioTotal;speech_s=$speechTotal;final_rtf=$(if($audioTotal){$elapsed/$audioTotal}else{$null});speech_rtf=$(if($speechTotal){$elapsed/$speechTotal}else{$null});qualified_fresh_run=$qualified;resumed_run=$resuming;overall_status=$(if($success){"PASS"}else{"FAIL"});restore_status=$(if($restoreFailed){"FAIL"}else{"PASS"});errors=@($runError,$(if($restoreFailed){"SETTINGS_RESTORE_FAILED"}else{$null})|Where-Object{$_});sections=$rows;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ForEach-Object{ Write-AtomicJson (Join-Path $run "metrics.json") $_ }
 }
 $clock.Stop()
 if($restoreFailed -or $runError){
