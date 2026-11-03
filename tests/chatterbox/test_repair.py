@@ -393,3 +393,133 @@ def test_atempo_timeout_is_typed_and_reaps_no_partial_wav(api,monkeypatch):
     assert result.json()["error"]["code"]=="DEADLINE_EXCEEDED"
     assert not result.content.startswith(b"RIFF")
     assert service.state=="ERROR"
+
+
+@pytest.mark.parametrize("operation",["import","edit","delete"])
+def test_all_profile_mutations_keep_admission_through_invalidation(api,monkeypatch,operation):
+    client,service,_=api
+    owned=profile(client)["id"]
+    start=threading.Event();release=threading.Event()
+    original=service.invalidate
+    async def gated(voice=None):
+        start.set()
+        assert await asyncio.to_thread(release.wait,8)
+        await original(voice)
+    monkeypatch.setattr(service,"invalidate",gated)
+    def change():
+        if operation=="import":
+            return client.post("/profiles",
+                data={"name":"Another","ref_text":"New authorized transcript",
+                      "consent":"confirmed","language":"en"},
+                files={"ref_audio":("reference.wav",audio(6),"audio/wav")})
+        if operation=="edit":
+            return client.put("/profiles/"+owned,json={"name":"Edited"})
+        return client.delete("/profiles/"+owned+"?purge=true")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future=pool.submit(change)
+        try:
+            assert start.wait(10)
+            assert gen(client,owned).status_code==429
+        finally:
+            release.set()
+        assert future.result(timeout=10).status_code==200
+    assert not service.lock.locked()
+
+
+@pytest.mark.parametrize("failure",["fsync","replace","mkstemp"])
+def test_idle_atomic_write_failures_are_not_applied(api,monkeypatch,failure):
+    import lite.chatterbox_app as appmod
+    client,service,settings=api
+    def refuse(*args,**kwargs):
+        raise OSError("SYNTHETIC_IO_FAILURE")
+    with monkeypatch.context() as scoped:
+        if failure=="fsync":
+            scoped.setattr(appmod.os,"fsync",refuse)
+        elif failure=="replace":
+            scoped.setattr(appmod.os,"replace",refuse)
+        else:
+            scoped.setattr(appmod.tempfile,"mkstemp",refuse)
+        r=client.put("/chatterbox/runtime/settings",
+                     json={"idle_timeout_seconds":3600})
+        assert r.status_code==500 and r.json()["error"]["code"]=="SETTINGS_SAVE_FAILED"
+    assert service.idle_timeout==600
+    assert not (settings.data_dir/"chatterbox-settings.json").exists()
+
+
+def test_timeout_during_final_validation_never_publishes_wav(api,monkeypatch):
+    import lite.chatterbox_service as mod
+    client,service,_=api
+    voice=profile(client)["id"]
+    original=mod.wav_info
+    calls=[0]
+    def slow_validation(*args,**kwargs):
+        calls[0]+=1
+        if calls[0]>=2:
+            time.sleep(1)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(mod,"wav_info",slow_validation)
+    r=gen(client,voice,"No partial speech output.")
+    assert r.status_code==504 and r.json()["error"]["code"]=="DEADLINE_EXCEEDED"
+    assert not r.content.startswith(b"RIFF")
+    assert service.state=="ERROR"
+
+
+def test_cancel_during_atempo_reaps_and_never_publishes_wav(api,monkeypatch):
+    import lite.chatterbox_service as mod
+    client,service,_=api
+    voice=profile(client)["id"]
+    arrived=threading.Event()
+    async def stalled(*args,**kwargs):
+        arrived.set()
+        await asyncio.sleep(30)
+    monkeypatch.setattr(mod,"stretch_speech_async",stalled)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future=pool.submit(gen,client,voice,"Cancel mid-stretch.",1.15)
+        assert arrived.wait(10)
+        cancel=client.post("/chatterbox/runtime/cancel")
+        assert cancel.status_code==200 and cancel.json()["cancelled"] is True
+        response=future.result(timeout=10)
+    assert response.status_code==499
+    assert not response.content.startswith(b"RIFF")
+    assert service.state=="ERROR"
+
+
+@pytest.mark.parametrize("speed",[0.75,0.85,1.0,1.15,1.25])
+def test_ffmpeg_all_speeds_preserve_pitch_and_pause_policy(speed):
+    import math
+    import struct
+    from lite.chatterbox_audio import stretch_speech
+    out=io.BytesIO()
+    raw=b"".join(struct.pack("<h",int(9000*math.sin(2*math.pi*440*i/24000)))
+                 for i in range(24000))
+    with wave.open(out,"wb") as writer:
+        writer.setnchannels(1);writer.setsampwidth(2);writer.setframerate(24000)
+        writer.writeframes(raw)
+    data=out.getvalue()
+    output=stretch_speech(data,speed,10,500000)
+    if speed==1.0:assert output==data
+    frames=wav_info(output)["frames"]
+    assert abs(frames/24000-1/speed)<.09
+    with wave.open(io.BytesIO(output),"rb") as reader:
+        samples=struct.unpack("<"+"h"*frames,reader.readframes(frames))
+    crossings=sum(a<=0<b for a,b in zip(samples,samples[1:]))
+    assert abs(crossings/(frames/24000)-440)<25
+
+
+def test_synthetic_pinned_manifest_requires_real_digests(tmp_path,monkeypatch):
+    import lite.chatterbox_config as cfg
+    settings=ChatterboxSettings(root=tmp_path)
+    settings.model_dir.mkdir(parents=True)
+    hashes={}
+    for name in cfg.REQUIRED_FILES:
+        data=("CI-SYNTHETIC-"+name).encode()
+        (settings.model_dir/name).write_bytes(data)
+        hashes[name]=hashlib.sha256(data).hexdigest()
+    monkeypatch.setattr(cfg,"MODEL_HASHES",{
+        name:hashes[name] for name in cfg.MODEL_HASHES})
+    (settings.model_dir/"manifest.json").write_text(json.dumps({
+        "revision":cfg.MODEL_REVISION,"source_revision":cfg.SOURCE_REVISION,
+        "sha256":hashes}))
+    assert cfg.verify_model_files(settings)==(True,[])
+    (settings.model_dir/"ve.safetensors").write_bytes(b"changed")
+    assert cfg.verify_model_files(settings)==(False,["MODEL_HASH_MISMATCH"])

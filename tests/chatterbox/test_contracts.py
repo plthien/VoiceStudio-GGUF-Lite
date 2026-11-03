@@ -264,7 +264,7 @@ def test_atempo_preserves_approximate_pitch():
     with wave.open(out,"wb") as w:
         w.setnchannels(1);w.setsampwidth(2);w.setframerate(24000)
         w.writeframes(pcm)
-    for speed in (0.75,1.25):
+    for speed in (0.75,0.85,1.0,1.15,1.25):
         stretched=stretch_speech(out.getvalue(),speed,10,300000)
         frames=wav_info(stretched)["frames"]
         with wave.open(io.BytesIO(stretched),"rb") as w:
