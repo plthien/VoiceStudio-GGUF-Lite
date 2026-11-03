@@ -113,10 +113,45 @@ try {
     Assert-ProfileUnchanged $profile
     $wav=Join-Path $run ("section-{0:d4}.wav" -f [int]$section.index)
     $sectionReceipt=$wav+".json"
-    if(Test-Path -LiteralPath $wav){
+    $journalPath=$wav+".attempt.json"
+    $tmp=$wav+".partial"
+    $journal=$null
+    if(Test-Path -LiteralPath $journalPath){
+      $journal=Get-Content -Raw -LiteralPath $journalPath|ConvertFrom-Json
+      if($journal.schema -ne "lite-longform-attempt-v1" -or
+         [int]$journal.index -ne [int]$section.index -or
+         $journal.text_sha256 -cne $section.text_sha256 -or
+         $journal.manifest_sha256 -cne $spec.manifest_sha256 -or
+         $journal.profile_binding_sha256 -cne $profileBinding){
+        throw "UNCERTAIN_SECTION_REQUIRES_OWNER_DECISION: invalid section journal"
+      }
+    } elseif((Test-Path -LiteralPath $wav) -or (Test-Path -LiteralPath $sectionReceipt) -or (Test-Path -LiteralPath $tmp)){
+      throw "UNCERTAIN_SECTION_REQUIRES_OWNER_DECISION: orphan artifacts for section $($section.index)"
+    }
+    if($journal -and $journal.state -ne "VERIFIED_COMMITTED"){
+      if(!$resuming -or $RetryUncertainSections -notcontains [int]$section.index){
+        throw "UNCERTAIN_SECTION_REQUIRES_OWNER_DECISION: section $($section.index)"
+      }
+      foreach($orphan in @($wav,$sectionReceipt,$tmp,$sectionReceipt+".partial")){
+        if(Test-Path -LiteralPath $orphan){
+          Move-Item -LiteralPath $orphan -Destination ($orphan+".quarantine-"+[guid]::NewGuid().ToString("N"))
+        }
+      }
+      $journal.prior_attempt_id=$journal.attempt_id
+      $journal.state="OWNER_APPROVED_RETRY"
+      $journal.owner_retry_approved=$true
+      Write-AtomicJson $journalPath $journal
+    }
+    if($journal -and $journal.state -eq "VERIFIED_COMMITTED"){
+      if(!(Test-Path -LiteralPath $wav) -or !(Test-Path -LiteralPath $sectionReceipt)){
+        throw "UNCERTAIN_SECTION_REQUIRES_OWNER_DECISION: committed artifact missing"
+      }
       if(!(Test-Path -LiteralPath $sectionReceipt)){throw "Resume receipt missing for section $($section.index)"}
       $saved=Get-Content -Raw -LiteralPath $sectionReceipt|ConvertFrom-Json
       $digest=Get-FileSha256 $wav
+      if($journal.wav_sha256 -cne $digest -or $journal.attempt_id -cne $saved.attempt_id){
+        throw "Resume journal/receipt mismatch for section $($section.index)"
+      }
       $wavInfoJson=python -m lite.longform_benchmark inspect --wav $wav
       if($LASTEXITCODE -ne 0){throw "Resume WAV validation failed for section $($section.index)"}
       $wavInfo=$wavInfoJson|ConvertFrom-Json
@@ -131,7 +166,6 @@ try {
       Write-Output ("PASS resume section="+$section.index)
       continue
     }
-    $tmp=$wav+".partial"
     $timer=[Diagnostics.Stopwatch]::StartNew()
     try {
       $payload=@{model="omnivoice-gguf";voice=$Voice;input=$section.text;response_format="wav";speed=$Speed;seed=[int]$section.seed}|ConvertTo-Json -Compress
