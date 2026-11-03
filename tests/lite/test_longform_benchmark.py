@@ -98,7 +98,11 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
         def do_GET(self):
             if self.path=="/profiles/private-voice":self._json(profile)
             elif self.path=="/lite/worker/settings":self._json({"mode":"legacy","idle_timeout_seconds":600})
-            elif self.path=="/lite/worker/status":self._json({"performance":{"native_total_us":1,"ref_codec_encode_us":2,"ref_cache_hit":False,"maskgit_steps":32}})
+            elif self.path=="/lite/worker/status":self._json({"performance":{"native_total_us":1,"ref_codec_encode_us":2,"ref_cache_hit":False,"maskgit_steps":32},
+                "runtime_binding":{"schema":"lite-longform-runtime-binding-v1","status":"verified_capability",
+                  "identity_sha256":"c"*64,"exe_sha256":"d"*64,"candidate_receipt_sha256":None,
+                  "declared_backend":"Vulkan0","candidate_kind":"verified_baseline",
+                  "settings_verification":"not_yet_verified","server_timeout_s":900}})
             else:self.send_error(404)
         def do_PUT(self):
             self.rfile.read(int(self.headers.get("Content-Length","0")))
@@ -109,15 +113,20 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
             self.send_header("Content-Type","audio/wav")
             self.send_header("Content-Length",str(len(wav_bytes)))
             self.send_header("X-Lite-Verification-Status","verified")
+            self.send_header("X-Lite-Verified-Backend","Vulkan0")
+            self.send_header("X-Lite-Observed-Device","NVIDIA GeForce GTX 1650")
+            self.send_header("X-Lite-Effective-Speed","1.0")
             self.send_header("X-Lite-Audio-S","1.0")
             self.send_header("X-Lite-RTF","0.1")
-            if "[pause]" in payload["input"]:
+            if "[pause" in payload["input"]:
                 self.send_header("X-Lite-Speech-S","0.5")
+                self.send_header("X-Lite-Pause-Count","1")
+                self.send_header("X-Lite-Pause-S","0.5")
             self.end_headers();self.wfile.write(wav_bytes)
         def log_message(self,*_):pass
 
     sections=tmp_path/"sections.json"
-    sections.write_text(json.dumps(["plain narration","one [pause] two"]),encoding="utf-8")
+    sections.write_text(json.dumps(["plain narration","one [pause 500ms] two"]),encoding="utf-8")
     output=tmp_path/"runs";script=Path(__file__).parents[2]/"scripts"/"benchmark-longform-tts.ps1"
     server=ThreadingHTTPServer(("127.0.0.1",0),Handler)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
