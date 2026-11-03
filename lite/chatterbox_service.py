@@ -15,7 +15,7 @@ from pathlib import Path
 from .audio import AudioError, wav_info
 from .chatterbox_audio import stretch_speech_async
 from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, IDLE_CHOICES
-from .chatterbox_ipc import send, recv
+from .chatterbox_ipc import send, recv, ProtocolError
 from .pause import PauseScript, SpeechPart, PausePart
 from .pause_audio import assemble_pause_wav
 
@@ -107,6 +107,16 @@ class TurboService:
         try:
             if proc and proc.returncode is None:
                 self.state = "UNLOADING"
+                if os.name=="nt":
+                    # Python may have spawned CUDA/worker descendants. Kill the job tree.
+                    import subprocess
+                    try:
+                        await asyncio.to_thread(subprocess.run,
+                            ["taskkill","/PID",str(proc.pid),"/T","/F"],
+                            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                            timeout=5,check=False)
+                    except (OSError,subprocess.TimeoutExpired):
+                        pass
                 try:
                     proc.kill()
                 except ProcessLookupError:
@@ -140,6 +150,8 @@ class TurboService:
             result = await asyncio.wait_for(recv(self.proc.stdout), max(0.001, deadline - time.monotonic()))
         except asyncio.TimeoutError as exc:
             raise TurboError("DEADLINE_EXCEEDED") from exc
+        except ProtocolError as exc:
+            raise TurboError("WORKER_PROTOCOL_INVALID") from exc
         except (OSError, EOFError, asyncio.IncompleteReadError, BrokenPipeError) as exc:
             raise TurboError("WORKER_CRASH") from exc
         if not result.get("ok"):
@@ -192,10 +204,16 @@ class TurboService:
             path = self.settings.cache_dir / sub
             path.mkdir(parents=True, exist_ok=True)
             env[variable] = str(path)
-        self.proc = await asyncio.wait_for(asyncio.create_subprocess_exec(
-            str(python), "-m", "lite.chatterbox_worker", stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            cwd=str(root), env=env), max(0.001, deadline - time.monotonic()))
+        try:
+            self.proc = await asyncio.wait_for(asyncio.create_subprocess_exec(
+                str(python), "-m", "lite.chatterbox_worker",
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL, cwd=str(root), env=env),
+                max(0.001, deadline-time.monotonic()))
+        except asyncio.TimeoutError as exc:
+            raise TurboError("DEADLINE_EXCEEDED") from exc
+        except (OSError,ValueError) as exc:
+            raise TurboError("WORKER_START_FAILED") from exc
         data = await self._rpc({"cmd": "LOAD", "model_dir": str(self.settings.model_dir)}, deadline)
         self.loads += int(data["loads"])
         self.device = data.get("device")
@@ -240,9 +258,12 @@ class TurboService:
                     raw = base64.b64decode(answer["wav"], validate=True)
                     left=deadline-time.monotonic()
                     if left<=0: raise TurboError("DEADLINE_EXCEEDED")
-                    await asyncio.wait_for(asyncio.to_thread(
-                        wav_info,raw,max_bytes=self.settings.max_output_bytes,
-                        max_seconds=600),left)
+                    try:
+                        await asyncio.wait_for(asyncio.to_thread(
+                            wav_info,raw,max_bytes=self.settings.max_output_bytes,
+                            max_seconds=600),left)
+                    except asyncio.TimeoutError as exc:
+                        raise TurboError("DEADLINE_EXCEEDED") from exc
                     if speed != 1.0:
                         raw = await asyncio.wait_for(
                             stretch_speech_async(raw, speed,
