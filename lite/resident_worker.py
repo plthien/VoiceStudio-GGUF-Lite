@@ -176,7 +176,8 @@ class ResidentWorkerSupervisor:
                 "reuse_count": self.reuse_count, "idle_remaining_seconds": remaining,
                 "busy": busy, "last_error": self.last_error,
                 "vram_status": "OWNER TEST PENDING",
-                "performance": self.last_performance if self._perf_enabled else None}
+                "performance": self.last_performance if self._perf_enabled else None,
+                 "native_proof": getattr(self, "_proof", None) if self.state in {"READY", "GENERATING"} else None}
 
     async def _drain_stderr(self, proc):
         try:
