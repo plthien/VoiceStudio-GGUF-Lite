@@ -345,3 +345,84 @@ def test_final_summary_write_error_unpublishes_final(tmp_path,monkeypatch):
         do_job(source,dest)
     assert not (dest/"final.wav").exists()
     assert not (dest/"summary.json").exists()
+
+
+def test_all_benchmark_runs_twice_preserve_each_archived_result(tmp_path,monkeypatch):
+    import lite.chatterbox_benchmark as bench
+    manifest=tmp_path/"input.json"
+    manifest.write_text(json.dumps({"voice":"owned","sections":[{"id":"s1","input":"Text"}]}))
+    folder=tmp_path/"bench"
+    calls=[]
+    class OK:
+        status=200
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+    monkeypatch.setattr(bench.urllib.request,"urlopen",
+                        lambda req,**kwargs:(calls.append(req.full_url) or OK()))
+    def fake_case(name,text,voice,base,output):
+        (output/(name+".wav")).write_bytes(pcm(.1))
+        return {"case":name,"state":"PASS","generation_state":"PASS","wall_s":0.01}
+    monkeypatch.setattr(bench,"run_case",fake_case)
+    def fake_job(manifest,out,*args,**kwargs):
+        out.mkdir(parents=True,exist_ok=False)
+        (out/"final.wav").write_bytes(pcm(.1))
+        return {"state":"PASS","audio_s":610,"voice_version":1,"model_revision":MODEL_REVISION}
+    monkeypatch.setattr(bench,"do_job",fake_job)
+    monkeypatch.setattr(sys,"argv",["bench","--mode","All","--voice-id","owned",
+                                   "--manifest",str(manifest),"--output",str(folder)])
+    assert bench.main()==0
+    old=json.loads((folder/"owner-metrics.json").read_text())
+    assert len(old)==6
+    old_path=folder/old[0]["run_directory"]
+    old_bytes=(old_path/"owner-metrics.csv").read_bytes()
+    assert bench.main()==0
+    new=json.loads((folder/"owner-metrics.json").read_text())
+    assert len(new)==6 and new[0]["run_id"]!=old[0]["run_id"]
+    assert (old_path/"owner-metrics.csv").read_bytes()==old_bytes
+    assert len(calls)==4  # cold + longform per fresh All run
+    assert new[-1]["h07_status"]=="PASS"
+
+
+def test_recovery_unsafe_blocks_readiness_and_generation(api,monkeypatch):
+    import lite.chatterbox_app as appmod
+    from types import SimpleNamespace
+    client,service,_=api
+    from .test_contracts import profile,gen
+    voice=profile(client)["id"]
+    assert gen(client,voice).status_code==200
+    service.state="READY"
+    service.proc=SimpleNamespace(pid=4242,returncode=None)
+    monkeypatch.setattr(appmod,"diagnostic",lambda settings:
+        {"installation_preflight_ready":True,"ready":False,"issues":[]})
+    assert client.get("/chatterbox/readiness").json()["ready"] is True
+    client.app.state.cache_trusted=False
+    result=client.get("/chatterbox/readiness").json()
+    assert result["ready"] is False and result["service_recovery_required"] is True
+    assert gen(client,voice).status_code==503
+    client.app.state.cache_trusted=True
+    client.app.state.settings_consistent=False
+    assert client.get("/chatterbox/readiness").json()["ready"] is False
+    assert gen(client,voice).status_code==503
+    service.proc=None  # FakeTurbo.stop is not an OS child manager
+
+
+@pytest.mark.skipif(sys.platform!="win32",reason="Windows-only real installer, no weights")
+@pytest.mark.parametrize("shell",["powershell.exe","pwsh.exe"])
+def test_offline_verify_only_bad_manifest_real_root_if_unused(shell):
+    """Use canonical D: installation root only when no user installation exists."""
+    exe=shutil.which(shell)
+    if not exe:pytest.skip("Shell unavailable")
+    root=Path(r"D:\VoiceStudioBuild\chatterbox-turbo")
+    if root.exists():
+        pytest.skip("Existing owner data: never touch actual installed model or cache")
+    installer=Path(__file__).resolve().parents[2]/"scripts"/"install-chatterbox-turbo.ps1"
+    try:
+        p=subprocess.run([exe,"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass",
+                         "-File",str(installer),"-VerifyOnly"],
+                         capture_output=True,text=True,timeout=30)
+        assert p.returncode!=0
+        assert "MODEL_MANIFEST_UNAVAILABLE" in p.stdout+p.stderr
+        assert "installed" not in p.stdout.lower()
+    finally:
+        if root.exists():
+            shutil.rmtree(root)
