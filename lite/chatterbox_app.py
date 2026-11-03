@@ -512,6 +512,7 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                     ("allocated_bytes", "X-TTS-CUDA-Allocated-Bytes"),
                     ("reserved_bytes", "X-TTS-CUDA-Reserved-Bytes"),
                     ("peak_bytes", "X-TTS-CUDA-Peak-Bytes"),
+                    ("lifetime_peak_bytes", "X-TTS-CUDA-Lifetime-Peak-Bytes"),
                     ("free_bytes", "X-TTS-CUDA-Free-Bytes"),
                 ):
                     if type(memory.get(key)) is int and memory[key] >= 0:
@@ -519,6 +520,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                 if time.monotonic() >= info["deadline_at"]:
                     await app.state.service.stop()
                     return failure(504,"DEADLINE_EXCEEDED")
+                if memory.get("peak_scope") == "generation":
+                    meta["X-TTS-CUDA-Peak-Scope"] = "generation"
                 return Response(data, media_type="audio/wav", headers=meta)
             except asyncio.CancelledError:
                 return failure(499, "CANCELLED")

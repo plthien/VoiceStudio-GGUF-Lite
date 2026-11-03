@@ -159,7 +159,14 @@ def main():
             report["issues"] = sorted(set(report["issues"] + ["CUDA_UNAVAILABLE"]))
             report["ready"] = False
     print(json.dumps(report, indent=2))
+    # Live worker readiness remains false when unloaded: offline verification is
+    # successful only when all *installation* requirements and explicit probes pass.
+    if args.verify or args.cuda_probe:
+        return 0 if report["installation_preflight_ready"] and (
+            not args.cuda_probe or report["cuda"].get("available") is True
+        ) else 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

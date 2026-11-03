@@ -49,26 +49,43 @@ def stretch_speech(data: bytes, speed: float, deadline_seconds: float, max_bytes
         return result
 
 
-def concatenate(wavs: list[bytes], max_bytes: int = 100 * 1024 * 1024) -> bytes:
-    total = 0
-    payloads = []
-    for data in wavs:
-        info = wav_info(data, max_bytes=max_bytes, max_seconds=600)
-        with wave.open(io.BytesIO(data), "rb") as w:
-            pcm = w.readframes(info["frames"])
-        total += len(pcm)
-        if total + 4096 > max_bytes:
-            raise AudioError("OUTPUT_TOO_LARGE")
-        payloads.append(pcm)
-    if total == 0:
+# Independent final-output limit: 15 minutes at 24 kHz mono PCM16.
+# Per-section/API WAVs remain capped at 600 seconds.
+FINAL_MAX_SECONDS = 900
+FINAL_MAX_BYTES = FINAL_MAX_SECONDS * 24000 * 2 + 65536
+
+
+def concatenate(wavs: list[bytes], max_bytes: int = FINAL_MAX_BYTES,
+                max_seconds: int = FINAL_MAX_SECONDS) -> bytes:
+    """Bounded one-pass PCM copy; no repeated or list-joined audio buffers."""
+    if not 0 < max_seconds <= FINAL_MAX_SECONDS or max_bytes > FINAL_MAX_BYTES:
+        raise AudioError("INVALID_FINAL_AUDIO_LIMIT")
+    if not wavs:
         raise AudioError("EMPTY_ASSEMBLY")
+    total_frames = 0
     out = io.BytesIO()
-    with wave.open(out, "wb") as w:
-        w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
-        w.writeframes(b"".join(payloads))
-    data = out.getvalue()
-    wav_info(data, max_bytes=max_bytes, max_seconds=600)
-    return data
+    with wave.open(out, "wb") as writer:
+        writer.setnchannels(1); writer.setsampwidth(2); writer.setframerate(24000)
+        for data in wavs:
+            info = wav_info(data, max_bytes=min(max_bytes, 100 * 1024 * 1024),
+                            max_seconds=600)
+            frames = info["frames"]
+            total_frames += frames
+            if total_frames > max_seconds * 24000 or total_frames * 2 + 65536 > max_bytes:
+                raise AudioError("FINAL_AUDIO_LIMIT_EXCEEDED")
+            with wave.open(io.BytesIO(data), "rb") as reader:
+                # Copy in bounded chunks rather than join all source PCM.
+                remaining = frames
+                while remaining:
+                    count = min(remaining, 24000)
+                    pcm = reader.readframes(count)
+                    if len(pcm) != count * 2:
+                        raise AudioError("TRUNCATED_PCM")
+                    writer.writeframesraw(pcm)
+                    remaining -= count
+    final = out.getvalue()
+    wav_info(final, max_bytes=max_bytes, max_seconds=max_seconds)
+    return final
 
 
 async def stretch_speech_async(data: bytes, speed: float, deadline_seconds: float,

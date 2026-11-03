@@ -19,7 +19,10 @@ def pcm_wav(audio) -> bytes:
     # Runtime model returns a tensor at 24kHz. Convert without remote code.
     x = audio.detach().float().cpu().reshape(-1).clamp(-1, 1)
     import numpy as np
-    pcm = (x.numpy() * 32767).astype("<i2").tobytes()
+    samples = x.numpy()
+    if not np.isfinite(samples).all():
+        raise RuntimeError("NONFINITE_AUDIO")
+    pcm = (samples * 32767).astype("<i2").tobytes()
     if not pcm:
         raise RuntimeError("EMPTY_AUDIO")
     out = io.BytesIO()
@@ -41,6 +44,7 @@ class Engine:
         self.syntheses = 0
         self.hits = 0
         self.device = None
+        self.lifetime_peak_bytes = None
 
     def load(self, model_dir: str):
         if self.model is not None:
@@ -119,6 +123,11 @@ class Engine:
             if seed is not None:
                 self.torch.manual_seed(int(seed))
                 self.torch.cuda.manual_seed_all(int(seed))
+            # Serial worker permits resetting peak at the exact synthesis boundary.
+            reset_peak = getattr(self.torch.cuda, "reset_peak_memory_stats", None)
+            measured_peak = callable(reset_peak)
+            if measured_peak:
+                reset_peak()
             with self.torch.inference_mode():
                 with open(os.devnull, "w") as output, contextlib.redirect_stdout(output):
                     generated = self.model.generate(request["text"])
@@ -127,9 +136,13 @@ class Engine:
             memory = {
                 "allocated_bytes": int(self.torch.cuda.memory_allocated()),
                 "reserved_bytes": int(self.torch.cuda.memory_reserved()),
-                "peak_bytes": int(self.torch.cuda.max_memory_allocated()),
                 "free_bytes": int(free_bytes)
             }
+            if measured_peak:
+                peak = int(self.torch.cuda.max_memory_allocated())
+                self.lifetime_peak_bytes = max(peak, self.lifetime_peak_bytes or 0)
+                memory.update(peak_bytes=peak, peak_scope="generation",
+                              lifetime_peak_bytes=self.lifetime_peak_bytes)
             from .audio import wav_info
             wav = pcm_wav(generated)
             wav_info(wav, max_bytes=100 * 1024 * 1024, max_seconds=600)
@@ -179,7 +192,7 @@ def run():
                 "MODEL_HASH_MISMATCH", "MODEL_FILES_MISSING", "MODEL_REVISION_MISMATCH",
                 "MODEL_MANIFEST_UNAVAILABLE", "REFERENCE_UNTRUSTED", "REFERENCE_CHANGED",
                 "REFERENCE_INVALID", "REFERENCE_TOO_SHORT", "EMPTY_AUDIO",
-                "MODEL_UNLOADED", "UNKNOWN_COMMAND", "MODEL_LOAD_FAILED"} else "WORKER_FAILURE"
+                "MODEL_UNLOADED", "UNKNOWN_COMMAND", "MODEL_LOAD_FAILED", "NONFINITE_AUDIO"} else "WORKER_FAILURE"
             try:
                 write_sync({"ok": False, "error": code})
             except BaseException:

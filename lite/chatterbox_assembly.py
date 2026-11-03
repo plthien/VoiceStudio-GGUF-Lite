@@ -17,7 +17,7 @@ import wave
 from pathlib import Path
 
 from .audio import wav_info
-from .chatterbox_audio import concatenate
+from .chatterbox_audio import concatenate, FINAL_MAX_SECONDS, FINAL_MAX_BYTES
 from .chatterbox_config import MODEL_REVISION
 
 
@@ -150,10 +150,10 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
         finally:
             if report: atomic(report, json.dumps(metrics,indent=2).encode())
     wavs = [ (output / ("section-"+str(s["id"])+".wav")).read_bytes() for s in sections ]
-    # Max 100MB for canonical 24k PCM16 final.
+    # Final assembly is independently bounded to 15 minutes; no unverified WAV is published.
     final = concatenate(wavs)
     atomic(output/"final.wav", final)
-    info=wav_info(final)
+    info=wav_info(final, max_bytes=FINAL_MAX_BYTES, max_seconds=FINAL_MAX_SECONDS)
     result = {"state":"PASS","audio_s":info["seconds"],"final_sha256":info["sha256"],"sections":len(sections),
               "voice_version":version,"model_revision":MODEL_REVISION}
     atomic(output/"summary.json", json.dumps(result,indent=2).encode())
