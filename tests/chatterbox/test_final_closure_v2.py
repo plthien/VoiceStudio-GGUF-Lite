@@ -418,19 +418,18 @@ def test_offline_verify_only_bad_manifest_real_root_if_unused(shell):
     exe=shutil.which(shell)
     if not exe:pytest.skip("Shell unavailable")
     root=Path(r"D:\VoiceStudioBuild\chatterbox-turbo")
-    if root.exists():
-        pytest.skip("Existing owner data: never touch actual installed model or cache")
+    model=root/"models"/MODEL_REVISION
+    if (model/"manifest.json").exists() or any(model.glob("*.safetensors")):
+        pytest.skip("Owner has model content; never modify an existing installation")
     installer=Path(__file__).resolve().parents[2]/"scripts"/"install-chatterbox-turbo.ps1"
-    try:
-        p=subprocess.run([exe,"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass",
-                         "-File",str(installer),"-VerifyOnly"],
-                         capture_output=True,text=True,timeout=30)
-        assert p.returncode!=0
-        assert "MODEL_MANIFEST_UNAVAILABLE" in p.stdout+p.stderr
-        assert "installed" not in p.stdout.lower()
-    finally:
-        if root.exists():
-            shutil.rmtree(root)
+    # Read-only verification may create missing empty directories, but this test
+    # never deletes or overwrites shared D: data after the probe.
+    p=subprocess.run([exe,"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass",
+                     "-File",str(installer),"-VerifyOnly"],
+                     capture_output=True,text=True,timeout=30)
+    assert p.returncode!=0
+    assert "MODEL_MANIFEST_UNAVAILABLE" in p.stdout+p.stderr
+    assert "installed" not in p.stdout.lower()
 
 
 def test_multisegment_request_cuda_peak_uses_max_not_last(api,monkeypatch):
