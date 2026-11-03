@@ -173,9 +173,52 @@ def test_benchmark_longform_forces_cold_start(live, tmp_path, monkeypatch):
         monkeypatch.setattr(sys,"argv",["benchmark","--mode","LongForm",
                     "--voice-id",voice,"--manifest",str(manifest),
                     "--output",str(output),"--base",url])
-        assert benchmark_main()==0
+        assert benchmark_main()==1  # Short operational success is NOT H07-qualified
         assert fake.loads==2
         report=json.loads((output/"owner-metrics.json").read_text())
         assert report[0]["cold_start_included"] is True
-        assert report[0]["sla_checked"] is False
+        assert report[0]["h07_status"] == "NOT_VERIFIED"
+        assert report[0]["generation_state"] == "PASS"
+        assert (output/"owner-metrics.csv").is_file()
         assert (output/"longform"/"final.wav").is_file()
+
+
+@pytest.mark.parametrize("viewport", [(1280,900),(390,844)])
+def test_rendered_custom_pause_caret_validation_and_generate(live, viewport):
+    url, fake=live
+    with sync_playwright() as pw:
+        browser=pw.chromium.launch(headless=True)
+        page=browser.new_page(viewport={"width":viewport[0],"height":viewport[1]})
+        page.goto(url+"/ui")
+        page.get_by_label("Voice name").fill("Owned")
+        page.get_by_label("Exact transcript",exact=True).fill("An owned audio transcript.")
+        page.locator('#clone-form input[name=ref_audio]').set_input_files({
+            "name":"owned.wav","mimeType":"audio/wav","buffer":audio(6)})
+        page.locator("#consent").check()
+        page.get_by_role("button",name="Import voice").click()
+        expect(page.get_by_text("Owned · version 1")).to_be_visible(timeout=10000)
+        page.get_by_role("tab",name="Generate").click()
+        field=page.locator("#input")
+        field.fill("Hello. Goodbye.")
+        field.evaluate("(el)=>el.setSelectionRange(7,7)")
+        custom=page.get_by_label("Custom pause duration")
+        custom.fill("800ms")
+        page.get_by_role("button",name="+ custom pause").click()
+        assert field.input_value()=="Hello. [pause 800ms]Goodbye."
+        assert field.evaluate("(el)=>el.selectionStart")==len("Hello. [pause 800ms]")
+        custom.fill("1.5s")
+        field.evaluate("(el)=>el.setSelectionRange(el.value.length,el.value.length)")
+        page.get_by_role("button",name="+ custom pause").click()
+        assert field.input_value().endswith("[pause 1.5s]")
+        frozen=field.input_value()
+        for invalid in ("","0ms","10001ms","1.5555s","text"):
+            custom.fill(invalid)
+            page.get_by_role("button",name="+ custom pause").click()
+            expect(page.locator("#notice")).to_contain_text("INVALID_PAUSE_MARKER")
+            assert field.input_value()==frozen
+        custom.fill("800ms")
+        page.get_by_role("button",name="Generate WAV").click()
+        expect(page.locator("#notice")).to_contain_text("Generation complete",timeout=15000)
+        expect(page.locator("#metrics")).to_contain_text("Pauses: 2")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        browser.close()
