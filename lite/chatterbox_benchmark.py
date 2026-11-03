@@ -66,9 +66,6 @@ def evaluate_h07(audio_s, wall_s, cold_start_included=True):
 def save_reports(folder,records,run_dir=None):
     """Latest pointer plus private per-run archive, each atomically written."""
     payload=json.dumps(records,indent=2).encode()
-    atomic(folder/"owner-metrics.json",payload)
-    if run_dir is not None:
-        atomic(run_dir/"owner-metrics.json",payload)
     fields=["case","run_id","run_directory","manifest_sha256","state","generation_state","h07_status","h07_reason",
             "cold_start_included","wall_s","audio_s","end_to_end_rtf","rtf",
             "voice_version","model_revision","speech_s","pause_s","backend",
@@ -78,9 +75,13 @@ def save_reports(folder,records,run_dir=None):
     writer=csv.DictWriter(out,fieldnames=fields,extrasaction="ignore")
     writer.writeheader();writer.writerows(records)
     csv_bytes=out.getvalue().encode("utf-8")
-    atomic(folder/"owner-metrics.csv",csv_bytes)
+    # Publish the complete private archive before moving the latest-run pointer.
+    # A failed archive cannot corrupt the previous convenient top-level reports.
     if run_dir is not None:
+        atomic(run_dir/"owner-metrics.json",payload)
         atomic(run_dir/"owner-metrics.csv",csv_bytes)
+    atomic(folder/"owner-metrics.json",payload)
+    atomic(folder/"owner-metrics.csv",csv_bytes)
 
 
 def main():
