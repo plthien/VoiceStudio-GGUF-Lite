@@ -325,7 +325,19 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         await app.state.admission.acquire()
         async def owner():
             try:
-                changed=await asyncio.to_thread(fun)
+                try:
+                    changed=await asyncio.to_thread(fun)
+                except BaseException as exc:
+                    # A Store operation can commit SQLite and then fail cleaning files.
+                    # Never let a resident worker retain conditionals for that outcome.
+                    try:
+                        await app.state.service.stop()
+                    except BaseException:
+                        app.state.cache_trusted=False
+                        raise TurboError("MUTATION_OUTCOME_UNKNOWN_WORKER_UNSAFE") from exc
+                    if isinstance(exc,ProfileError) and "Profile removed but" in str(exc):
+                        raise TurboError("MUTATION_COMMITTED_CLEANUP_REQUIRED") from exc
+                    raise
                 voice=invalidate_voice or (changed.get("id") if isinstance(changed,dict) else None)
                 try:
                     await app.state.service.invalidate(voice)

@@ -540,3 +540,20 @@ def test_overlapping_benchmark_never_overwrites_owner_or_unloads(tmp_path,monkey
         assert bench.main()==1
         assert (output/"owner-metrics.json").read_text()=="OWNER_RUN_IN_PROGRESS"
         assert not (output/"owner-metrics.csv").exists()
+
+
+def test_postcommit_store_cleanup_error_reaps_worker(api,monkeypatch):
+    from lite.profiles import ProfileError
+    client,service,_=api
+    voice=profile(client)["id"]
+    assert gen(client,voice).status_code==200
+    original=client.app.state.store.delete
+    def post_commit(*args,**kwargs):
+        original(*args,**kwargs)
+        raise ProfileError("Profile removed but owned audio cleanup needs manual review")
+    monkeypatch.setattr(client.app.state.store,"delete",post_commit)
+    response=client.delete("/profiles/"+voice+"?purge=true")
+    assert response.status_code==503
+    assert response.json()["error"]["code"]=="MUTATION_COMMITTED_CLEANUP_REQUIRED"
+    assert client.get("/profiles/"+voice).status_code==404
+    assert service.state=="UNLOADED"
