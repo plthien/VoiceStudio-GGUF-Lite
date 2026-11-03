@@ -87,6 +87,8 @@ if($spec.schema -ne "lite-longform-manifest-v2" -or $spec.profile_binding_sha256
 $rows=New-Object System.Collections.Generic.List[object]
 $wavs=New-Object System.Collections.Generic.List[string]
 $original=Invoke-RestMethod -Uri "$base/lite/worker/settings"
+$restoreFailed=$false
+$runError=$null
 try {
   $settings=@{mode="persistent";idle_timeout_seconds=$null}|ConvertTo-Json -Compress
   Invoke-RestMethod -Method Put -Uri "$base/lite/worker/settings" -ContentType "application/json" -Body $settings|Out-Null
@@ -149,15 +151,28 @@ try {
   if($wavs.Count -ne $spec.sections.Count){throw "Not all sections completed; final WAV withheld"}
   python -m lite.longform_benchmark assemble --output (Join-Path $run "final.wav") @wavs
   if($LASTEXITCODE -ne 0){throw "Final streaming assembly failed"}
+} catch {
+  $runError=$_.Exception.GetType().Name
+  Write-Output ("FAIL longform stage=run error="+$runError)
 } finally {
   $restore=@{mode=$original.mode;idle_timeout_seconds=$original.idle_timeout_seconds}|ConvertTo-Json -Compress
-  try{Invoke-RestMethod -Method Put -Uri "$base/lite/worker/settings" -ContentType "application/json" -Body $restore|Out-Null}catch{Write-Warning "SETTINGS_RESTORE_FAILED"}
+  try {
+    Invoke-RestMethod -Method Put -Uri "$base/lite/worker/settings" -ContentType "application/json" -Body $restore|Out-Null
+  } catch {
+    $restoreFailed=$true
+    Write-Output ("FAIL longform stage=restore error=SETTINGS_RESTORE_FAILED")
+  }
   $rows|Export-Csv -NoTypeInformation -Encoding UTF8 (Join-Path $run "metrics.csv")
   $audioTotal=($rows|Where-Object{$_.status -eq 'PASS'}|Measure-Object -Property audio_s -Sum).Sum
   $speechTotal=($rows|Where-Object{$_.status -eq 'PASS'}|Measure-Object -Property speech_s -Sum).Sum
   $elapsed=$clock.Elapsed.TotalSeconds
-  $qualified=(-not $resuming -and @($rows|Where-Object{$_.status -ne 'PASS' -or $_.resumed -eq $true}).Count -eq 0)
-  @{schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;audio_s=$audioTotal;speech_s=$speechTotal;final_rtf=$(if($audioTotal){$elapsed/$audioTotal}else{$null});speech_rtf=$(if($speechTotal){$elapsed/$speechTotal}else{$null});qualified_fresh_run=$qualified;resumed_run=$resuming;sections=$rows;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 (Join-Path $run "metrics.json")
+  $success=(-not $restoreFailed -and !$runError -and $wavs.Count -eq $spec.sections.Count -and (Test-Path -LiteralPath (Join-Path $run "final.wav")))
+  $qualified=(-not $resuming -and $success -and @($rows|Where-Object{$_.status -ne 'PASS' -or $_.resumed -eq $true}).Count -eq 0)
+  @{schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;audio_s=$audioTotal;speech_s=$speechTotal;final_rtf=$(if($audioTotal){$elapsed/$audioTotal}else{$null});speech_rtf=$(if($speechTotal){$elapsed/$speechTotal}else{$null});qualified_fresh_run=$qualified;resumed_run=$resuming;overall_status=$(if($success){"PASS"}else{"FAIL"});restore_status=$(if($restoreFailed){"FAIL"}else{"PASS"});errors=@($runError,$(if($restoreFailed){"SETTINGS_RESTORE_FAILED"}else{$null})|Where-Object{$_});sections=$rows;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ConvertTo-Json -Depth 5|Set-Content -Encoding UTF8 (Join-Path $run "metrics.json")
 }
 $clock.Stop()
+if($restoreFailed -or $runError){
+  Write-Output ("FAIL longform elapsed_s="+$clock.Elapsed.TotalSeconds.ToString('0.000',[cultureinfo]::InvariantCulture)+" output="+$run)
+  exit 2
+}
 Write-Output ("PASS longform elapsed_s="+$clock.Elapsed.TotalSeconds.ToString('0.000',[cultureinfo]::InvariantCulture)+" output="+$run)
