@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chatterbox Turbo · Voice Studio</title><link rel="stylesheet" href="/ui/assets/app.css"></head>
+<body><main class="shell">
+<header><div class="eyebrow">LOCAL VOICE STUDIO · EXPERIMENTAL</div><h1>Chatterbox Turbo</h1>
+<p class="muted">English cloned voice · CUDA inference · pitch-preserving post-processed speed · local only</p></header>
+<nav role="tablist" aria-label="Studio views">
+<button role="tab" data-tab="clone" aria-selected="true">Voice Cloning</button>
+<button role="tab" data-tab="library" aria-selected="false">Voice Library</button>
+<button role="tab" data-tab="generate" aria-selected="false">Generate</button>
+<button role="tab" data-tab="runtime" aria-selected="false">Runtime &amp; Settings</button></nav>
+<div id="notice" role="status" aria-live="polite"></div>
+<section data-panel="clone"><h2>Import an owned reference</h2><p>Use a clean 6–15 second recording and the exact words spoken. Reference must be longer than 5 seconds.</p>
+<form id="clone-form"><label>Voice name<input name="name" required maxlength="128" placeholder="My narration voice"></label>
+<label>Exact transcript<textarea name="ref_text" required maxlength="4096" rows="3"></textarea></label>
+<label>WAV or MP3<input name="ref_audio" type="file" accept=".wav,.mp3,audio/*" required></label>
+<label class="check"><input type="checkbox" id="consent" required> I confirm that I own this voice or have explicit rights and consent to clone it.</label>
+<button type="submit" class="primary">Import voice</button></form></section>
+<section data-panel="library" hidden><h2>Voice library</h2><button id="refresh-library" type="button">Refresh</button>
+<div id="voice-list"></div>
+<div id="replace-panel" hidden><h3>Replace owned reference</h3><form id="replace-form"><input type="hidden" name="voice_id">
+<label>New exact transcript<textarea name="ref_text" required></textarea></label>
+<label>New WAV or MP3<input type="file" name="ref_audio" accept=".wav,.mp3" required></label>
+<label class="check"><input type="checkbox" id="replace-consent" required> I confirm rights and consent for the new reference.</label>
+<button type="submit">Replace reference</button></form></div></section>
+<section data-panel="generate" hidden><h2>Generate narration</h2><form id="generate-form">
+<label>Cloned voice<select id="voice" required></select></label>
+<label>English narration (max 4096 characters)<textarea id="input" required maxlength="4096" rows="7" placeholder="The door opened. [pause 800ms] Something moved."></textarea></label>
+<div class="speed"><label for="speed">Speed <output id="speed-label">1.00×</output></label>
+<input id="speed" type="range" min=".75" max="1.25" step=".05" value="1">
+<small>FFmpeg atempo post-processing. Not native Turbo speed; may affect voice quality.</small></div>
+<div class="preset"><button type="button" data-pause="[pause 250ms]">+ 250 ms pause</button>
+<button type="button" data-pause="[pause 1.5s]">+ 1.5 s pause</button>
+<button type="button" data-pause="[pause ]">+ custom pause</button></div>
+<div class="actions"><button id="generate" type="submit" class="primary">Generate WAV</button>
+<button id="cancel" type="button" disabled>Cancel</button></div></form>
+<div id="progress" role="status"></div><div id="metrics"></div>
+<audio id="playback" controls></audio><a id="download" download="chatterbox-turbo.wav" hidden>Download WAV</a>
+</section>
+<section data-panel="runtime" hidden><h2>Runtime &amp; Settings</h2>
+<p>Stop/unload the resident GGUF/Vulkan model before loading Chatterbox CUDA on a 4 GB GPU.</p>
+<pre id="runtime-status" aria-live="polite"></pre>
+<label>Idle unload<select id="idle"><option value="60">1 minute</option><option value="300">5 minutes</option>
+<option value="600">10 minutes</option><option value="1800">30 minutes</option><option value="3600">60 minutes</option><option value="never">Never</option></select></label>
+<div class="actions"><button id="save-settings">Save setting</button><button id="unload">Unload Now</button>
+<button id="refresh-runtime">Refresh runtime</button></div></section>
+<footer>Local-only POC · MIT Chatterbox model and source · inherited VoiceStudio application license AGPL-3.0</footer></main>
+<script defer src="/ui/assets/app.js"></script></body></html>

@@ -1,0 +1,23 @@
+:root{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Arial;color:#e8edf7;background:#090f1d}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 100% 0,#263252 0,transparent 55%),#090f1d}
+.shell{max-width:940px;margin:0 auto;padding:36px 26px}header{margin-bottom:28px}
+.eyebrow{color:#7cbef7;letter-spacing:.19em;font-size:.77rem;font-weight:700}h1{font-size:clamp(2.2rem,5vw,3.5rem);letter-spacing:-.045em;margin:8px 0}
+h2{font-size:1.45rem}h3{font-size:1.06rem}.muted,small,footer{color:#a7b6cf}p{line-height:1.5}
+nav{display:flex;gap:10px;overflow-x:auto;padding:0 0 16px}
+button,input,select,textarea{font:inherit}button{border:1px solid #405274;background:#202b43;color:#ecf1fa;border-radius:10px;padding:11px 16px;cursor:pointer}
+button:hover:not(:disabled){border-color:#a5c8f7}button:disabled{opacity:.5;cursor:not-allowed}.primary{background:#74b8fb;border-color:#74b8fb;color:#071323;font-weight:750}
+[role=tab][aria-selected=true]{background:#334b72;border-color:#8abffb}
+section{background:rgba(20,31,51,.95);border:1px solid #34435d;border-radius:18px;padding:28px;margin-top:4px}
+section[hidden],div[hidden],a[hidden]{display:none}
+form{display:flex;flex-direction:column;gap:16px}label{display:flex;flex-direction:column;gap:7px;font-size:.94rem;font-weight:650}
+label.check{display:flex;flex-direction:row;align-items:flex-start;line-height:1.5;font-weight:400}
+input:not([type=checkbox]):not([type=range]),textarea,select{display:block;width:100%;background:#0f192b;color:#f5f7fc;border:1px solid #415471;border-radius:9px;padding:12px;min-height:46px}
+textarea{resize:vertical}.speed{display:flex;flex-direction:column;gap:8px}.speed label{flex-direction:row;justify-content:space-between}
+.preset,.actions{display:flex;flex-wrap:wrap;gap:10px}
+#notice:not(:empty){margin-bottom:16px;padding:13px 16px;border:1px solid #526c93;border-radius:8px;background:#142544}
+#notice[data-error=true]{border-color:#bf6477;color:#ffdce3}
+#voice-list{display:grid;gap:12px;margin:16px 0}.voice-card{border:1px solid #40516d;border-radius:12px;padding:14px;overflow-wrap:anywhere}
+.voice-card button{margin:8px 8px 0 0}
+#runtime-status,#metrics{white-space:pre-wrap;overflow-wrap:anywhere;background:#0e1728;padding:14px;border-radius:10px}
+audio{width:100%;margin:16px 0}#download{color:#a4d1ff}footer{margin:30px 0;font-size:.84rem}
+@media(max-width:600px){.shell{padding:20px 13px}section{padding:19px}nav button{white-space:nowrap;padding:10px}}
