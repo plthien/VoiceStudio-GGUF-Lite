@@ -110,7 +110,7 @@ def do_job(manifest: Path, output: Path, base="http://127.0.0.1:3901",
                       json.dumps(body).encode(), {"Content-Type": "application/json"}, method="POST")
             with urllib.request.urlopen(req, timeout=1800) as reply:
                 data = reply.read(100*1024*1024+1)
-                headers = dict(reply.headers)
+                headers = reply.headers  # Case-insensitive HTTPMessage; dict conversion loses header lookups.
             info = wav_info(data)
             current = http_json(base, "/profiles/" + urllib.parse.quote(voice, safe=""))
             if current["version"] != version:

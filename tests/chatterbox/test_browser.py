@@ -127,6 +127,7 @@ def test_longform_http_resume_end_to_end(live, tmp_path):
         assert result["state"] == "PASS" and result["sections"] == 2
         state = json.loads((target / "resume-manifest.json").read_text())
         assert state["sections"]["sec_001"]["cuda_peak_bytes"] == "2000"
+        assert state["sections"]["sec_001"]["backend"] == "CUDA0"
         assert abs(result["audio_s"] - 1.0) < .001
         before = fake.syntheses
         result = do_job(manifest, target, base=url, resume=True)
