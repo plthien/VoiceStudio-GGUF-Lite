@@ -57,11 +57,38 @@
     catch(ex){notice(ex.message,true);}
   });
   $('#speed').addEventListener('input',()=>$('#speed-label').textContent=Number($('#speed').value).toFixed(2)+'×');
+  function parsePauseDuration(raw) {
+    const match = /^([0-9]+(?:\.[0-9]+)?)(ms|s)$/i.exec(raw.trim());
+    if (!match) throw new Error('INVALID_PAUSE_MARKER');
+    if (match[2].toLowerCase() === 'ms' && match[1].includes('.')) throw new Error('INVALID_PAUSE_MARKER');
+    if (match[2].toLowerCase() === 's' && (match[1].split('.')[1] || '').length > 3) throw new Error('INVALID_PAUSE_MARKER');
+    const milliseconds = Number(match[1]) * (match[2].toLowerCase() === 's' ? 1000 : 1);
+    if (!Number.isInteger(milliseconds) || milliseconds < 1 || milliseconds > 10000) throw new Error('INVALID_PAUSE_MARKER');
+    return milliseconds;
+  }
+  function insertPause(marker) {
+    const el=$('#input'),start=el.selectionStart,end=el.selectionEnd;
+    const next=el.value.slice(0,start)+marker+el.value.slice(end);
+    if (next.length>4096) throw new Error('INPUT_TOO_LONG');
+    const starts=[...next.matchAll(/\[[ \t]*pause(?=[ \t\]\r\n]|$)/gi)];
+    const valid=[...next.matchAll(/\[[ \t]*pause(?:[ \t]+([0-9]+(?:\.[0-9]+)?)[ \t]*(ms|s))?[ \t]*\]/gi)];
+    if (starts.length!==valid.length) throw new Error('INVALID_PAUSE_MARKER');
+    let total=0;
+    for (const match of valid) total+=match[1] ? parsePauseDuration(match[1]+match[2]) : 350;
+    if (valid.length>16 || total>60000) throw new Error('PAUSE_LIMIT_EXCEEDED');
+    el.value=next;el.focus();el.setSelectionRange(start+marker.length,start+marker.length);
+    notice('Pause inserted');
+  }
   $$('[data-pause]').forEach(b=>b.addEventListener('click',()=>{
-    const el=$('#input'),index=el.selectionStart,text=b.dataset.pause;
-    el.value=el.value.slice(0,index)+text+el.value.slice(el.selectionEnd);
-    el.focus();el.setSelectionRange(index+text.length,index+text.length);
+    try { insertPause(b.dataset.pause); } catch(e) { notice(e.message,true); }
   }));
+  $('#insert-custom-pause').addEventListener('click',()=>{
+    try {
+      const raw=$('#custom-pause').value.trim();
+      parsePauseDuration(raw);
+      insertPause('[pause '+raw+']');
+    } catch(e) { notice(e.message,true); }
+  });
   function setBusy(value){busy=value;$('#generate').disabled=value||voices.length===0;$('#cancel').disabled=!value;$('#progress').textContent=value?'Generating (single CUDA task)...':'';}
   $('#generate-form').addEventListener('submit', async e=>{
     e.preventDefault();if(busy)return;

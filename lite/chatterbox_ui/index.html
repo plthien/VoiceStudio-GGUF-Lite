@@ -31,7 +31,8 @@
 <small>FFmpeg atempo post-processing. Not native Turbo speed; may affect voice quality.</small></div>
 <div class="preset"><button type="button" data-pause="[pause 250ms]">+ 250 ms pause</button>
 <button type="button" data-pause="[pause 1.5s]">+ 1.5 s pause</button>
-<button type="button" data-pause="[pause ]">+ custom pause</button></div>
+<label for="custom-pause">Custom duration <input type="text" id="custom-pause" placeholder="800ms or 1.5s" aria-label="Custom pause duration" inputmode="text" maxlength="9"></label>
+<button id="insert-custom-pause" type="button">+ custom pause</button></div>
 <div class="actions"><button id="generate" type="submit" class="primary">Generate WAV</button>
 <button id="cancel" type="button" disabled>Cancel</button></div></form>
 <div id="progress" role="status"></div><div id="metrics"></div>
