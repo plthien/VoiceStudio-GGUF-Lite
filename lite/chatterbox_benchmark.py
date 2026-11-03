@@ -112,7 +112,7 @@ def run_benchmark_locked(a,folder):
     run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"-"+secrets.token_hex(10)
     run_dir=folder/"runs"/run_id
     run_dir.mkdir(parents=True,exist_ok=False)
-    print("RUN",run_id,"ARTIFACTS",str(run_dir),flush=True)
+    print("RUN",run_id,"ARTIFACTS","runs/"+run_id,flush=True)
     try:
         # F02: no runtime request (including an All-mode smoke) before voice match.
         if a.mode in ("LongForm","All"):
