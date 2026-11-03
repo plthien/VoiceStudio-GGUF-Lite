@@ -2,6 +2,8 @@
 import base64
 import io
 import os
+import sys
+import struct
 import time
 import wave
 
@@ -26,6 +28,14 @@ def main():
                     "index":0,"total_bytes":1,"free_bytes_on_load":1}}
         elif cmd=="SYNTH":
             if msg.get("text")=="__CI_CRASH__":
+                os._exit(2)
+            if msg.get("text")=="__CI_BAD_FRAME__":
+                sys.stdout.buffer.write(struct.pack(">I",0))
+                sys.stdout.buffer.flush()
+                os._exit(2)
+            if msg.get("text")=="__CI_TRUNCATED__":
+                sys.stdout.buffer.write(struct.pack(">I",100)+b"xy")
+                sys.stdout.buffer.flush()
                 os._exit(2)
             if msg.get("text")=="__CI_TIMEOUT__":
                 time.sleep(30)

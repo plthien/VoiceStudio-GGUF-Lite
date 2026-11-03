@@ -268,7 +268,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                     app.state.service.set_idle(previous)
                 except BaseException:
                     app.state.settings_consistent=False
-                    await app.state.service.stop()
+                    with contextlib.suppress(BaseException):
+                        await app.state.service.stop()
                     return failure(503,"SETTINGS_RECOVERY_REQUIRED")
                 return failure(500,"SETTINGS_SAVE_FAILED")
             return obj

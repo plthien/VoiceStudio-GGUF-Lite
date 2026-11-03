@@ -291,3 +291,91 @@ def test_engine_conditions_cached_without_torch_or_model_download(tmp_path,monke
     synth("A",2)
     assert engine.model.trace[-1]=="A"
     assert ("A",2,hashlib.sha256((settings.data_dir/"voices"/"A"/"1"/"reference.wav").read_bytes()).hexdigest(),MODEL_REVISION) in engine.cache
+
+
+@pytest.mark.parametrize("text,code",[
+    ("__CI_BAD_FRAME__","WORKER_PROTOCOL_INVALID"),
+    ("__CI_TRUNCATED__","WORKER_CRASH"),
+    ("__CI_CRASH__","WORKER_CRASH"),
+    ("__CI_TIMEOUT__","DEADLINE_EXCEEDED"),
+])
+def test_actual_subprocess_failure_is_typed_and_reaped(tmp_path,monkeypatch,text,code):
+    settings=ChatterboxSettings(root=tmp_path,timeout=8)
+    monkeypatch.setattr(ChatterboxSettings,"venv_python",property(lambda self:Path(sys.executable)))
+    original=asyncio.create_subprocess_exec
+    fixture=Path(__file__).with_name("subprocess_worker.py")
+    async def spawn(*args,**kwargs):
+        return await original(sys.executable,str(fixture),**kwargs)
+    monkeypatch.setattr(asyncio,"create_subprocess_exec",spawn)
+    async def no_gguf(self,deadline):return None
+    monkeypatch.setattr(TurboService,"_assert_no_gguf",no_gguf)
+    async def scenario():
+        svc=TurboService(settings)
+        row={"id":"synthetic","version":1,"ref_sha256":"test"}
+        reference=tmp_path/"placeholder.wav"
+        await svc.synthesize(profile=row,reference=reference,text="Warm",
+                             script=None,speed=1.0,seed=42)
+        proc=svc.proc
+        assert proc and proc.returncode is None
+        svc.settings=ChatterboxSettings(root=tmp_path,timeout=1.5)
+        with pytest.raises(TurboError,match=code):
+            await svc.synthesize(profile=row,reference=reference,text=text,
+                                 script=None,speed=1.0,seed=42)
+        assert svc.state=="ERROR" and svc.proc is None
+        assert proc.returncode is not None
+    asyncio.run(scenario())
+
+
+def test_spawn_failure_typed_and_never_replayed(tmp_path,monkeypatch):
+    settings=ChatterboxSettings(root=tmp_path,timeout=8)
+    monkeypatch.setattr(ChatterboxSettings,"venv_python",property(lambda self:Path(sys.executable)))
+    async def no_gguf(self,deadline):return None
+    monkeypatch.setattr(TurboService,"_assert_no_gguf",no_gguf)
+    count=[0]
+    async def fail_spawn(*args,**kwargs):
+        count[0]+=1
+        raise OSError("Synthetic permission denied")
+    monkeypatch.setattr(asyncio,"create_subprocess_exec",fail_spawn)
+    async def scenario():
+        svc=TurboService(settings)
+        with pytest.raises(TurboError,match="WORKER_START_FAILED"):
+            await svc.synthesize(profile={"id":"test","version":1,"ref_sha256":"x"},
+                reference=tmp_path/"ref.wav",text="Hi",script=None,speed=1.0,seed=42)
+        assert count[0]==1 and svc.state=="ERROR" and svc.proc is None
+    asyncio.run(scenario())
+
+
+def test_hash_recorded_does_not_mean_model_verified(tmp_path):
+    from lite.chatterbox_config import diagnostic,SOURCE_REVISION,REQUIRED_FILES
+    settings=ChatterboxSettings(root=tmp_path)
+    settings.model_dir.mkdir(parents=True)
+    settings.venv_python.parent.mkdir(parents=True)
+    settings.venv_python.touch()
+    (settings.model_dir/"manifest.json").write_text(json.dumps({
+        "revision":MODEL_REVISION,"source_revision":SOURCE_REVISION,
+        "sha256":{name:"not-a-real-hash" for name in REQUIRED_FILES}}))
+    state=diagnostic(settings)
+    assert state["installed"] is True and state["model_manifest_recorded"] is True
+    assert state["model_hash_verified"] is False and state["ready"] is False
+
+
+def test_symlink_reference_escape_rejected(api,tmp_path):
+    c,svc,settings=api
+    row=profile(c)
+    original=settings.data_dir/"voices"/row["ref_path"]
+    outside=tmp_path/"outside.wav"
+    outside.write_bytes(original.read_bytes())
+    original.unlink()
+    try:
+        original.symlink_to(outside)
+    except (OSError,NotImplementedError):
+        pytest.skip("Windows symlink creation privileges unavailable")
+    r=gen(c,row["id"])
+    assert r.status_code==409 and r.json()["error"]["code"]=="REFERENCE_INVALID"
+
+
+def test_bad_content_length(api):
+    c,svc,_=api
+    r=c.post("/v1/audio/speech",data=b"{}",headers={
+        "content-type":"application/json","content-length":"invalid-length"})
+    assert r.status_code==400 and r.json()["error"]["code"]=="BAD_LENGTH"

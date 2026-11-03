@@ -130,6 +130,12 @@ def test_longform_http_resume_end_to_end(live, tmp_path):
         assert state["sections"]["sec_001"]["backend"] == "CUDA0"
         assert abs(result["audio_s"] - 1.0) < .001
         before = fake.syntheses
+        reversed_manifest=tmp_path/"reverse-order.json"
+        reversed_manifest.write_text(json.dumps({"voice":voice,"sections":[
+            {"id":"sec_002","input":"Second sentence. [pause 250ms] Continue."},
+            {"id":"sec_001","input":"One sentence."}]}))
+        with pytest.raises(RuntimeError, match="RESUME_PROVENANCE_CHANGED"):
+            do_job(reversed_manifest,target,base=url,resume=True)
         result = do_job(manifest, target, base=url, resume=True)
         assert fake.syntheses == before
         assert wav_info((target / "final.wav").read_bytes())["frames"] == 24000
