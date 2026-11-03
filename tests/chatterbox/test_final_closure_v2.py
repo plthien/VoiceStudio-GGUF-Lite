@@ -251,3 +251,97 @@ def test_offline_installer_windows_sha_and_verify_negative(tmp_path,shell):
         capture_output=True,text=True,timeout=30)
     assert wrong.returncode!=0
     assert "Root must be" in wrong.stdout+wrong.stderr
+
+
+def test_generation_cuda_peak_is_reset_between_requests(tmp_path,monkeypatch):
+    """CI fake: generation 2 must not inherit the larger generation 1 high water."""
+    import lite.chatterbox_worker as worker
+    settings=ChatterboxSettings(root=tmp_path)
+    monkeypatch.setattr(worker.ChatterboxSettings,"load",classmethod(lambda cls:settings))
+    class Cond:
+        def to(self,device):return self
+    class Cuda:
+        OutOfMemoryError=MemoryError
+        def __init__(self):self.peak=0;self.resets=0
+        def reset_peak_memory_stats(self):self.resets+=1;self.peak=15
+        def manual_seed_all(self,seed):pass
+        def mem_get_info(self):return (1000,2000)
+        def memory_allocated(self):return 10
+        def memory_reserved(self):return 20
+        def max_memory_allocated(self):return self.peak
+    cuda=Cuda()
+    class Torch:
+        def __init__(self):self.cuda=cuda
+        def manual_seed(self,seed):pass
+        def inference_mode(self):return contextlib.nullcontext()
+    class Model:
+        conds=None
+        calls=0
+        def prepare_conditionals(self,path):self.conds=Cond()
+        def generate(self,text):
+            self.calls+=1
+            cuda.peak=120 if self.calls==1 else 55
+            return None
+    monkeypatch.setattr(worker,"pcm_wav",lambda _tensor:audio(.25))
+    engine=worker.Engine()
+    engine.model=Model();engine.torch=Torch()
+    reference=settings.data_dir/"voices"/"A"/"1"/"reference.wav"
+    reference.parent.mkdir(parents=True)
+    reference.write_bytes(audio(6))
+    body={"voice":"A","version":1,"reference":str(reference),
+          "reference_sha":hashlib.sha256(reference.read_bytes()).hexdigest(),
+          "text":"Test","seed":42}
+    one=engine.generate(body)["memory"]
+    two=engine.generate(body)["memory"]
+    assert cuda.resets==2
+    assert one["peak_bytes"]==120 and one["lifetime_peak_bytes"]==120
+    assert two["peak_bytes"]==55 and two["lifetime_peak_bytes"]==120
+    assert one["peak_scope"]=="generation" and two["peak_scope"]=="generation"
+    assert two["allocated_bytes"]==10 and two["reserved_bytes"]==20
+    assert two["free_bytes"]==1000
+
+
+def test_pcm_nonfinite_tensor_fails_without_publishing():
+    import lite.chatterbox_worker as worker
+    import numpy as np
+    class FakeTensor:
+        def detach(self):return self
+        def float(self):return self
+        def cpu(self):return self
+        def reshape(self,*args):return self
+        def clamp(self,*args):return self
+        def numpy(self):return np.array([0.0,np.nan],dtype=np.float32)
+    with pytest.raises(RuntimeError,match="NONFINITE_AUDIO"):
+        worker.pcm_wav(FakeTensor())
+
+
+def test_frozen_reference_source_after_first_record_failure_on_resume(tmp_path,monkeypatch):
+    rows=[pcm(.5)]
+    row,requests=fake_job_endpoint(monkeypatch,rows)
+    manifest=tmp_path/"request.json"
+    manifest.write_text(json.dumps({"voice":"owned","sections":[{"id":"s","input":"Voice"}]}))
+    out=tmp_path/"output"
+    do_job(manifest,out)
+    assert len(requests)==1
+    row["ref_sha256"]="c"*64
+    with pytest.raises(RuntimeError,match="RESUME_PROVENANCE_CHANGED"):
+        do_job(manifest,out,resume=True)
+    assert len(requests)==1
+
+
+def test_final_summary_write_error_unpublishes_final(tmp_path,monkeypatch):
+    import lite.chatterbox_assembly as asm
+    fake_job_endpoint(monkeypatch,[pcm(.5)])
+    source=tmp_path/"m.json"
+    source.write_text(json.dumps({"voice":"owned","sections":[{"id":"s","input":"Test"}]}))
+    dest=tmp_path/"dest"
+    original=asm.atomic
+    def fail_summary(path,data):
+        if path.name=="summary.json":
+            raise OSError("Injected summary publish failure")
+        return original(path,data)
+    monkeypatch.setattr(asm,"atomic",fail_summary)
+    with pytest.raises(OSError,match="Injected"):
+        do_job(source,dest)
+    assert not (dest/"final.wav").exists()
+    assert not (dest/"summary.json").exists()
