@@ -426,3 +426,27 @@ def test_offline_verify_only_bad_manifest_real_root_if_unused(shell):
     finally:
         if root.exists():
             shutil.rmtree(root)
+
+
+def test_multisegment_request_cuda_peak_uses_max_not_last(api,monkeypatch):
+    from .test_contracts import profile,gen
+    client,svc,_=api
+    voice=profile(client)["id"]
+    original=svc._rpc
+    peaks=iter([5200,1800])
+    async def varying(message,deadline):
+        result=await original(message,deadline)
+        if message.get("cmd")=="SYNTH":
+            peak=next(peaks)
+            result["memory"]["peak_bytes"]=peak
+            result["memory"]["peak_scope"]="generation"
+            result["memory"]["lifetime_peak_bytes"]=5200
+        return result
+    monkeypatch.setattr(svc,"_rpc",varying)
+    response=gen(client,voice,"First. [pause 250ms] Second.")
+    assert response.status_code==200,response.text
+    assert response.headers["X-TTS-CUDA-Peak-Bytes"]=="5200"
+    assert response.headers["X-TTS-CUDA-Lifetime-Peak-Bytes"]=="5200"
+    assert response.headers["X-TTS-CUDA-Peak-Scope"]=="max_generation_in_request"
+    assert response.headers["X-Lite-Pause-Count"]=="1"
+    assert float(response.headers["X-Lite-Pause-S"])==.25
