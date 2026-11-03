@@ -42,6 +42,17 @@ function Get-ProfileBinding([object]$profile) {
   } finally {$sha.Dispose()}
 }
 
+function Get-FileSha256([string]$path) {
+  $sha=[Security.Cryptography.SHA256]::Create()
+  $stream=[IO.File]::OpenRead($path)
+  try {
+    return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-","").ToLowerInvariant()
+  } finally {
+    $stream.Dispose()
+    $sha.Dispose()
+  }
+}
+
 function Assert-ProfileUnchanged([object]$expected) {
   $actual=Get-ProfileSnapshot
   if($actual.id -cne $expected.id -or $actual.version -ne $expected.version -or
@@ -86,7 +97,7 @@ try {
     if(Test-Path -LiteralPath $wav){
       if(!(Test-Path -LiteralPath $sectionReceipt)){throw "Resume receipt missing for section $($section.index)"}
       $saved=Get-Content -Raw -LiteralPath $sectionReceipt|ConvertFrom-Json
-      $digest=(Get-FileHash -Algorithm SHA256 -LiteralPath $wav).Hash.ToLowerInvariant()
+      $digest=Get-FileSha256 $wav
       $wavInfoJson=python -m lite.longform_benchmark inspect --wav $wav
       if($LASTEXITCODE -ne 0){throw "Resume WAV validation failed for section $($section.index)"}
       $wavInfo=$wavInfoJson|ConvertFrom-Json
@@ -120,7 +131,7 @@ try {
       Assert-ProfileUnchanged $profile
       Move-Item -LiteralPath $tmp -Destination $wav
       $state=Invoke-RestMethod -Uri "$base/lite/worker/status"
-      $digest=(Get-FileHash -Algorithm SHA256 -LiteralPath $wav).Hash.ToLowerInvariant()
+      $digest=Get-FileSha256 $wav
       $receiptTemp=$sectionReceipt+".partial"
       @{schema="lite-longform-section-v2";index=[int]$section.index;text_sha256=$section.text_sha256;manifest_sha256=$spec.manifest_sha256;profile_binding_sha256=$profileBinding;wav_sha256=$digest;verification_status="verified";wall_s=$timer.Elapsed.TotalSeconds;audio_s=$audioSeconds;speech_s=$speechSeconds;rtf=$response.Headers['X-Lite-RTF'];native_total_us=$state.performance.native_total_us;ref_codec_encode_us=$state.performance.ref_codec_encode_us;cache_hit=$state.performance.ref_cache_hit;maskgit_steps=$state.performance.maskgit_steps}|ConvertTo-Json -Compress|Set-Content -Encoding UTF8 -LiteralPath $receiptTemp
       Move-Item -LiteralPath $receiptTemp -Destination $sectionReceipt

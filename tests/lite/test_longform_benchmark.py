@@ -75,6 +75,7 @@ def test_powershell_resume_speech_fallback_and_profile_guards_are_executable_con
     assert 'if([string]::IsNullOrWhiteSpace($speechHeader)){$audioSeconds}' in script
     assert script.count("Assert-ProfileUnchanged $profile")>=3
     assert 'profile_binding_sha256=$profileBinding' in script
+    assert "function Get-FileSha256" in script and "Get-FileHash" not in script
 
 @pytest.mark.skipif(sys.platform!="win32",reason="actual Windows PowerShell regression")
 def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
