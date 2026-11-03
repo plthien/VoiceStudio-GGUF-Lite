@@ -121,11 +121,18 @@ def do_job(manifest: Path, output: Path, base="http://127.0.0.1:3901",
                      "seconds": info["seconds"], "wall_seconds": elapsed, "rtf": elapsed/info["seconds"],
                      "speed_mode": headers.get("X-TTS-Speed-Mode"),
                      "pause_count": headers.get("X-Lite-Pause-Count"),
-                     "backend": headers.get("X-TTS-Backend")}
+                     "backend": headers.get("X-TTS-Backend"),
+                     "cuda_allocated_bytes": headers.get("X-TTS-CUDA-Allocated-Bytes"),
+                     "cuda_peak_bytes": headers.get("X-TTS-CUDA-Peak-Bytes"),
+                     "cuda_free_bytes": headers.get("X-TTS-CUDA-Free-Bytes"),
+                     "speed": s.get("speed", 1.0), "voice_version": version}
             state["sections"][identifier] = entry
             save()
             metrics.append({"id":identifier,**entry})
-            print(f"PASS {identifier} wall={elapsed:.2f}s audio={info['seconds']:.2f}s rtf={entry['rtf']:.2f}", flush=True)
+            mem = entry["cuda_peak_bytes"] or "NOT_MEASURED"
+            print(f"PASS {identifier} wall={elapsed:.2f}s audio={info['seconds']:.2f}s rtf={entry['rtf']:.2f} "
+                  f"speed={entry['speed']} pause={entry['pause_count']} peak_vram_bytes={mem}",
+                  flush=True)
         except BaseException:
             state["sections"][identifier] = {"state": "UNCERTAIN", "key": key}
             save()

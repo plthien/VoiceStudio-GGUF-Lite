@@ -455,13 +455,22 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                         "X-Lite-Speech-Segments": str(info["speech_segments"]),
                         "X-Lite-Speech-RTF": str(info["speech_rtf"]),
                         "Cache-Control": "no-store"}
+                memory = info.get("memory") or {}
+                for key, header in (
+                    ("allocated_bytes", "X-TTS-CUDA-Allocated-Bytes"),
+                    ("reserved_bytes", "X-TTS-CUDA-Reserved-Bytes"),
+                    ("peak_bytes", "X-TTS-CUDA-Peak-Bytes"),
+                    ("free_bytes", "X-TTS-CUDA-Free-Bytes"),
+                ):
+                    if type(memory.get(key)) is int and memory[key] >= 0:
+                        meta[header] = str(memory[key])
                 return Response(data, media_type="audio/wav", headers=meta)
             except asyncio.CancelledError:
                 return failure(499, "CANCELLED")
             except TurboError as exc:
                 status = (503 if exc.code in ("ENV_NOT_INSTALLED", "CUDA_UNAVAILABLE",
                     "CUDA_LOW_MEMORY_STOP_GGUF", "MODEL_MANIFEST_UNAVAILABLE", "MODEL_HASH_MISMATCH",
-                    "MODEL_FILES_MISSING", "CUDA_OOM") else 504 if exc.code == "DEADLINE_EXCEEDED"
+                    "MODEL_FILES_MISSING", "CUDA_OOM", "GGUF_PROBE_UNAVAILABLE") else 409 if exc.code == "GGUF_WORKER_RESIDENT" else 504 if exc.code == "DEADLINE_EXCEEDED"
                     else 409 if exc.code in ("REFERENCE_CHANGED", "REFERENCE_TOO_SHORT") else 500)
                 return failure(status, exc.code)
             except (AudioError, OSError, ValueError):

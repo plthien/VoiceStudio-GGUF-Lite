@@ -29,7 +29,10 @@ def run_case(name, text, voice, base, output):
         record.update(state="PASS",audio_s=info["seconds"],speech_s=float(headers.get("X-Lite-Speech-S",0)),
                       pause_s=float(headers.get("X-Lite-Pause-S",0)),
                       rtf=(time.monotonic()-started)/info["seconds"],backend=headers.get("X-TTS-Backend"),
-                      model_revision=headers.get("X-TTS-Model-Revision"),voice_version=headers.get("X-TTS-Voice-Version"))
+                      model_revision=headers.get("X-TTS-Model-Revision"),voice_version=headers.get("X-TTS-Voice-Version"),
+                      cuda_allocated_bytes=headers.get("X-TTS-CUDA-Allocated-Bytes"),
+                      cuda_peak_bytes=headers.get("X-TTS-CUDA-Peak-Bytes"),
+                      cuda_free_bytes=headers.get("X-TTS-CUDA-Free-Bytes"))
         if output:
             atomic(output/(name+".wav"),data)
     except Exception as exc:
@@ -90,7 +93,8 @@ def main():
                                 "error":type(exc).__name__})
     atomic(folder/"owner-metrics.json",json.dumps(records,indent=2).encode())
     # Always write CSV including failures and empty results.
-    fields=["case","state","wall_s","audio_s","speech_s","pause_s","rtf","backend","error"]
+    fields=["case","state","wall_s","audio_s","speech_s","pause_s","rtf","backend",
+            "cuda_allocated_bytes","cuda_peak_bytes","cuda_free_bytes","error"]
     with tempfile.NamedTemporaryFile(mode="w",newline="",encoding="utf-8",dir=folder,delete=False) as f:
         writer=csv.DictWriter(f,fieldnames=fields,extrasaction="ignore")
         writer.writeheader()

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,7 +18,7 @@ REQUIRED_FILES = ("t3_turbo_v1.safetensors", "s3gen_meanflow.safetensors", "ve.s
                   "added_tokens.json", "merges.txt", "vocab.json", "special_tokens_map.json",
                   "tokenizer_config.json")
 IDLE_CHOICES = (60, 300, 600, 1800, 3600, None)
-DEFAULT_ROOT = r"D:\VoiceStudioBuild\chatterbox-turbo"
+DEFAULT_ROOT = (r"D:\VoiceStudioBuild\chatterbox-turbo" if os.name == "nt" else str(Path(tempfile.gettempdir()) / "VoiceStudioBuild" / "chatterbox-turbo"))
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,8 @@ class ChatterboxSettings:
     @classmethod
     def load(cls):
         root = Path(os.environ.get("CHATTERBOX_ROOT", DEFAULT_ROOT)).expanduser().resolve()
+        if os.name == "nt" and str(root).lower() != str(Path(DEFAULT_ROOT).resolve()).lower():
+            raise ValueError("Chatterbox must use its isolated D: root")
         timeout = float(os.environ.get("CHATTERBOX_TIMEOUT_S", "900"))
         port = int(os.environ.get("CHATTERBOX_PORT", "3901"))
         if not 15 <= timeout <= 3600 or not 1 <= port <= 65535:
@@ -106,10 +109,41 @@ def diagnostic(settings: ChatterboxSettings) -> dict:
             "source_revision": SOURCE_REVISION, "issues": issues}
 
 
+def probe_cuda(settings: ChatterboxSettings) -> dict:
+    """Explicit owner-side CUDA probe in the isolated venv, never in API imports."""
+    import subprocess
+    if not settings.venv_python.is_file():
+        return {"available": False, "error": "ENV_NOT_INSTALLED"}
+    code = (
+        "import json,torch\n"
+        "available=torch.cuda.is_available()\n"
+        "if available:\n"
+        "    idx=torch.cuda.current_device()\n"
+        "    free,total=torch.cuda.mem_get_info(idx)\n"
+        "    device={'index':idx,'name':torch.cuda.get_device_name(idx),"
+        "'free_bytes':free,'total_bytes':total}\n"
+        "else: device=None\n"
+        "print(json.dumps({'available':available,'device':device}))\n"
+    )
+    try:
+        proc = subprocess.run([str(settings.venv_python), "-c", code],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=30, check=False)
+        if proc.returncode:
+            raise ValueError("probe failed")
+        data = json.loads(proc.stdout)
+        if not isinstance(data.get("available"), bool):
+            raise ValueError("invalid probe")
+        return data
+    except (OSError, ValueError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return {"available": False, "error": "CUDA_PROBE_FAILED"}
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--cuda-probe", action="store_true")
     args = parser.parse_args()
     settings = ChatterboxSettings.load()
     report = diagnostic(settings)
@@ -117,6 +151,11 @@ def main():
         ok, issues = verify_model_files(settings)
         report.update(model_hash_verified=ok, issues=sorted(set(report["issues"] + issues)),
                       ready=report["ready"] and ok)
+    if args.cuda_probe:
+        report["cuda"] = probe_cuda(settings)
+        if not report["cuda"]["available"]:
+            report["issues"] = sorted(set(report["issues"] + ["CUDA_UNAVAILABLE"]))
+            report["ready"] = False
     print(json.dumps(report, indent=2))
 
 

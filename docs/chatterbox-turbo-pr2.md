@@ -74,3 +74,20 @@ $env:PYTHONPATH=(Get-Location).Path
 Output metrics explicitly label `CPU_DIAGNOSTIC_ONLY`, never `CUDA0`. GPU inference requires owner verification; a future optimized Turbo runtime (such as ONNX/native) needs its own evidence and approved follow-up, and is not shipped here. CUDA/no-CUDA mode must not silently change model identity, voice profile or speed/pause contract.
 
 Installer notes: Resemble Perth is installed from pinned commit `ff1c8ac55a976971245cdd53c18d6131ca00d993` with `--no-deps`, and its runtime dependencies (PyYAML, pydub, soundfile, torch/torchaudio, librosa, numpy) are provided explicitly in the isolated environment. Inspect `private-dependency-lock.txt` generated on D:; a successful CI mock run does not verify every Windows CUDA binary wheel.
+
+## Installer evidence and GPU memory
+
+The isolated installer also writes a local `private-dependency-inventory.json` (package name, installed version, publisher-supplied license metadata and classifiers) under D:. The inventory preserves missing/unknown license information without guessing; inspect the exact wheel/FFmpeg build licenses on the owner host before redistribution. This local evidence file is **not committed**.
+
+Use the explicit diagnostics before the first CUDA test:
+
+```powershell
+$env:CHATTERBOX_ROOT = 'D:\VoiceStudioBuild\chatterbox-turbo'
+$env:PYTHONPATH = (Get-Location).Path
+& 'D:\VoiceStudioBuild\chatterbox-turbo\.venv-chatterbox\Scripts\python.exe' -m lite.chatterbox_config --verify --cuda-probe
+Invoke-RestMethod http://127.0.0.1:3900/lite/worker/status | ConvertTo-Json -Depth 4
+```
+
+For a safe cold load, PR #1 should show `resident=false` and `busy=false` (or be completely stopped). Turbo checks PR #1 at port 3900 before CUDA model load and refuses if it observes a resident/busy worker or an untrusted response; a connection-refused port is treated as PR #1 stopped. This one-way check cannot stop a separately started PR #1 after Turbo has loaded; do not run both simultaneously. Shut down the other service or explicitly unload its worker first.
+
+Owner metrics include true CUDA allocated/reserved/free/peak byte counts when provided by the real worker, and explicitly leave them null/not measured in any backend that does not report them. CI fake-worker values are synthetic and **not** GTX 1650 evidence.

@@ -64,6 +64,8 @@ if($LASTEXITCODE -ne 0) { throw 'PINNED_PERTH_FAILED' }
 & $py -m pip install --no-deps ("git+https://github.com/resemble-ai/chatterbox.git@"+$SourceSha)
 if($LASTEXITCODE -ne 0) { throw 'PINNED_CHATTERBOX_FAILED' }
 & $py -m pip freeze | Set-Content -Encoding ASCII (Join-Path $path 'private-dependency-lock.txt')
+& $py (Join-Path $repo 'scripts\internal\chatterbox-dependency-inventory.py') --output (Join-Path $path 'private-dependency-inventory.json')
+if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_INVENTORY_FAILED' }
 if (!$SkipDownload) {
   $downloader=Join-Path $repo 'scripts\internal\download-chatterbox-model.py'
   & $py $downloader --root $path

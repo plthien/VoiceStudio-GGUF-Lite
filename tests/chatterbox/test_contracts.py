@@ -55,7 +55,9 @@ class FakeTurbo(TurboService):
         self.history.append(key)
         self.syntheses+=1
         return {"wav":base64.b64encode(audio()).decode(),"syntheses":self.syntheses,
-                "cache_hits":self.hits}
+                "cache_hits":self.hits,
+                "memory":{"allocated_bytes":1000,"reserved_bytes":1500,
+                          "peak_bytes":2000,"free_bytes":3000}}
 
     async def invalidate(self, voice=None):
         self.cache={key for key in self.cache if voice is not None and key[0]!=voice}
@@ -132,6 +134,7 @@ def test_exact_pause_across_speeds(api,speed):
     assert int(float(r.headers["X-Lite-Pause-S"])*24000)==42000
     assert int(float(r.headers["X-Lite-Speech-S"])*24000)+42000==info["frames"]
     assert r.headers["X-TTS-Backend"]=="CUDA0"
+    assert r.headers["X-TTS-CUDA-Peak-Bytes"] == "2000"
     assert r.headers["X-TTS-Speed-Mode"]=="postprocess_atempo"
     assert r.headers["X-TTS-Pause-Unaffected"]=="true"
     assert r.headers["X-Lite-Pause-Count"]=="2"
@@ -269,3 +272,75 @@ def test_atempo_preserves_approximate_pitch():
         crossings=sum(a<=0<b for a,b in zip(samples,samples[1:]))
         pitch=crossings/(frames/24000)
         assert abs(pitch-440)<20,(speed,pitch)
+
+
+
+def test_saved_idle_setting_survives_app_restart(api):
+    from lite.chatterbox_app import create_app
+    client,_,settings=api
+    response=client.put("/chatterbox/runtime/settings",json={"idle_timeout_seconds":1800})
+    assert response.status_code == 200
+    with TestClient(create_app(settings=settings,service=FakeTurbo(settings))) as c:
+        assert c.get("/chatterbox/runtime/settings").json()["idle_timeout_seconds"] == 1800
+
+
+def test_worker_idle_timer_expires_without_status_polling(tmp_path):
+    async def scenario():
+        svc=FakeTurbo(ChatterboxSettings(root=tmp_path))
+        svc.state="READY"
+        svc.idle_timeout=.02  # Controlled CI time compression, never a user setting.
+        svc._arm_idle()
+        await asyncio.sleep(.09)
+        assert svc.state=="UNLOADED"
+        assert svc.idle_deadline is None
+    asyncio.run(scenario())
+
+
+def test_gguf_resident_interlock_and_refusal(tmp_path,monkeypatch):
+    import urllib.request
+    import time
+    from lite.chatterbox_service import TurboService
+    svc=TurboService(ChatterboxSettings(root=tmp_path))
+    class Reply:
+        status=200
+        def __init__(self,resident,busy):
+            self.message=json.dumps({"resident":resident,"busy":busy}).encode()
+        def __enter__(self):return self
+        def __exit__(self,*args):return False
+        def read(self,n):return self.message[:n]
+    monkeypatch.setattr(urllib.request,"urlopen",lambda *a,**kw: Reply(True,False))
+    with pytest.raises(TurboError,match="GGUF_WORKER_RESIDENT"):
+        asyncio.run(svc._assert_no_gguf(time.monotonic()+2))
+    monkeypatch.setattr(urllib.request,"urlopen",lambda *a,**kw: Reply(False,False))
+    asyncio.run(svc._assert_no_gguf(time.monotonic()+2))
+
+
+def test_typed_deadline_failure_never_publishes_partial_audio(api):
+    client,svc,_=api
+    p=profile(client)
+    async def fails(*args,**kwargs):
+        raise TurboError("DEADLINE_EXCEEDED")
+    svc._rpc=fails
+    response=gen(client,p["id"],"A request that timed out.")
+    assert response.status_code == 504
+    assert response.json()["error"]["code"]=="DEADLINE_EXCEEDED"
+    assert not response.content.startswith(b"RIFF")
+    assert svc.state == "ERROR"
+
+
+def test_traversal_reference_refused(api):
+    client,svc,settings=api
+    p=profile(client)
+    import sqlite3
+    with sqlite3.connect(settings.data_dir/"lite.sqlite3") as db:
+        db.execute("UPDATE profiles SET ref_path=? WHERE id=?",("../../escape.wav",p["id"]))
+    response=gen(client,p["id"])
+    assert response.status_code == 409
+    assert response.json()["error"]["code"]=="REFERENCE_INVALID"
+
+
+def test_cpu_cuda_diagnostic_is_explicit_and_lazy():
+    import sys
+    from lite.chatterbox_config import probe_cuda
+    assert callable(probe_cuda)
+    assert "torch" not in sys.modules

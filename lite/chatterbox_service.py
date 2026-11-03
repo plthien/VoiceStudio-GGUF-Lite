@@ -5,6 +5,9 @@ import asyncio
 import base64
 import contextlib
 import os
+import json
+import urllib.request
+import urllib.error
 import sys
 import time
 from pathlib import Path
@@ -85,15 +88,21 @@ class TurboService:
     async def _kill(self):
         self._cancel_idle()
         proc, self.proc = self.proc, None
-        if proc and proc.returncode is None:
-            proc.kill()
-            try:
-                await asyncio.wait_for(proc.wait(), 5)
-            except asyncio.TimeoutError:
-                pass
-        self.device = None
-        self.state = "UNLOADED"
-        self.active_id = None
+        try:
+            if proc and proc.returncode is None:
+                self.state = "UNLOADING"
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), 5)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            self.device = None
+            self.state = "UNLOADED"
+            self.active_id = None
 
     async def stop(self):
         await self._kill()
@@ -121,10 +130,39 @@ class TurboService:
             raise TurboError(result.get("error", "WORKER_FAILURE"))
         return result.get("result", {})
 
+    async def _assert_no_gguf(self, deadline: float) -> None:
+        """Fail closed if PR1 is resident/busy; no PR1 mutations or shared GPU lock."""
+        def probe():
+            request = urllib.request.Request(
+                "http://127.0.0.1:3900/lite/worker/status", headers={"Accept": "application/json"})
+            try:
+                with urllib.request.urlopen(request, timeout=0.6) as result:
+                    if result.status != 200:
+                        raise ValueError("GGUF status unavailable")
+                    data = result.read(16385)
+                    if len(data) > 16384:
+                        raise ValueError("Invalid GGUF status")
+                    obj = json.loads(data)
+                    if not isinstance(obj, dict) or "resident" not in obj or "busy" not in obj:
+                        raise ValueError("Unknown GGUF status schema")
+                    return bool(obj["resident"] or obj["busy"])
+            except urllib.error.URLError as exc:
+                if isinstance(exc.reason, ConnectionRefusedError):
+                    return False  # No process listening on port 3900.
+                raise
+        try:
+            conflict = await asyncio.wait_for(asyncio.to_thread(probe),
+                        timeout=max(0.001, min(1.0, deadline - time.monotonic())))
+        except (OSError, ValueError, asyncio.TimeoutError, urllib.error.URLError) as exc:
+            raise TurboError("GGUF_PROBE_UNAVAILABLE") from exc
+        if conflict:
+            raise TurboError("GGUF_WORKER_RESIDENT")
+
     async def _ensure_loaded(self, deadline):
         self._cancel_idle()
         if self.proc and self.proc.returncode is None and self.state == "READY":
             return
+        await self._assert_no_gguf(deadline)
         self.state = "LOADING"
         python = self.settings.venv_python
         if not python.is_file():
@@ -172,6 +210,7 @@ class TurboService:
                 await self._ensure_loaded(deadline)
                 parts = script.parts if script is not None else (SpeechPart(text),)
                 speech_wavs = []
+                last_memory = {}
                 for i, part in enumerate(parts):
                     if not isinstance(part, SpeechPart):
                         continue
@@ -190,6 +229,8 @@ class TurboService:
                                 self.settings.cache_dir / "tmp"),
                             max(0.001, deadline - time.monotonic()))
                     speech_wavs.append(raw)
+                    if isinstance(answer.get("memory"), dict):
+                        last_memory = answer["memory"]
                     self.hits = answer.get("cache_hits", self.hits)
                     self.syntheses = answer.get("syntheses", self.syntheses)
                 if script:
@@ -211,7 +252,8 @@ class TurboService:
                 return data, {**meta, "audio_s": audio_s, "speech_s": speech_s,
                               "elapsed_s": elapsed, "rtf": elapsed / audio_s,
                               "speech_rtf": elapsed / speech_s,
-                              "device": self.device, "speed_mode": "postprocess_atempo",
+                              "device": self.device, "memory": last_memory,
+                              "speed_mode": "postprocess_atempo",
                               "model_revision": MODEL_REVISION}
             except BaseException as exc:
                 self.last_error = exc.code if isinstance(exc, TurboError) else "GENERATION_FAILED"

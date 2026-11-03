@@ -123,11 +123,18 @@ class Engine:
                 with open(os.devnull, "w") as output, contextlib.redirect_stdout(output):
                     generated = self.model.generate(request["text"])
             self.syntheses += 1
+            free_bytes, _ = self.torch.cuda.mem_get_info()
+            memory = {
+                "allocated_bytes": int(self.torch.cuda.memory_allocated()),
+                "reserved_bytes": int(self.torch.cuda.memory_reserved()),
+                "peak_bytes": int(self.torch.cuda.max_memory_allocated()),
+                "free_bytes": int(free_bytes)
+            }
             from .audio import wav_info
             wav = pcm_wav(generated)
             wav_info(wav, max_bytes=100 * 1024 * 1024, max_seconds=600)
             return {"wav": base64.b64encode(wav).decode("ascii"),
-                    "device": self.device, "cache_hits": self.hits,
+                    "device": self.device, "memory": memory, "cache_hits": self.hits,
                     "loads": self.loads, "syntheses": self.syntheses}
         except self.torch.cuda.OutOfMemoryError as exc:
             raise RuntimeError("CUDA_OOM") from exc

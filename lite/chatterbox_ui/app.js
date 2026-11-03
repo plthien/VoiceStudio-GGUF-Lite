@@ -85,7 +85,7 @@
     $('#runtime-status').textContent=JSON.stringify({state:state.state,cuda:state.cuda,loaded:state.resident,
       pid:state.pid,loads:state.load_count,generations:state.generation_count,cache_hits:state.condition_cache_hits,
       idle_remaining_seconds:state.idle_remaining_seconds,model_revision:state.model_revision,
-      issues:ready.issues},null,2);
+      source_revision:ready.source_revision,issues:ready.issues},null,2);
     $('#idle').value=settings.idle_timeout_seconds===null?'never':String(settings.idle_timeout_seconds);
   }
   $('#refresh-runtime').addEventListener('click',()=>refreshRuntime().catch(e=>notice(e.message,true)));
