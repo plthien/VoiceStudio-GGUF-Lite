@@ -181,3 +181,15 @@ def test_metrics_rows_are_durable_and_sparse_failures_supported(tmp_path):
     assert len(report["sections"]) == 2
     assert json.loads((tmp_path / "metrics.json").read_text())["sections"][1]["status"] == "FAIL"
     assert not list(tmp_path.glob("*.partial"))
+
+def test_inspect_wav_rejects_appended_bytes_and_wrong_riff_length(tmp_path):
+    from lite.longform_benchmark import inspect_wav
+    path = tmp_path / "sound.wav"
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(1); out.setsampwidth(2); out.setframerate(24000)
+        out.writeframes(b"\x00\x00" * 24000)
+    assert inspect_wav(path)["frames"] == 24000
+    with path.open("ab") as fh:
+        fh.write(b"evil appended data")
+    with pytest.raises(ValueError, match="RIFF length"):
+        inspect_wav(path)

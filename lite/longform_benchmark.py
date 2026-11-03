@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import tempfile
 import time
 import wave
@@ -188,8 +189,36 @@ def write_manifest_atomic(path: Path, manifest: dict) -> None:
 
 def inspect_wav(path: Path) -> dict:
     """Validate frames in bounded chunks, never materializing full long-form PCM."""
-    if path.stat().st_size > MAX_WAV_FRAMES * 2 + 65536:
+    size = path.stat().st_size
+    if size > MAX_WAV_FRAMES * 2 + 65536:
         raise ValueError("section WAV exceeds validation byte bound")
+    # The wave module tolerates trailing non-audio bytes. Refuse malformed,
+    # truncated or appended chunks before validating frame data.
+    with path.open("rb") as source:
+        header = source.read(12)
+        if (len(header) != 12 or header[:4] != b"RIFF" or
+                header[8:] != b"WAVE" or
+                struct.unpack("<I", header[4:8])[0] + 8 != size):
+            raise ValueError("section WAV RIFF length/header mismatch")
+        at, data_size = 12, None
+        while at < size:
+            source.seek(at)
+            chunk = source.read(8)
+            if len(chunk) != 8:
+                raise ValueError("section WAV truncated chunk header")
+            kind, length = chunk[:4], struct.unpack("<I", chunk[4:])[0]
+            next_at = at + 8 + length + (length & 1)
+            if next_at > size:
+                raise ValueError("section WAV truncated chunk")
+            if data_size is not None:
+                raise ValueError("section WAV has unexpected trailing chunk")
+            if kind == b"data":
+                data_size = length
+                if next_at != size:
+                    raise ValueError("section WAV has trailing data")
+            at = next_at
+        if data_size is None:
+            raise ValueError("section WAV data chunk missing")
     with wave.open(str(path), "rb") as src:
         if (src.getnchannels(), src.getsampwidth(), src.getframerate()) != (1, 2, 24000):
             raise ValueError("section WAV must be 24 kHz mono PCM16")
@@ -198,6 +227,8 @@ def inspect_wav(path: Path) -> dict:
         frames = src.getnframes()
         if frames <= 0 or frames > MAX_WAV_FRAMES:
             raise ValueError("section WAV exceeds frame bound")
+        if data_size != frames * 2:
+            raise ValueError("section WAV PCM data length mismatch")
         count = 0
         while count < frames:
             requested = min(65536, frames - count)
