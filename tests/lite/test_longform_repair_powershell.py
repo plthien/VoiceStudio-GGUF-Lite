@@ -27,7 +27,7 @@ def _wav():
         out.setnchannels(1)
         out.setsampwidth(2)
         out.setframerate(24000)
-        out.writeframes(b"\\x00\\x00" * 24000)
+        out.writeframes(b"\x00\x00" * 24000)
     return body.getvalue()
 
 
