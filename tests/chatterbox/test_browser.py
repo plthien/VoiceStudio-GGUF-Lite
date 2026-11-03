@@ -186,7 +186,9 @@ def test_benchmark_longform_forces_cold_start(live, tmp_path, monkeypatch):
         assert report[0]["h07_status"] == "NOT_VERIFIED"
         assert report[0]["generation_state"] == "PASS"
         assert (output/"owner-metrics.csv").is_file()
-        assert (output/"longform"/"final.wav").is_file()
+        run_id=report[0]["run_id"]
+        assert (output/"runs"/run_id/"longform"/"final.wav").is_file()
+        assert (output/"runs"/run_id/"owner-metrics.csv").is_file()
 
 
 @pytest.mark.parametrize("viewport", [(1280,900),(390,844)])
