@@ -306,7 +306,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
             "context_identity_verified":False,"cold_load_count":0,"synthesis_count":0,
             "reuse_count":0,"idle_remaining_seconds":None,"busy":app.state.runner.lock.locked(),
             "last_error":None,"vram_status":"OWNER TEST PENDING"}
-        return {**status,"mode":selected.mode,"idle_timeout_seconds":selected.idle_timeout_seconds}
+        from .runtime_binding import binding_snapshot
+        return {**status,"mode":selected.mode,"idle_timeout_seconds":selected.idle_timeout_seconds,
+                "runtime_binding":binding_snapshot(settings,status)}
 
     @app.post("/lite/worker/unload")
     async def worker_unload():
