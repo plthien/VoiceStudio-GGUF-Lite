@@ -72,6 +72,11 @@ if ! "$PYTHON_BIN" -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 11)
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+CANDIDATE_FLAVOR="${GGUF_LITE_CANDIDATE_FLAVOR:-profiled}"
+case "$CANDIDATE_FLAVOR" in
+    profiled|ref-cache|steps-32|steps-24|steps-16|steps-12|steps-8|fa-off) ;;
+    *) echo "Invalid GGUF_LITE_CANDIDATE_FLAVOR" >&2; exit 2 ;;
+esac
 
 # A bare `-j` runs every compile at once. With GGML_CPU_ALL_VARIANTS that is
 # dozens of cc1plus processes, which the kernel OOM-kills on a 16 GB runner
@@ -91,6 +96,9 @@ git -C "$WORK/src" checkout --detach "$COMMIT_SHA"
 git -C "$WORK/src" submodule update --init --recursive
 "$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-attestation.py" "$WORK/src/src/backend.h"
 "$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-native-speed.py" "$WORK/src"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-native-performance.py" "$WORK/src"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-ref-conditioning-cache.py" "$WORK/src"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/internal/instrument-maskgit-experiments.py" "$WORK/src"
 if [[ "${OMNIVOICE_RESIDENCY_FEASIBILITY:-0}" == "1" ]]; then
     # Real native A-B-A probe only. No worker or resident mode is enabled.
     "$PYTHON_BIN" "$REPO_ROOT/scripts/internal/stage-residency-feasibility.py" "$WORK/src"
@@ -245,5 +253,8 @@ cat > "$BIN_DIR/speed-capability.json" <<JSON
 JSON
 cat > "$BIN_DIR/persistent-capability.json" <<JSON
 {"schema":"lite-persistent-v1","marker":"LitePersistent/v1","protocol_version":1,"runtime_revision":"$COMMIT_SHA","exe_sha256":"$DIGEST","patch_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/stage-persistent-worker.py")","source_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/lite-persistent-worker.cpp")"}
+JSON
+cat > "$BIN_DIR/performance-candidate.json" <<JSON
+{"schema":"lite-performance-candidate-v1","tag":"q8-vulkan-perf-opt-in","candidate_flavor":"$CANDIDATE_FLAVOR","runtime_revision":"$COMMIT_SHA","exe_sha256":"$DIGEST","perf_patch_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/instrument-native-performance.py")","perf_header_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/lite-native-perf.h")","cache_patch_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/instrument-ref-conditioning-cache.py")","cache_header_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/lite-reference-cache.h")","maskgit_patch_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/instrument-maskgit-experiments.py")","maskgit_header_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/lite-maskgit-experiments.h")","baseline_quant":"Q8_0","baseline_backend":"Vulkan0","default_ref_cache":false,"default_maskgit_steps":32,"graph_reuse":"GRAPH_REUSE_DEFERRED","cuda_status":"CUDA_NOT_AVAILABLE","q4_status":"NOT_AVAILABLE"}
 JSON
 echo "✓ Built $OUT_NAME ($DIGEST) LiteNativeSpeed/v1"

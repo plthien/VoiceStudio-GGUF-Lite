@@ -2,6 +2,7 @@ param(
   [string]$Root="D:\VoiceStudioBuild\lite",
   [string]$GitBash="bash",
   [string]$OutputRuntime="",
+  [ValidateSet("profiled","ref-cache","steps-32","steps-24","steps-16","steps-12","steps-8","fa-off")][string]$CandidateFlavor="profiled",
   [switch]$BuildFeasibilityProbe
 )
 # Lite-only, pinned Windows x64 Vulkan source build. Never overwrite the baseline.
@@ -21,7 +22,7 @@ $source=(Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $version="886fc079838ca7400cb2b42b36e2a65aa1daabe8"
 $stage=Join-Path $Root ("native-build-" + [guid]::NewGuid().ToString("N"))
 $target=if ($OutputRuntime) { [IO.Path]::GetFullPath($OutputRuntime) } else {
-  Join-Path $Root ("candidates\persistent-" + [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + [guid]::NewGuid().ToString("N").Substring(0,8))
+  Join-Path $Root ("candidates\performance-q8-vulkan-" + $CandidateFlavor + "-" + [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + [guid]::NewGuid().ToString("N").Substring(0,8))
 }
 $installed=[IO.Path]::GetFullPath((Join-Path $Root "runtime"))
 if ($OutputRuntime -and $target.TrimEnd('\') -ieq $installed.TrimEnd('\')) {
@@ -32,17 +33,19 @@ if ($OutputRuntime -and (Test-Path -LiteralPath $target)) {
 }
 $stageScripts=Join-Path $stage "scripts\internal"
 New-Item -ItemType Directory -Force -Path $stageScripts | Out-Null
-foreach ($helper in @("build-gguf-lite.sh","omnivoice-vulkan.sh","instrument-attestation.py","instrument-native-speed.py","lite-native-speed.h","stage-residency-feasibility.py","native-residency-feasibility.cpp","stage-persistent-worker.py","lite-persistent-worker.cpp","verify-persistent-handshake.py")) {
+foreach ($helper in @("build-gguf-lite.sh","omnivoice-vulkan.sh","instrument-attestation.py","instrument-native-speed.py","lite-native-speed.h","instrument-native-performance.py","lite-native-perf.h","instrument-ref-conditioning-cache.py","lite-reference-cache.h","instrument-maskgit-experiments.py","lite-maskgit-experiments.h","stage-residency-feasibility.py","native-residency-feasibility.cpp","stage-persistent-worker.py","lite-persistent-worker.cpp","verify-persistent-handshake.py")) {
   $from=Join-Path $source ("scripts\internal\" + $helper)
   if (!(Test-Path -PathType Leaf $from)) { throw "Lite build helper missing: $helper" }
   Copy-Item $from $stageScripts
 }
 $previousBuildPython=[Environment]::GetEnvironmentVariable("GGUF_LITE_BUILD_PYTHON","Process")
 $previousProbe=[Environment]::GetEnvironmentVariable("OMNIVOICE_RESIDENCY_FEASIBILITY","Process")
+$previousFlavor=[Environment]::GetEnvironmentVariable("GGUF_LITE_CANDIDATE_FLAVOR","Process")
 Push-Location $stage
 try {
   # Git Bash converts this Windows path via cygpath before invoking Python.
   [Environment]::SetEnvironmentVariable("GGUF_LITE_BUILD_PYTHON",$pythonExe,"Process")
+  [Environment]::SetEnvironmentVariable("GGUF_LITE_CANDIDATE_FLAVOR",$CandidateFlavor,"Process")
   if ($BuildFeasibilityProbe) {
     [Environment]::SetEnvironmentVariable("OMNIVOICE_RESIDENCY_FEASIBILITY","1","Process")
   } else {
@@ -56,7 +59,8 @@ try {
   $manifest=Join-Path $bin "checksums.sha256"
   $receipt=Join-Path $bin "speed-capability.json"
   $persistentReceipt=Join-Path $bin "persistent-capability.json"
-  foreach ($required in @($exe,$dll,$manifest,$receipt,$persistentReceipt,(Join-Path $bin "ggml.dll"),(Join-Path $bin "ggml-base.dll"))) {
+  $performanceReceipt=Join-Path $bin "performance-candidate.json"
+  foreach ($required in @($exe,$dll,$manifest,$receipt,$persistentReceipt,$performanceReceipt,(Join-Path $bin "ggml.dll"),(Join-Path $bin "ggml-base.dll"))) {
     if (!(Test-Path -PathType Leaf $required)) { throw "Required Vulkan build artifact missing: $required" }
   }
   $records=@{}
@@ -99,6 +103,20 @@ try {
       $persistent.source_sha256 -ne (Get-FileHash -Algorithm SHA256 (Join-Path $source "scripts/internal/lite-persistent-worker.cpp")).Hash.ToLowerInvariant()) {
     throw "Persistent worker candidate receipt does not match pinned binary"
   }
+  $performance=Get-Content -Raw $performanceReceipt | ConvertFrom-Json
+  if ($performance.schema -ne "lite-performance-candidate-v1" -or
+      $performance.tag -ne "q8-vulkan-perf-opt-in" -or $performance.candidate_flavor -ne $CandidateFlavor -or $performance.exe_sha256 -ne $actualExe -or
+      $performance.baseline_quant -ne "Q8_0" -or $performance.baseline_backend -ne "Vulkan0" -or
+      $performance.default_ref_cache -ne $false -or $performance.default_maskgit_steps -ne 32 -or
+      $performance.graph_reuse -ne "GRAPH_REUSE_DEFERRED") {
+    throw "Performance candidate receipt is invalid"
+  }
+  foreach($check in @(
+    @("perf_patch_sha256","instrument-native-performance.py"),@("perf_header_sha256","lite-native-perf.h"),
+    @("cache_patch_sha256","instrument-ref-conditioning-cache.py"),@("cache_header_sha256","lite-reference-cache.h"),
+    @("maskgit_patch_sha256","instrument-maskgit-experiments.py"),@("maskgit_header_sha256","lite-maskgit-experiments.h"))) {
+    if($performance.($check[0]) -ne (Get-FileHash -Algorithm SHA256 (Join-Path $source ("scripts/internal/"+$check[1]))).Hash.ToLowerInvariant()) {throw "Performance candidate source receipt mismatch: $($check[0])"}
+  }
   & $pythonExe (Join-Path $source "scripts/internal/verify-persistent-handshake.py") $exe
   if ($LASTEXITCODE -ne 0) { throw "Persistent worker pre-activation handshake failed" }
   if ($BuildFeasibilityProbe -and !(Test-Path -LiteralPath (Join-Path $bin "lite-reuse-probe.exe") -PathType Leaf)) {
@@ -118,6 +136,7 @@ try {
 } finally {
   [Environment]::SetEnvironmentVariable("GGUF_LITE_BUILD_PYTHON",$previousBuildPython,"Process")
   [Environment]::SetEnvironmentVariable("OMNIVOICE_RESIDENCY_FEASIBILITY",$previousProbe,"Process")
+  [Environment]::SetEnvironmentVariable("GGUF_LITE_CANDIDATE_FLAVOR",$previousFlavor,"Process")
   Pop-Location
   if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 }

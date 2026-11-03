@@ -8,7 +8,8 @@ import hashlib,os,shutil,subprocess,sys,tempfile
 ROOT=Path(__file__).resolve().parents[2]
 PIN="886fc079838ca7400cb2b42b36e2a65aa1daabe8"
 SOURCES=["CMakeLists.txt","src/duration-estimator.h","src/omnivoice.h","src/omnivoice.cpp",
-         "src/pipeline-tts.cpp","src/pipeline-tts.h","src/backend.h","tools/omnivoice-tts.cpp"]
+         "src/pipeline-tts.cpp","src/pipeline-tts.h","src/pipeline-codec.cpp","src/maskgit-tts.h",
+         "src/backend.h","tools/omnivoice-tts.cpp"]
 def command(args,**kwargs):
     timeout=kwargs.pop("timeout",180)
     return subprocess.run([str(a) for a in args],check=True,timeout=timeout,**kwargs)
@@ -84,6 +85,23 @@ def main():
         denied=subprocess.run([sys.executable,ROOT/"scripts/internal/stage-residency-feasibility.py",upstream],
                               capture_output=True,text=True,timeout=30)
         assert denied.returncode!=0,"Double staging must fail closed"
+        perf=command([sys.executable,ROOT/"scripts/internal/instrument-native-performance.py",upstream],
+                     capture_output=True,text=True)
+        assert "LITE_NATIVE_PERF_STAGED" in perf.stdout
+        perf_files=[upstream/x for x in ("src/pipeline-tts.cpp","src/pipeline-codec.cpp","src/maskgit-tts.h","src/omnivoice.cpp","src/lite-native-perf.h")]
+        perf_hashes={str(x):hashlib.sha256(x.read_bytes()).hexdigest() for x in perf_files}
+        perf_again=subprocess.run([sys.executable,ROOT/"scripts/internal/instrument-native-performance.py",upstream],capture_output=True,text=True,timeout=60)
+        assert perf_again.returncode!=0 and perf_hashes=={str(x):hashlib.sha256(x.read_bytes()).hexdigest() for x in perf_files}
+        cache=command([sys.executable,ROOT/"scripts/internal/instrument-ref-conditioning-cache.py",upstream],
+                      capture_output=True,text=True)
+        assert "LITE_REFERENCE_CACHE_STAGED" in cache.stdout
+        cache_files=[upstream/x for x in ("src/pipeline-tts.cpp","src/pipeline-tts.h","src/lite-reference-cache.h")]
+        cache_hashes={str(x):hashlib.sha256(x.read_bytes()).hexdigest() for x in cache_files}
+        cache_again=subprocess.run([sys.executable,ROOT/"scripts/internal/instrument-ref-conditioning-cache.py",upstream],capture_output=True,text=True,timeout=60)
+        assert cache_again.returncode!=0 and cache_hashes=={str(x):hashlib.sha256(x.read_bytes()).hexdigest() for x in cache_files}
+        experiments=command([sys.executable,ROOT/"scripts/internal/instrument-maskgit-experiments.py",upstream],
+                            capture_output=True,text=True)
+        assert "GRAPH_REUSE_DEFERRED" in experiments.stdout
         persistent=command([sys.executable,ROOT/"scripts/internal/stage-persistent-worker.py",upstream],
                            capture_output=True,text=True)
         assert "LITE_PERSISTENT_WORKER_STAGED" in persistent.stdout
@@ -107,6 +125,10 @@ def main():
         command([compiler,"-std=c++17","-O0","-I",upstream/"src",
                  ROOT/"scripts/internal/native-speed-ci.cpp","-o",exe])
         command([exe])
+        perf_exe=work/("performance-check.exe" if os.name=="nt" else "performance-check")
+        command([compiler,"-std=c++17","-O0","-I",upstream/"src",
+                 ROOT/"scripts/internal/native-performance-ci.cpp","-o",perf_exe])
+        command([perf_exe])
         # Compile real upstream-patched initializer body with the original
         # (saved) ABI-v2 caller, and a new-header translation unit. The
         # initializer is extracted from the actual C++ file, not rewritten.
@@ -147,6 +169,7 @@ int main() { assert(OV_ABI_VERSION==2); assert(legacy_v2_compatible()==(int)size
         command([abi_exe])
         print("PINNED_NATIVE_ABI_V2_GUARDED_INITIALIZER_PASS",PIN)
         print("PINNED_NATIVE_SPEED_PATCH_AND_COMPILED_ESTIMATOR_PASS",PIN)
+        print("PINNED_NATIVE_PERFORMANCE_CACHE_FIXTURE_PASS",PIN)
         if link_worker:
             build=work/"real-linked-worker"
             command(["cmake","-S",upstream,"-B",build,"-DCMAKE_BUILD_TYPE=Release",
@@ -166,7 +189,7 @@ int main() { assert(OV_ABI_VERSION==2); assert(legacy_v2_compatible()==(int)size
             assert "LitePersistent/v1" in help_text and "LiteNativeSpeed/v1" in help_text
             handshake=command([sys.executable,ROOT/"scripts/internal/verify-persistent-handshake.py",linked],
                               capture_output=True,text=True)
-            assert "PERSISTENT_HANDSHAKE_PASS" in handshake.stdout
+            assert "HANDSHAKE_AND_PERF_PASS" in handshake.stdout
             print("PINNED_REAL_OMNIVOICE_TARGET_LINK_AND_HANDSHAKE_PASS_CPU_NO_MODEL",PIN)
         print("PINNED_SOURCE_HASHES",before)
 if __name__=="__main__":

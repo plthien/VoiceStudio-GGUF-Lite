@@ -15,11 +15,17 @@ required=("LICENSE","LICENSE-NOTICE.md","README.md","lite/resources/q8_pins.json
           "scripts/internal/omnivoice-vulkan.sh","scripts/internal/instrument-attestation.py",
           "scripts/internal/instrument-native-speed.py","scripts/internal/lite-native-speed.h",
           "scripts/internal/native-speed-ci.cpp","scripts/internal/verify-native-speed.py",
+          "scripts/internal/native-performance-ci.cpp",
           "scripts/internal/stage-persistent-worker.py","scripts/internal/lite-persistent-worker.cpp",
+          "scripts/internal/instrument-native-performance.py","scripts/internal/lite-native-perf.h",
+          "scripts/internal/instrument-ref-conditioning-cache.py","scripts/internal/lite-reference-cache.h",
+          "scripts/internal/instrument-maskgit-experiments.py","scripts/internal/lite-maskgit-experiments.h",
           "scripts/internal/verify-persistent-handshake.py","lite/resident_worker.py","lite/worker_settings.py",
           "scripts/switch-gguf-lite-runtime.ps1","scripts/internal/speed-help-process.ps1","lite/speed.py",
           "scripts/build-gguf-lite-vulkan.ps1","scripts/benchmark-gguf-lite.ps1",
           "scripts/benchmark-persistent-worker.ps1",
+          "scripts/benchmark-longform-tts.ps1","scripts/verify-performance-candidate.ps1",
+          "lite/longform_benchmark.py","lite/performance_metrics.py","docs/gguf-lite-performance.md",
           "lite/ui/index.html","lite/ui/assets/app.css","lite/ui/assets/app.js",
           "lite/ui/assets/api.js","lite/ui_routes.py","lite/ui_support.py")
 for name in required:

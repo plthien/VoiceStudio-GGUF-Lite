@@ -136,6 +136,12 @@ def make_bin(folder:Path, speed:bool, compiler=None):
            "patch_sha256":sha(ROOT/"scripts/internal/stage-persistent-worker.py"),
            "source_sha256":sha(ROOT/"scripts/internal/lite-persistent-worker.cpp")
         }))
+        (folder/"performance-candidate.json").write_text(json.dumps({
+           "schema":"lite-performance-candidate-v1","tag":"q8-vulkan-perf-opt-in",
+           "candidate_flavor":"profiled","exe_sha256":sha(files[0]),
+           "baseline_quant":"Q8_0","baseline_backend":"Vulkan0","default_ref_cache":False,
+           "default_maskgit_steps":32,"graph_reuse":"GRAPH_REUSE_DEFERRED"
+        }))
     return files
 
 @pytest.fixture

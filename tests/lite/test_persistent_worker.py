@@ -48,6 +48,7 @@ while True:
   if text.startswith(b'DELAY250'): time.sleep(.25)
   if text.startswith(b'DELAY400'): time.sleep(.4)
   if text==b'LATEHEADER': time.sleep(1)
+  print('[MaskGIT] summary steps=32',file=sys.stderr,flush=True)
   synth+=1;value=(sum(text)+seed+sum(pcm[:20]))%30000
   raw=struct.pack('<h',value)*2400
   body=struct.pack('<QIIII',ctx,init,synth,24000,2400)+raw
@@ -58,6 +59,9 @@ while True:
   else: send(103,s,body)
  elif c==4: send(104,s)
  elif c==5: send(104,s);break
+ elif c==6:
+  body=b'LitePerf/v1'+struct.pack('<III16QIII',1,152,0,5000,20,10,5,60,40,30,5,200,30,1,1,1,2400,9600,1,32,1,1)
+  send(105,s,body)
  else: send(255,s)
 '''
 
@@ -70,7 +74,7 @@ def make_wav(path: Path, value=2):
 def persistent(tmp_path,monkeypatch):
     bin_dir=tmp_path/"bin";bin_dir.mkdir();fake=bin_dir/"fake.py";fake.write_text(FAKE)
     settings=Settings(tmp_path,tmp_path,bin_dir,2)
-    monkeypatch.setattr("lite.resident_worker.persistent_capability",lambda _: {"supported":True})
+    monkeypatch.setattr("lite.resident_worker.persistent_capability",lambda _: {"supported":True,"performance_protocol":True})
     monkeypatch.setattr("lite.resident_worker.preflight",lambda _: {"ready":True,"gpu":{"name":"NVIDIA GeForce GTX 1650","vendor_id":"0x10de"}})
     monkeypatch.setattr("lite.resident_worker.native_files",lambda _: (fake,bin_dir/"ggml-vulkan.dll"))
     (tmp_path/"base.gguf").write_bytes(b"base")
@@ -103,6 +107,22 @@ def test_two_requests_and_three_spans_reuse_real_process_context(persistent):
             raw=wav.readframes(wav.getnframes())
         assert raw[2400*2:(2400+19200)*2]==b'\0'*(19200*2)
         await worker.stop();assert worker.process is None and worker.state=="UNLOADED"
+    asyncio.run(run())
+
+def test_optional_performance_query_and_150_warm_requests(persistent,monkeypatch):
+    worker,p=persistent
+    worker._perf_enabled=True
+    async def run():
+        for index in range(150):
+            _,info=await worker.generate(text=f"bounded-{index}",**{**p,"request_id":str(index)})
+        assert worker.cold_load_count==1 and worker.synthesis_count==150 and worker.reuse_count==149
+        assert worker.last_performance["schema"]=="LitePerf/v1"
+        assert worker.last_performance["native_total_us"]==200
+        assert worker.last_performance["reference_cache_hits"]==1
+        assert worker.last_performance["maskgit_steps"]==32
+        assert len(b'[MaskGIT-Step] 32/32 demask=100 remaining=0\n')*32*150>131072
+        assert len(worker._stderr)<131072
+        await worker.stop()
     asyncio.run(run())
 
 def test_a_b_a_seed_and_reference_are_request_scoped(persistent,tmp_path):
@@ -516,6 +536,17 @@ def test_capability_receipt_binds_exe_pin_and_patch_sources(tmp_path,monkeypatch
              "patch_sha256":sha(ROOT/"scripts/internal/stage-persistent-worker.py"),
              "source_sha256":sha(ROOT/"scripts/internal/lite-persistent-worker.cpp")}
     path=bin_dir/"persistent-capability.json";path.write_text(json.dumps(receipt))
+    sources={"perf_patch_sha256":"instrument-native-performance.py","perf_header_sha256":"lite-native-perf.h",
+             "cache_patch_sha256":"instrument-ref-conditioning-cache.py","cache_header_sha256":"lite-reference-cache.h",
+             "maskgit_patch_sha256":"instrument-maskgit-experiments.py","maskgit_header_sha256":"lite-maskgit-experiments.h"}
+    candidate={"schema":"lite-performance-candidate-v1","tag":"q8-vulkan-perf-opt-in","candidate_flavor":"profiled","exe_sha256":sha(exe),
+               "baseline_quant":"Q8_0","baseline_backend":"Vulkan0","default_ref_cache":False,
+               "default_maskgit_steps":32,"graph_reuse":"GRAPH_REUSE_DEFERRED",
+               **{field:sha(ROOT/"scripts/internal"/name) for field,name in sources.items()}}
+    (bin_dir/"performance-candidate.json").write_text(json.dumps(candidate))
     module._CAPABILITY_CACHE.clear();assert module.persistent_capability(settings)["supported"] is True
+    (bin_dir/"performance-candidate.json").write_text(json.dumps({**candidate,"cache_patch_sha256":"0"*64}))
+    module._CAPABILITY_CACHE.clear();assert module.persistent_capability(settings)["supported"] is False
+    (bin_dir/"performance-candidate.json").write_text(json.dumps(candidate))
     path.write_text(json.dumps({**receipt,"source_sha256":"0"*64}))
     module._CAPABILITY_CACHE.clear();assert module.persistent_capability(settings)["supported"] is False

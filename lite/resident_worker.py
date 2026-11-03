@@ -21,15 +21,21 @@ from .pause import SpeechPart
 from .pause_audio import assemble_pause_wav
 from .runtime import model_pair, native_env, native_files, preflight, RuntimeErrorLite
 from .speed import speed_to_native
+from .performance_metrics import parse_performance
 
 MAGIC = 0x3150544C  # LTP1, little endian
 VERSION = 1
 HEADER = struct.Struct("<IHHII")
 MAX_CONTROL = 64 * 1024
 MAX_RESULT = 100 * 1024 * 1024
-HELLO, LOAD, SYNTH, UNLOAD, SHUTDOWN = 1, 2, 3, 4, 5
-CAPABILITY, READY, RESULT, OK, ERROR = 101, 102, 103, 104, 255
+HELLO, LOAD, SYNTH, UNLOAD, SHUTDOWN, GET_PERF = 1, 2, 3, 4, 5, 6
+CAPABILITY, READY, RESULT, OK, PERF, ERROR = 101, 102, 103, 104, 105, 255
 CAPABILITY_MARKER = b"LitePersistent/v1"
+TRUSTED_BASELINE_WORKER_SOURCES = {
+    # Exact pre-performance worker source blobs (LF and Windows CRLF checkout).
+    "22d56ecf993033e79f57d1daa59ecfa7c2ef11fd7d03b88232199e1ead067290",
+    "9985f49c8650661e70e6e5ce4057b50e0ed63fc03a7c39cce21a958fe7f18e70",
+}
 _CAPABILITY_CACHE: dict[tuple, dict] = {}
 
 
@@ -51,6 +57,14 @@ def persistent_capability(settings: Settings) -> dict:
              settings.bin_dir/"checksums.sha256",
              ROOT/"scripts/internal/stage-persistent-worker.py",
              ROOT/"scripts/internal/lite-persistent-worker.cpp")
+    performance_receipt=settings.bin_dir/"performance-candidate.json"
+    if performance_receipt.exists():
+        watched += (performance_receipt, ROOT/"scripts/internal/instrument-native-performance.py",
+                    ROOT/"scripts/internal/lite-native-perf.h",
+                    ROOT/"scripts/internal/instrument-ref-conditioning-cache.py",
+                    ROOT/"scripts/internal/lite-reference-cache.h",
+                    ROOT/"scripts/internal/instrument-maskgit-experiments.py",
+                    ROOT/"scripts/internal/lite-maskgit-experiments.h")
     try:
         signature=tuple((str(path),path.stat().st_mtime_ns,path.stat().st_size) for path in watched)
         key=(str(settings.bin_dir),signature)
@@ -67,11 +81,33 @@ def persistent_capability(settings: Settings) -> dict:
                 info.get("runtime_revision") != RUNTIME_REVISION or
                 info.get("exe_sha256") != digest or
                 info.get("patch_sha256") != patch_digest or
-                info.get("source_sha256") != source_digest):
+                info.get("source_sha256") not in ({source_digest} | TRUSTED_BASELINE_WORKER_SOURCES)):
             raise ValueError("receipt mismatch")
+        performance_protocol = info.get("source_sha256") == source_digest
+        if performance_protocol:
+            candidate=json.loads((settings.bin_dir/"performance-candidate.json").read_text(encoding="utf-8"))
+            sources={
+                "perf_patch_sha256": "instrument-native-performance.py",
+                "perf_header_sha256": "lite-native-perf.h",
+                "cache_patch_sha256": "instrument-ref-conditioning-cache.py",
+                "cache_header_sha256": "lite-reference-cache.h",
+                "maskgit_patch_sha256": "instrument-maskgit-experiments.py",
+                "maskgit_header_sha256": "lite-maskgit-experiments.h",
+            }
+            if (candidate.get("schema")!="lite-performance-candidate-v1" or
+                    candidate.get("tag")!="q8-vulkan-perf-opt-in" or
+                    candidate.get("candidate_flavor") not in {"profiled","ref-cache","steps-32","steps-24","steps-16","steps-12","steps-8","fa-off"} or
+                    candidate.get("exe_sha256")!=digest or candidate.get("baseline_quant")!="Q8_0" or
+                    candidate.get("baseline_backend")!="Vulkan0" or candidate.get("default_ref_cache") is not False or
+                    candidate.get("default_maskgit_steps")!=32 or candidate.get("graph_reuse")!="GRAPH_REUSE_DEFERRED"):
+                raise ValueError("performance receipt mismatch")
+            for field,name in sources.items():
+                if candidate.get(field)!=hashlib.sha256((ROOT/"scripts/internal"/name).read_bytes()).hexdigest():
+                    raise ValueError("performance source mismatch")
         result={"supported": True, "marker": "LitePersistent/v1",
                 "protocol_version": 1, "exe_sha256": digest,
-                "runtime_revision": info.get("runtime_revision")}
+                "runtime_revision": info.get("runtime_revision"),
+                "performance_protocol": performance_protocol}
         _CAPABILITY_CACHE.clear();_CAPABILITY_CACHE[key]=result
         return dict(result)
     except (OSError, ValueError, TypeError, json.JSONDecodeError, RuntimeErrorLite) as exc:
@@ -108,6 +144,9 @@ class ResidentWorkerSupervisor:
         self._idle_token = 0
         self._verified_models: tuple[Path, Path] | None = None
         self._model_file_identity: tuple | None = None
+        self._perf_enabled = os.environ.get("GGUF_LITE_PERF", "0") == "1"
+        self._perf_supported = False
+        self.last_performance: dict | None = None
 
     async def _await_deadline(self, awaitable, deadline: float):
         try:
@@ -135,7 +174,8 @@ class ResidentWorkerSupervisor:
                 "cold_load_count": self.cold_load_count, "synthesis_count": self.synthesis_count,
                 "reuse_count": self.reuse_count, "idle_remaining_seconds": remaining,
                 "busy": busy, "last_error": self.last_error,
-                "vram_status": "OWNER TEST PENDING"}
+                "vram_status": "OWNER TEST PENDING",
+                "performance": self.last_performance if self._perf_enabled else None}
 
     async def _drain_stderr(self, proc):
         try:
@@ -197,6 +237,7 @@ class ResidentWorkerSupervisor:
             asyncio.to_thread(persistent_capability, self.settings), deadline)
         if not cap["supported"]:
             raise RuntimeErrorLite("PERSISTENT_WORKER_UNAVAILABLE")
+        self._perf_supported = bool(cap.get("performance_protocol"))
         state = await self._await_deadline(asyncio.to_thread(preflight, self.settings), deadline)
         if not state["ready"]:
             raise RuntimeErrorLite("Runtime is not ready")
@@ -264,6 +305,7 @@ class ResidentWorkerSupervisor:
         self.context_identity = None
         self._verified_models = None
         self._model_file_identity = None
+        self.last_performance = None
         self._cancel_idle()
         if proc:
             await self._terminate(proc)
@@ -380,6 +422,14 @@ class ResidentWorkerSupervisor:
             self.reuse_count += 1
         self.synthesis_count += 1
         self._native_synthesis_count += 1
+        if self._perf_enabled and self._perf_supported:
+            perf_reply, perf_body = await self._frame(GET_PERF, deadline=deadline, limit=MAX_CONTROL)
+            if perf_reply != PERF:
+                raise NativeFailure("Persistent worker performance reply invalid")
+            try:
+                self.last_performance = parse_performance(perf_body)
+            except ValueError as exc:
+                raise NativeFailure("Persistent worker performance payload invalid") from exc
         out = io.BytesIO()
         with wave.open(out, "wb") as target:
             target.setnchannels(1); target.setsampwidth(2); target.setframerate(24000); target.writeframes(raw)
