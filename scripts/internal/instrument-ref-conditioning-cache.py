@@ -58,19 +58,9 @@ struct PipelineTTS {''')
 
 static const RefEncoded & prepare_or_reuse_ref(PipelineTTS *pt, PipelineCodec *pc,
         const float *pcm, int samples, const std::string &text, bool preprocess, const char *dump_dir) {
-    LiteRefCacheSlot &slot=pt->lite_ref_cache;
-    if (pcm && (samples>60*24000 || (samples>0 && !lite_pcm_valid(pcm,samples)))) { slot.prepared={}; slot.valid=false; return slot.prepared; }
-    if (pt->lite_ref_cache_enabled && slot.valid && slot.preprocess==preprocess &&
-        slot.input_text==text && lite_pcm_equal(slot.source_pcm,pcm,samples)) {
-        lite_perf_state().cache_hits++; lite_perf_state().ref_cache_hit=1; return slot.prepared;
-    }
-    if (pt->lite_ref_cache_enabled && pcm && samples>0) lite_perf_state().cache_misses++;
-    slot.prepared=tts_encode_ref(pt,pc,pcm,samples,text,preprocess,dump_dir);
-    slot.valid=false;
-    if (pt->lite_ref_cache_enabled && pcm && samples>0 && !slot.prepared.ref_codes.empty()) {
-        slot.source_pcm.assign(pcm,pcm+samples); slot.input_text=text; slot.preprocess=preprocess; slot.valid=true;
-    } else { slot.source_pcm.clear(); slot.input_text.clear(); }
-    return slot.prepared;
+    return lite_prepare_or_reuse_ref(
+        pt->lite_ref_cache, pt->lite_ref_cache_enabled, pcm, samples, text, preprocess,
+        [&]() { return tts_encode_ref(pt, pc, pcm, samples, text, preprocess, dump_dir); });
 }
 
 ov_status pipeline_tts_synthesize''')
