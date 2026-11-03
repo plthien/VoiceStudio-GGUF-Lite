@@ -266,11 +266,17 @@ class TurboService:
                     except asyncio.TimeoutError as exc:
                         raise TurboError("DEADLINE_EXCEEDED") from exc
                     if speed != 1.0:
-                        raw = await asyncio.wait_for(
-                            stretch_speech_async(raw, speed,
-                                deadline - time.monotonic(), self.settings.max_output_bytes,
-                                self.settings.cache_dir / "tmp"),
-                            max(0.001, deadline - time.monotonic()))
+                        left=deadline-time.monotonic()
+                        if left<=0: raise TurboError("DEADLINE_EXCEEDED")
+                        try:
+                            raw=await asyncio.wait_for(
+                                stretch_speech_async(raw,speed,left,self.settings.max_output_bytes,
+                                                     self.settings.cache_dir/"tmp"),left)
+                        except (asyncio.TimeoutError,AudioError) as exc:
+                            if (isinstance(exc,asyncio.TimeoutError) or
+                                str(exc)=="ATEMPO_TIMEOUT" or time.monotonic()>=deadline):
+                                raise TurboError("DEADLINE_EXCEEDED") from exc
+                            raise
                     speech_wavs.append(raw)
                     if isinstance(answer.get("memory"), dict):
                         last_memory = answer["memory"]

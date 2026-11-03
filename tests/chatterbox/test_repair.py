@@ -379,3 +379,17 @@ def test_bad_content_length(api):
     r=c.post("/v1/audio/speech",data=b"{}",headers={
         "content-type":"application/json","content-length":"invalid-length"})
     assert r.status_code==400 and r.json()["error"]["code"]=="BAD_LENGTH"
+
+
+def test_atempo_timeout_is_typed_and_reaps_no_partial_wav(api,monkeypatch):
+    import lite.chatterbox_service as mod
+    client,service,_=api
+    voice=profile(client)["id"]
+    async def expires(*args,**kwargs):
+        raise asyncio.TimeoutError()
+    monkeypatch.setattr(mod,"stretch_speech_async",expires)
+    result=gen(client,voice,"Speech segment.",speed=1.15)
+    assert result.status_code==504
+    assert result.json()["error"]["code"]=="DEADLINE_EXCEEDED"
+    assert not result.content.startswith(b"RIFF")
+    assert service.state=="ERROR"
