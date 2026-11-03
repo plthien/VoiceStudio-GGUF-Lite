@@ -5,6 +5,8 @@ import csv
 import io
 import json
 import os
+import secrets
+from datetime import datetime, timezone
 import tempfile
 import time
 import urllib.request
@@ -58,17 +60,23 @@ def evaluate_h07(audio_s, wall_s, cold_start_included=True):
             "cold_start_included":cold_start_included}
 
 
-def save_reports(folder,records):
-    """Always refresh both reports, including early error or SLA miss."""
-    atomic(folder/"owner-metrics.json",json.dumps(records,indent=2).encode())
-    fields=["case","state","generation_state","h07_status","h07_reason",
+def save_reports(folder,records,run_dir=None):
+    """Latest pointer plus private per-run archive, each atomically written."""
+    payload=json.dumps(records,indent=2).encode()
+    atomic(folder/"owner-metrics.json",payload)
+    if run_dir is not None:
+        atomic(run_dir/"owner-metrics.json",payload)
+    fields=["case","run_id","run_directory","state","generation_state","h07_status","h07_reason",
             "cold_start_included","wall_s","audio_s","end_to_end_rtf","rtf",
             "voice_version","model_revision","speech_s","pause_s","backend",
             "cuda_allocated_bytes","cuda_peak_bytes","cuda_free_bytes","error"]
     out=io.StringIO()
     writer=csv.DictWriter(out,fieldnames=fields,extrasaction="ignore")
     writer.writeheader();writer.writerows(records)
-    atomic(folder/"owner-metrics.csv",out.getvalue().encode("utf-8"))
+    csv_bytes=out.getvalue().encode("utf-8")
+    atomic(folder/"owner-metrics.csv",csv_bytes)
+    if run_dir is not None:
+        atomic(run_dir/"owner-metrics.csv",csv_bytes)
 
 
 def main():
@@ -94,6 +102,10 @@ def main():
 
 def run_benchmark_locked(a,folder):
     records=[]
+    run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"-"+secrets.token_hex(10)
+    run_dir=folder/"runs"/run_id
+    run_dir.mkdir(parents=True,exist_ok=False)
+    print("RUN",run_id,"ARTIFACTS",str(run_dir),flush=True)
     try:
         # F02: no runtime request (including an All-mode smoke) before voice match.
         if a.mode in ("LongForm","All"):
@@ -120,10 +132,11 @@ def run_benchmark_locked(a,folder):
                     records.append({"case":name,"state":"FAIL","generation_state":"FAIL",
                                     "error":"COLD_UNLOAD_FAILED"})
                     failed=True;break
-            row=run_case(name,text,a.voice_id,a.base,a.output)
+            row=run_case(name,text,a.voice_id,a.base,run_dir)
             row["generation_state"]=row["state"]
+            row["run_id"]=run_id
             records.append(row)
-            save_reports(folder,records)
+            save_reports(folder,records,run_dir)
             if row["state"]!="PASS":
                 failed=True;break
         if not failed and a.mode in ("LongForm","All"):
@@ -136,8 +149,8 @@ def run_benchmark_locked(a,folder):
             else:
                 started=time.monotonic()
                 try:
-                    result=do_job(a.manifest,folder/"longform",a.base,resume=False,
-                                  report=folder/"sections.json",expected_voice=a.voice_id)
+                    result=do_job(a.manifest,run_dir/"longform",a.base,resume=False,
+                                  report=run_dir/"sections.json",expected_voice=a.voice_id)
                     elapsed=time.monotonic()-started
                     assessment=evaluate_h07(result["audio_s"],elapsed,True)
                     records.append({"case":"longform","state":"PASS","generation_state":"PASS",
@@ -157,7 +170,10 @@ def run_benchmark_locked(a,folder):
                         "state":"FAIL","generation_state":"FAIL","h07_status":"NOT_VERIFIED",
                         "h07_reason":code,"error":code})
     finally:
-        save_reports(folder,records)
+        for row in records:
+            row["run_id"]=run_id
+            row["run_directory"]="runs/"+run_id
+        save_reports(folder,records,run_dir)
         print("RESULTS",str(folder/"owner-metrics.json"),flush=True)
     return 0 if records and all(r.get("state")=="PASS" and
             (r.get("h07_status")=="PASS" if r.get("case")=="longform" else True)
