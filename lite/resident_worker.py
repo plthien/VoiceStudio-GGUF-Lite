@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import signal
 import secrets
 import struct
@@ -37,6 +38,19 @@ TRUSTED_BASELINE_WORKER_SOURCES = {
     "9985f49c8650661e70e6e5ce4057b50e0ed63fc03a7c39cce21a958fe7f18e70",
 }
 _CAPABILITY_CACHE: dict[tuple, dict] = {}
+_CONTROLS = re.compile(rb"^\\[LiteControls/v1\\] maskgit_steps=(32|24|16|12|8) flash_attention=([01]) ref_cache_enabled=([01])$",re.M)
+
+
+def native_control_attestation(stderr: bytes) -> dict:
+    """Require exactly one numeric native configuration proof, with no private data."""
+    matches = list(_CONTROLS.finditer(stderr))
+    if len(matches) != 1:
+        raise NativeFailure("Persistent worker native controls proof missing or duplicated")
+    match = matches[0]
+    return {"maskgit_steps": int(match[1]),
+            "flash_attention": int(match[2]),
+            "ref_cache_enabled": bool(int(match[3]))}
+
 
 
 def remaining(deadline: float) -> float:
@@ -146,6 +160,7 @@ class ResidentWorkerSupervisor:
         self._model_file_identity: tuple | None = None
         self._perf_enabled = os.environ.get("GGUF_LITE_PERF", "0") == "1"
         self._perf_supported = False
+        self._native_controls: dict | None = None
         self.last_performance: dict | None = None
         self._last_native_perf: dict | None = None
 
@@ -177,7 +192,8 @@ class ResidentWorkerSupervisor:
                 "busy": busy, "last_error": self.last_error,
                 "vram_status": "OWNER TEST PENDING",
                 "performance": self.last_performance if self._perf_enabled else None,
-                 "native_proof": getattr(self, "_proof", None) if self.state in {"READY", "GENERATING"} else None}
+                 "native_proof": getattr(self, "_proof", None) if self.state in {"READY", "GENERATING"} else None,
+                 "native_controls": self._native_controls if self.state in {"READY", "GENERATING"} else None}
 
     async def _drain_stderr(self, proc):
         try:
@@ -277,6 +293,16 @@ class ResidentWorkerSupervisor:
                     await self._await_deadline(asyncio.sleep(.01), deadline)
             else:
                 raise NativeFailure("Loaded worker native proof missing")
+            controls = None
+            if self._perf_supported:
+                for _ in range(100):
+                    try:
+                        controls = native_control_attestation(bytes(self._stderr))
+                        break
+                    except NativeFailure:
+                        await self._await_deadline(asyncio.sleep(.01), deadline)
+                else:
+                    raise NativeFailure("Native effective settings proof missing")
             if native_init != 1 or native_synth != 0 or not context:
                 raise NativeFailure("Persistent worker context counters invalid")
             # Close the verify-to-load race: the paths sent to ov_init must
@@ -296,6 +322,7 @@ class ResidentWorkerSupervisor:
             self.generation += 1
             self.cold_load_count += 1
             self._proof = proof
+            self._native_controls = controls
             self.state = "READY"
         except BaseException as exc:
             await self._fault(exc)
@@ -311,6 +338,7 @@ class ResidentWorkerSupervisor:
         self._model_file_identity = None
         self.last_performance = None
         self._last_native_perf = None
+        self._native_controls = None
         self._cancel_idle()
         if proc:
             await self._terminate(proc)
@@ -518,7 +546,8 @@ class ResidentWorkerSupervisor:
         if not proc:
             self.state = "UNLOADED"; self.context_identity = None
             self._verified_models = None; self._model_file_identity = None
-            self._last_native_perf = None; self.last_performance = None; return
+            self._last_native_perf = None; self.last_performance = None
+            self._native_controls = None; return
         self.state = "UNLOADING"
         cleanup_deadline = time.monotonic() + 10
         try:
@@ -540,6 +569,7 @@ class ResidentWorkerSupervisor:
             self.process = None; self.context_identity = None; self.state = "UNLOADED"
             self._verified_models = None; self._model_file_identity = None
             self._last_native_perf = None; self.last_performance = None
+            self._native_controls = None
 
     async def unload_now(self):
         if self.lock.locked(): raise NativeBusy("Worker is busy")

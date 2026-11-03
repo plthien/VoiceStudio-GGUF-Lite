@@ -53,14 +53,21 @@ def binding_snapshot(settings: Settings, worker_status: dict) -> dict:
     ).hexdigest()
     perf = worker_status.get("performance")
     proof = worker_status.get("native_proof") or {}
-    verified = bool(
-        isinstance(perf, dict)
-        and perf.get("maskgit_steps") == steps
-        and perf.get("flash_attention") == fa
+    controls = worker_status.get("native_controls")
+    control_verified = bool(
+        isinstance(controls, dict)
+        and controls.get("maskgit_steps") == steps
+        and controls.get("flash_attention") == fa
+        and controls.get("ref_cache_enabled") == (cache_raw == "1")
         and proof.get("verification_status") == "verified"
         and proof.get("observed_native_backend") == "Vulkan0"
         and "GTX 1650" in str(proof.get("observed_device_identity"))
         and cap.get("performance_protocol")
+    )
+    verified = bool(
+        control_verified and isinstance(perf, dict)
+        and perf.get("maskgit_steps") == steps
+        and perf.get("flash_attention") == fa
     )
     # Existing LitePerf/v1 does not explicitly attest cache enablement: keep
     # that limitation visible rather than presenting startup env as observation.
@@ -74,6 +81,6 @@ def binding_snapshot(settings: Settings, worker_status: dict) -> dict:
         "maskgit_steps": steps, "flash_attention": fa,
         "ref_cache_enabled": cache_raw == "1",
         "settings_verification": "observed" if verified else "not_yet_verified",
-        "cache_verification": "declared_only",
+        "cache_verification": "native_observed" if control_verified else "not_yet_verified",
         "server_timeout_s": settings.timeout,
     }

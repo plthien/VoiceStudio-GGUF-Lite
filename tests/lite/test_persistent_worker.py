@@ -38,6 +38,7 @@ while True:
   time.sleep(float(os.getenv('LITE_FAKE_LOAD_DELAY','0')))
   init+=1
   print('[LiteAttest/v1] backend=Vulkan0; device=Vulkan0; description=NVIDIA GeForce GTX 1650',file=sys.stderr,flush=True)
+  print('[LiteControls/v1] maskgit_steps=32 flash_attention=1 ref_cache_enabled=0',file=sys.stderr,flush=True)
   send(102,s,struct.pack('<QII',ctx,init,synth))
   time.sleep(float(os.getenv('LITE_FAKE_BEFORE_SYNTH_READ','0')))
  elif c==3:
@@ -586,4 +587,27 @@ def test_fake_native_zero_two_ten_pause_spans_aggregate_all_syntheses(persistent
             assert perf["ref_cache_hit_count"] == (0 if pauses == 0 else pauses + 1)
             assert info["pause_count"] == pauses
         await worker.stop()
+    asyncio.run(run())
+
+
+def test_native_controls_proof_requires_one_valid_numeric_attestation():
+    from lite.resident_worker import native_control_attestation
+    proof=b"[LiteControls/v1] maskgit_steps=16 flash_attention=0 ref_cache_enabled=1"
+    assert native_control_attestation(proof)=={
+        "maskgit_steps":16,"flash_attention":0,"ref_cache_enabled":True}
+    with pytest.raises(NativeFailure):
+        native_control_attestation(b"[LiteControls/v1] invalid")
+    with pytest.raises(NativeFailure):
+        native_control_attestation(proof+b"\n"+proof)
+
+
+def test_fake_persistent_worker_reports_effective_controls(persistent):
+    worker,p=persistent
+    async def run():
+        await worker.generate(text="hello",**p)
+        status=worker.status()
+        assert status["native_controls"]=={
+            "maskgit_steps":32,"flash_attention":1,"ref_cache_enabled":False}
+        await worker.stop()
+        assert worker.status()["native_controls"] is None
     asyncio.run(run())

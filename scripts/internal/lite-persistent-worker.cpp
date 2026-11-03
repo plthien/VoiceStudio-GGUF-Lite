@@ -49,7 +49,7 @@ static int run(){
 #if defined(_WIN32)
     _setmode(_fileno(stdin),_O_BINARY);_setmode(_fileno(stdout),_O_BINARY);
 #endif
-    int maskgit_steps=32;bool flash_attention=true,profile_enabled=false;
+    int maskgit_steps=32;bool flash_attention=true,profile_enabled=false,ref_cache_enabled=false;
     try {
         maskgit_steps=lite_maskgit_steps();flash_attention=lite_flash_attention();
         const char*perf=std::getenv("GGUF_LITE_PERF");
@@ -57,6 +57,7 @@ static int run(){
         profile_enabled=perf&&std::strcmp(perf,"1")==0;
         const char*cache=std::getenv("GGUF_LITE_EXPERIMENT_REF_CACHE");
         if(cache&&std::strcmp(cache,"0")!=0&&std::strcmp(cache,"1")!=0)return 2;
+        ref_cache_enabled=cache&&std::strcmp(cache,"1")==0;
     } catch(const std::exception&){return 2;}
     ov_context*ctx=nullptr;uint32_t init_count=0,synth_count=0;bool ever_loaded=false;
     for(;;){
@@ -74,6 +75,11 @@ static int run(){
             }
             ov_init_params ip;ov_init_default_params(&ip);ip.model_path=model.c_str();ip.codec_path=codec.c_str();ip.use_fa=flash_attention;
             ctx=ov_init(&ip);if(!ctx){if(!write_frame(ERROR,h.sequence))break;continue;}
+            // This is a native-owned effective configuration proof emitted
+            // after successful context load, not a declaration from Python.
+            std::fprintf(stderr,"[LiteControls/v1] maskgit_steps=%d flash_attention=%d ref_cache_enabled=%d\\n",
+                         maskgit_steps,int(flash_attention),int(ref_cache_enabled));
+            std::fflush(stderr);
             ever_loaded=true;++init_count;std::vector<uint8_t>b;put64(b,uint64_t(reinterpret_cast<uintptr_t>(ctx)));put32(b,init_count);put32(b,synth_count);
             if(!write_frame(READY,h.sequence,b))break;
         }else if(h.command==SYNTH){

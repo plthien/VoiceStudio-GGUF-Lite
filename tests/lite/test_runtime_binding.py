@@ -19,7 +19,7 @@ def test_candidate_control_and_receipt_changes_bind_distinct_runs(tmp_path, monk
                           "exe_sha256": "a"*64})
     base=binding_snapshot(fake_settings(tmp_path), {})
     assert base["settings_verification"]=="not_yet_verified"
-    assert base["cache_verification"]=="declared_only"
+    assert base["cache_verification"]=="not_yet_verified"
     monkeypatch.setenv("GGUF_LITE_EXPERIMENT_MASKGIT_STEPS", "8")
     step=binding_snapshot(fake_settings(tmp_path), {})
     assert step["identity_sha256"]!=base["identity_sha256"]
@@ -54,7 +54,8 @@ def test_actual_perf_and_native_attestation_are_required(tmp_path, monkeypatch):
                           "exe_sha256": "a"*64})
     report={"performance":{"schema":"LitePerf/v1","maskgit_steps":32,"flash_attention":1},
             "native_proof":{"verification_status":"verified","observed_native_backend":"Vulkan0",
-                            "observed_device_identity":"NVIDIA GeForce GTX 1650"}}
+                            "observed_device_identity":"NVIDIA GeForce GTX 1650"},
+            "native_controls":{"maskgit_steps":32,"flash_attention":1,"ref_cache_enabled":False}}
     assert binding_snapshot(fake_settings(tmp_path),report)["settings_verification"]=="observed"
     report["performance"]["flash_attention"]=0
     assert binding_snapshot(fake_settings(tmp_path),report)["settings_verification"]=="not_yet_verified"
