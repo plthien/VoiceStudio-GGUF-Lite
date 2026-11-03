@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 
 from .audio import wav_info
-from .chatterbox_assembly import atomic, do_job, load_source
+from .chatterbox_assembly import atomic, do_job, load_source, output_job_lock
 
 
 def run_case(name, text, voice, base, output):
@@ -81,6 +81,18 @@ def main():
     a=p.parse_args()
     folder=a.output or Path(os.environ.get("CHATTERBOX_ROOT",r"D:\VoiceStudioBuild\chatterbox-turbo"))/"benchmarks"
     folder.mkdir(parents=True,exist_ok=True)
+    try:
+        with output_job_lock(folder):
+            return run_benchmark_locked(a,folder)
+    except RuntimeError as exc:
+        if str(exc)=="OUTPUT_JOB_BUSY":
+            # Never clobber a currently running owner's reports or unload its GPU.
+            print("FAIL OUTPUT_JOB_BUSY",flush=True)
+            return 1
+        raise
+
+
+def run_benchmark_locked(a,folder):
     records=[]
     try:
         # F02: no runtime request (including an All-mode smoke) before voice match.

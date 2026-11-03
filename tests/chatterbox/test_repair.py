@@ -523,3 +523,20 @@ def test_synthetic_pinned_manifest_requires_real_digests(tmp_path,monkeypatch):
     assert cfg.verify_model_files(settings)==(True,[])
     (settings.model_dir/"ve.safetensors").write_bytes(b"changed")
     assert cfg.verify_model_files(settings)==(False,["MODEL_HASH_MISMATCH"])
+
+
+def test_overlapping_benchmark_never_overwrites_owner_or_unloads(tmp_path,monkeypatch):
+    import lite.chatterbox_benchmark as bench
+    output=tmp_path/"benchmark"
+    manifest=tmp_path/"manifest.json"
+    manifest.write_text(json.dumps({"voice":"selected","sections":[{"id":"s1","input":"Hi"}]}))
+    monkeypatch.setattr(sys,"argv",["benchmark","--mode","LongForm","--voice-id","selected",
+                                   "--manifest",str(manifest),"--output",str(output)])
+    def illegal(*args,**kwargs):
+        pytest.fail("Busy benchmark must never contact runtime")
+    monkeypatch.setattr(bench.urllib.request,"urlopen",illegal)
+    with output_job_lock(output):
+        (output/"owner-metrics.json").write_text("OWNER_RUN_IN_PROGRESS")
+        assert bench.main()==1
+        assert (output/"owner-metrics.json").read_text()=="OWNER_RUN_IN_PROGRESS"
+        assert not (output/"owner-metrics.csv").exists()
