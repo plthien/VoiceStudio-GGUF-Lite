@@ -77,7 +77,7 @@ static int run(){
             ctx=ov_init(&ip);if(!ctx){if(!write_frame(ERROR,h.sequence))break;continue;}
             // This is a native-owned effective configuration proof emitted
             // after successful context load, not a declaration from Python.
-            std::fprintf(stderr,"[LiteControls/v1] maskgit_steps=%d flash_attention=%d ref_cache_enabled=%d\\n",
+            std::fprintf(stderr,"[LiteControls/v1] maskgit_steps=%d flash_attention=%d ref_cache_enabled=%d\n",
                          maskgit_steps,int(flash_attention),int(ref_cache_enabled));
             std::fflush(stderr);
             ever_loaded=true;++init_count;std::vector<uint8_t>b;put64(b,uint64_t(reinterpret_cast<uintptr_t>(ctx)));put32(b,init_count);put32(b,synth_count);
