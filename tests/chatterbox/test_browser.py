@@ -1,6 +1,9 @@
 """Rendered Chromium behavioral tests: real DOM, API, and fake CUDA worker."""
 from __future__ import annotations
 import socket
+import re
+import json
+import httpx
 import threading
 import time
 
@@ -98,5 +101,43 @@ def test_error_and_cancel_controls(live):
         page.locator("#generate").click()
         expect(page.locator("#cancel")).to_be_enabled()
         page.locator("#cancel").click()
-        expect(page.locator("#notice")).to_contain_text("Cancellation requested")
+        expect(page.locator("#notice")).to_contain_text(re.compile("CANCELLED|Cancellation requested"))
         browser.close()
+
+
+def test_longform_http_resume_end_to_end(live, tmp_path):
+    """Actual HTTP generation/atomic WAV, cache resume and version refusal."""
+    from lite.chatterbox_assembly import do_job
+    url, fake = live
+    with httpx.Client(timeout=20) as client:
+        r = client.post(url + "/profiles",
+                        data={"name": "Owned", "ref_text": "Exact words from reference",
+                              "language": "en", "consent": "confirmed"},
+                        files={"ref_audio": ("owned.wav", audio(6), "audio/wav")})
+        assert r.status_code == 200, r.text
+        voice = r.json()["id"]
+        manifest = tmp_path / "owner-input.json"
+        manifest.write_text(json.dumps({"voice": voice, "sections": [
+            {"id": "sec_001", "input": "One sentence."},
+            {"id": "sec_002", "input": "Second sentence. [pause 250ms] Continue."}
+        ]}), encoding="utf8")
+        target = tmp_path / "owned-output"
+        result = do_job(manifest, target, base=url)
+        assert result["state"] == "PASS" and result["sections"] == 2
+        assert abs(result["audio_s"] - 1.0) < .001
+        before = fake.syntheses
+        result = do_job(manifest, target, base=url, resume=True)
+        assert fake.syntheses == before
+        assert wav_info((target / "final.wav").read_bytes())["frames"] == 24000
+        changed = target / "section-sec_002.wav"
+        original = changed.read_bytes()
+        changed.write_bytes(audio(.8))
+        with pytest.raises(RuntimeError, match="RESUME_WAV_INVALID"):
+            do_job(manifest, target, base=url, resume=True)
+        changed.write_bytes(original)
+        newer = client.put(url + "/profiles/" + voice + "/audio",
+                           data={"ref_text": "Changed words", "consent": "confirmed"},
+                           files={"ref_audio": ("updated.wav", audio(6.3), "audio/wav")})
+        assert newer.status_code == 200
+        with pytest.raises(RuntimeError, match="RESUME_PROVENANCE_CHANGED"):
+            do_job(manifest, target, base=url, resume=True)

@@ -69,3 +69,43 @@ def concatenate(wavs: list[bytes], max_bytes: int = 100 * 1024 * 1024) -> bytes:
     data = out.getvalue()
     wav_info(data, max_bytes=max_bytes, max_seconds=600)
     return data
+
+
+async def stretch_speech_async(data: bytes, speed: float, deadline_seconds: float,
+                               max_bytes: int, temp_parent: Path) -> bytes:
+    """Async atempo with deterministic process kill/reap on cancel or timeout."""
+    import asyncio
+    if not math.isfinite(speed) or not 0.75 <= speed <= 1.25:
+        raise AudioError("INVALID_SPEED")
+    wav_info(data, max_bytes=max_bytes, max_seconds=600)
+    if speed == 1.0:
+        return data
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise AudioError("FFMPEG_UNAVAILABLE")
+    temp_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="chatterbox-atempo-", dir=temp_parent) as temp:
+        source, target = Path(temp) / "in.wav", Path(temp) / "out.wav"
+        source.write_bytes(data)
+        args = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(source), "-map", "0:a:0", "-vn",
+                "-filter:a", f"atempo={speed:.6f}", "-ar", "24000", "-ac", "1",
+                "-c:a", "pcm_s16le", "-f", "wav", str(target)]
+        proc = await asyncio.create_subprocess_exec(*args,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=max(0.001, deadline_seconds))
+        except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            if isinstance(exc, asyncio.TimeoutError):
+                raise AudioError("ATEMPO_TIMEOUT") from exc
+            raise
+        if proc.returncode != 0 or not target.is_file():
+            raise AudioError("ATEMPO_FAILED")
+        if target.stat().st_size > max_bytes:
+            raise AudioError("OUTPUT_TOO_LARGE")
+        result = target.read_bytes()
+        wav_info(result, max_bytes=max_bytes, max_seconds=600)
+        return result

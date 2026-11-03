@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from .audio import AudioError, wav_info
-from .chatterbox_audio import stretch_speech
+from .chatterbox_audio import stretch_speech_async
 from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, IDLE_CHOICES
 from .chatterbox_ipc import send, recv
 from .pause import PauseScript, SpeechPart, PausePart
@@ -53,8 +53,13 @@ class TurboService:
     def _cancel_idle(self):
         self.idle_deadline = None
         if self.idle_task:
-            self.idle_task.cancel()
-            self.idle_task = None
+            prior, self.idle_task = self.idle_task, None
+            try:
+                running = asyncio.current_task()
+            except RuntimeError:
+                running = None
+            if prior is not running:
+                prior.cancel()
 
     def _arm_idle(self):
         self._cancel_idle()
@@ -133,10 +138,10 @@ class TurboService:
             path = self.settings.cache_dir / sub
             path.mkdir(parents=True, exist_ok=True)
             env[variable] = str(path)
-        self.proc = await asyncio.create_subprocess_exec(
+        self.proc = await asyncio.wait_for(asyncio.create_subprocess_exec(
             str(python), "-m", "lite.chatterbox_worker", stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            cwd=str(root), env=env)
+            cwd=str(root), env=env), max(0.001, deadline - time.monotonic()))
         data = await self._rpc({"cmd": "LOAD", "model_dir": str(self.settings.model_dir)}, deadline)
         self.loads += int(data["loads"])
         self.device = data.get("device")
@@ -180,8 +185,9 @@ class TurboService:
                     wav_info(raw, max_bytes=self.settings.max_output_bytes, max_seconds=600)
                     if speed != 1.0:
                         raw = await asyncio.wait_for(
-                            asyncio.to_thread(stretch_speech, raw, speed,
-                                              deadline - time.monotonic(), self.settings.max_output_bytes),
+                            stretch_speech_async(raw, speed,
+                                deadline - time.monotonic(), self.settings.max_output_bytes,
+                                self.settings.cache_dir / "tmp"),
                             max(0.001, deadline - time.monotonic()))
                     speech_wavs.append(raw)
                     self.hits = answer.get("cache_hits", self.hits)

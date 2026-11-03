@@ -101,7 +101,7 @@ def test_isolated_no_gguf(api):
 
 
 def test_ipc_bounded():
-    assert unpack(pack({"cmd":"STATUS"}))["cmd"]=="STATUS"
+    assert unpack(pack({"cmd":"STATUS"})[4:])["cmd"]=="STATUS"
     for raw in (b"{}",b'{"v":999}'):
         with pytest.raises(ProtocolError):unpack(raw)
     with pytest.raises(ProtocolError):pack({"text":"x"*(121*1024*1024)})
@@ -240,3 +240,11 @@ def test_longform_resume_provenance(tmp_path):
 def test_concat_canonical():
     r=concatenate([audio(.1),audio(.2)])
     assert wav_info(r)["frames"]==7200
+
+
+
+def test_cpu_diagnostic_does_not_import_torch():
+    import sys
+    import lite.chatterbox_cpu_diagnostic as diagnostic
+    assert callable(diagnostic.cpu_diagnostic)
+    assert "torch" not in sys.modules

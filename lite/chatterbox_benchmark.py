@@ -60,6 +60,17 @@ def main():
     records=[]
     for name,text in cases:
         print(f"START {name}",flush=True)
+        if name=="cold":
+            try:
+                req=urllib.request.Request(a.base+"/chatterbox/runtime/unload",data=b"{}",
+                                           headers={"Content-Type":"application/json"},method="POST")
+                with urllib.request.urlopen(req,timeout=15) as response:
+                    if response.status!=200:
+                        raise RuntimeError("UNLOAD_FAILED")
+            except Exception:
+                records.append({"case":name,"state":"FAIL","error":"COLD_UNLOAD_FAILED"})
+                atomic(folder/"owner-metrics.json",json.dumps(records,indent=2).encode())
+                break
         records.append(run_case(name,text,a.voice_id,a.base,a.output))
         atomic(folder/"owner-metrics.json",json.dumps(records,indent=2).encode())
     if a.mode in ("LongForm","All"):

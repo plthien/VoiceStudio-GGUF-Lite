@@ -62,8 +62,8 @@ class Engine:
             # Refuse when another resident model has consumed most of 4GB.
             if available < 1400 * 1024 * 1024:
                 raise RuntimeError("CUDA_LOW_MEMORY_STOP_GGUF")
-            from chatterbox.tts_turbo import ChatterboxTurboTTS
             with open(os.devnull, "w") as output, contextlib.redirect_stdout(output):
+                from chatterbox.tts_turbo import ChatterboxTurboTTS
                 model = ChatterboxTurboTTS.from_local(str(folder), device="cuda")
             if model is None:
                 raise RuntimeError("MODEL_LOAD_FAILED")
@@ -103,15 +103,17 @@ class Engine:
         try:
             if key in self.cache:
                 self.hits += 1
-                self.model.conds = copy.deepcopy(self.cache[key])
+                # Cache is immutable and CPU-owned; move a separate copy to GPU.
+                self.model.conds = copy.deepcopy(self.cache[key]).to("cuda")
             else:
-                with open(os.devnull, "w") as output, contextlib.redirect_stdout(output):
-                    self.model.prepare_conditionals(str(real))
-                self.cache[key] = copy.deepcopy(self.model.conds)
-                # Bounded cache; active conditioning never copied from another voice.
+                with self.torch.inference_mode():
+                    with open(os.devnull, "w") as output, contextlib.redirect_stdout(output):
+                        self.model.prepare_conditionals(str(real))
+                self.cache[key] = copy.deepcopy(self.model.conds).to("cpu")
+                # Bounded cache; no competing voice conditionals pinned in 4GB VRAM.
                 while len(self.cache) > 2:
                     self.cache.pop(next(iter(self.cache)))
-                self.model.conds = copy.deepcopy(self.cache[key])
+                self.model.conds = copy.deepcopy(self.cache[key]).to("cuda")
             self.active = key
             seed = request.get("seed")
             if seed is not None:

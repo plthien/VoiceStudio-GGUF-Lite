@@ -293,8 +293,20 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     async def owned_mutation(fun):
         if app.state.admission.locked() or app.state.service.lock.locked():
             return failure(409, "PROFILE_ACTIVE")
-        async with app.state.admission:
-            return await asyncio.to_thread(fun)
+        await app.state.admission.acquire()
+        async def owner():
+            try:
+                return await asyncio.to_thread(fun)
+            finally:
+                app.state.admission.release()
+        try:
+            task = asyncio.create_task(owner())
+        except BaseException:
+            app.state.admission.release()
+            raise
+        # A disconnected caller must never expose a half-updated profile.
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        return await asyncio.shield(task)
 
     def check_consent(value):
         return isinstance(value, str) and value == "confirmed"
