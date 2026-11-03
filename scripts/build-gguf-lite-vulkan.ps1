@@ -20,20 +20,19 @@ if ($LASTEXITCODE -ne 0) { throw "Git Bash with cygpath is required. Pass -GitBa
 $source=(Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $version="886fc079838ca7400cb2b42b36e2a65aa1daabe8"
 $stage=Join-Path $Root ("native-build-" + [guid]::NewGuid().ToString("N"))
-$target=if ($OutputRuntime) { [IO.Path]::GetFullPath($OutputRuntime) } else { Join-Path $Root "runtime" }
+$target=if ($OutputRuntime) { [IO.Path]::GetFullPath($OutputRuntime) } else {
+  Join-Path $Root ("candidates\persistent-" + [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + [guid]::NewGuid().ToString("N").Substring(0,8))
+}
 $installed=[IO.Path]::GetFullPath((Join-Path $Root "runtime"))
 if ($OutputRuntime -and $target.TrimEnd('\') -ieq $installed.TrimEnd('\')) {
   throw "Candidate must not target installed runtime; omit -OutputRuntime for default no-overwrite path"
-}
-if ($BuildFeasibilityProbe -and !$OutputRuntime) {
-  throw "Feasibility probe requires a separate fresh -OutputRuntime directory"
 }
 if ($OutputRuntime -and (Test-Path -LiteralPath $target)) {
   throw "Candidate runtime directory already exists; choose a fresh empty destination"
 }
 $stageScripts=Join-Path $stage "scripts\internal"
 New-Item -ItemType Directory -Force -Path $stageScripts | Out-Null
-foreach ($helper in @("build-gguf-lite.sh","omnivoice-vulkan.sh","instrument-attestation.py","instrument-native-speed.py","lite-native-speed.h","stage-residency-feasibility.py","native-residency-feasibility.cpp")) {
+foreach ($helper in @("build-gguf-lite.sh","omnivoice-vulkan.sh","instrument-attestation.py","instrument-native-speed.py","lite-native-speed.h","stage-residency-feasibility.py","native-residency-feasibility.cpp","stage-persistent-worker.py","lite-persistent-worker.cpp","verify-persistent-handshake.py")) {
   $from=Join-Path $source ("scripts\internal\" + $helper)
   if (!(Test-Path -PathType Leaf $from)) { throw "Lite build helper missing: $helper" }
   Copy-Item $from $stageScripts
@@ -56,7 +55,8 @@ try {
   $dll=Join-Path $bin "ggml-vulkan.dll"
   $manifest=Join-Path $bin "checksums.sha256"
   $receipt=Join-Path $bin "speed-capability.json"
-  foreach ($required in @($exe,$dll,$manifest,$receipt,(Join-Path $bin "ggml.dll"),(Join-Path $bin "ggml-base.dll"))) {
+  $persistentReceipt=Join-Path $bin "persistent-capability.json"
+  foreach ($required in @($exe,$dll,$manifest,$receipt,$persistentReceipt,(Join-Path $bin "ggml.dll"),(Join-Path $bin "ggml-base.dll"))) {
     if (!(Test-Path -PathType Leaf $required)) { throw "Required Vulkan build artifact missing: $required" }
   }
   $records=@{}
@@ -91,12 +91,22 @@ try {
       $speedReceipt.header_sha256 -ne (Get-FileHash -Algorithm SHA256 (Join-Path $source "scripts/internal/lite-native-speed.h")).Hash.ToLowerInvariant()) {
       throw "Native Speed candidate receipt does not match pinned patched binary"
   }
+  $persistent=Get-Content -Raw $persistentReceipt | ConvertFrom-Json
+  if ($persistent.schema -ne "lite-persistent-v1" -or $persistent.marker -ne "LitePersistent/v1" -or
+      $persistent.protocol_version -ne 1 -or $persistent.exe_sha256 -ne $actualExe -or
+      $persistent.runtime_revision -ne $version -or
+      $persistent.patch_sha256 -ne (Get-FileHash -Algorithm SHA256 (Join-Path $source "scripts/internal/stage-persistent-worker.py")).Hash.ToLowerInvariant() -or
+      $persistent.source_sha256 -ne (Get-FileHash -Algorithm SHA256 (Join-Path $source "scripts/internal/lite-persistent-worker.cpp")).Hash.ToLowerInvariant()) {
+    throw "Persistent worker candidate receipt does not match pinned binary"
+  }
+  & $pythonExe (Join-Path $source "scripts/internal/verify-persistent-handshake.py") $exe
+  if ($LASTEXITCODE -ne 0) { throw "Persistent worker pre-activation handshake failed" }
   if ($BuildFeasibilityProbe -and !(Test-Path -LiteralPath (Join-Path $bin "lite-reuse-probe.exe") -PathType Leaf)) {
     throw "Opt-in native A-B-A feasibility probe is missing"
   }
   $helpText=(& $exe --help 2>&1 | Out-String)
-  if ($LASTEXITCODE -ne 0 -or !$helpText.Contains("LiteNativeSpeed/v1")) {
-      throw "Compiled executable lacks required LiteNativeSpeed/v1 CLI help marker"
+  if ($LASTEXITCODE -ne 0 -or !$helpText.Contains("LiteNativeSpeed/v1") -or !$helpText.Contains("LitePersistent/v1")) {
+      throw "Compiled executable lacks required Lite native CLI help markers"
   }
   $targetBin=Join-Path $target "bin"
   if (Test-Path $targetBin) {

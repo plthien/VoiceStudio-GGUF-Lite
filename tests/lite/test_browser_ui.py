@@ -329,6 +329,26 @@ def test_runtime_ffmpeg_installed_and_missing_truth(ui_server,monkeypatch):
         assert page.request.get(base+"/lite/status").json()["ffmpeg_installed"] is False
         browser.close()
 
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("width",[1280,390])
+def test_worker_settings_rendered_responsive_and_legacy_save(ui_server,width):
+    base,_=ui_server
+    with sync_playwright() as p:
+        browser=p.chromium.launch(headless=True)
+        page=browser.new_page(viewport={"width":width,"height":900})
+        page.goto(base+"/ui")
+        page.locator('[data-view="runtime"]').click()
+        expect(page.locator("#model-residency")).to_be_visible()
+        expect(page.locator("#worker-status")).to_contain_text("UNLOADED",timeout=10000)
+        expect(page.locator("#worker-mode")).to_have_value("legacy_oneshot")
+        expect(page.locator("#worker-idle")).to_have_value("600")
+        page.locator("#worker-idle").select_option("300")
+        page.locator("#worker-save").click()
+        expect(page.locator("#notice")).to_contain_text("Residency settings saved")
+        assert page.request.get(base+"/lite/worker/settings").json()["idle_timeout_seconds"]==300
+        assert page.evaluate("document.documentElement.scrollWidth<=innerWidth+2")
+        browser.close()
+
 
 @pytest.mark.timeout(70)
 def test_n03_one_native_preflight_per_manual_chromium_refresh(ui_server,monkeypatch):

@@ -95,6 +95,7 @@ if [[ "${OMNIVOICE_RESIDENCY_FEASIBILITY:-0}" == "1" ]]; then
     # Real native A-B-A probe only. No worker or resident mode is enabled.
     "$PYTHON_BIN" "$REPO_ROOT/scripts/internal/stage-residency-feasibility.py" "$WORK/src"
 fi
+"$PYTHON_BIN" "$REPO_ROOT/scripts/internal/stage-persistent-worker.py" "$WORK/src"
 
 cd "$WORK/src"
 
@@ -214,9 +215,12 @@ sha256_of() {
 }
 DIGEST="$(sha256_of "$OUT_NAME")"
 # Native --help must expose the reviewed patch marker before receipt publication.
-if ! "$BIN_DIR/$OUT_NAME" --help 2>&1 | grep -F "LiteNativeSpeed/v1" >/dev/null; then
-    echo "Built binary lacks LiteNativeSpeed/v1 CLI capability" >&2; exit 2
+HELP_OUTPUT="$("$BIN_DIR/$OUT_NAME" --help 2>&1)"
+if ! grep -F "LiteNativeSpeed/v1" <<<"$HELP_OUTPUT" >/dev/null ||
+   ! grep -F "LitePersistent/v1" <<<"$HELP_OUTPUT" >/dev/null; then
+    echo "Built binary lacks required Lite native capabilities" >&2; exit 2
 fi
+"$PYTHON_BIN" "$REPO_ROOT/scripts/internal/verify-persistent-handshake.py" "$BIN_DIR/$OUT_NAME"
 
 # Rewrite the manifest atomically, replacing (not accumulating) the entries
 # this build owns, so renamed platforms and rebuilt libraries never leave a
@@ -238,5 +242,8 @@ rm -f "$TMP_MANIFEST" "$OWNED"
 # Attested build-capability receipt, tied to sha256-checked EXE and exact patch sources.
 cat > "$BIN_DIR/speed-capability.json" <<JSON
 {"schema":"lite-native-speed-v1","runtime_revision":"$COMMIT_SHA","exe_sha256":"$DIGEST","patch_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/instrument-native-speed.py")","header_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/lite-native-speed.h")"}
+JSON
+cat > "$BIN_DIR/persistent-capability.json" <<JSON
+{"schema":"lite-persistent-v1","marker":"LitePersistent/v1","protocol_version":1,"runtime_revision":"$COMMIT_SHA","exe_sha256":"$DIGEST","patch_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/stage-persistent-worker.py")","source_sha256":"$(sha256_of "$REPO_ROOT/scripts/internal/lite-persistent-worker.cpp")"}
 JSON
 echo "✓ Built $OUT_NAME ($DIGEST) LiteNativeSpeed/v1"

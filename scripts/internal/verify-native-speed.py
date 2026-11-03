@@ -76,11 +76,24 @@ def main():
         denied=subprocess.run([sys.executable,ROOT/"scripts/internal/stage-residency-feasibility.py",upstream],
                               capture_output=True,text=True,timeout=30)
         assert denied.returncode!=0,"Double staging must fail closed"
+        persistent=command([sys.executable,ROOT/"scripts/internal/stage-persistent-worker.py",upstream],
+                           capture_output=True,text=True)
+        assert "LITE_PERSISTENT_WORKER_STAGED" in persistent.stdout
+        cli=(upstream/"tools/omnivoice-tts.cpp").read_text()
+        assert "--lite-worker-stdio" in cli and "LitePersistent/v1" in cli
+        assert "tools/lite-persistent-worker.cpp" in (upstream/"CMakeLists.txt").read_text()
+        worker=(upstream/"tools/lite-persistent-worker.cpp").read_text()
+        assert worker.count("ov_init(&ip)")==1
+        assert worker.count("ov_synthesize_with_speed(ctx")==1
+        assert "ov_audio_free(&audio)" in worker and "if(ctx)ov_free(ctx)" in worker
         compiler=shutil.which("clang++") or shutil.which("g++")
         if compiler is None:
             raise RuntimeError("A C++17 compiler (clang++/g++) is mandatory for native speed CI")
         command([compiler,"-std=c++17","-fsyntax-only","-I",upstream/"src",
                  upstream/"tools/lite-reuse-probe.cpp"])
+        command([compiler,"-std=c++17","-fsyntax-only","-I",upstream/"src",
+                 upstream/"tools/lite-persistent-worker.cpp"])
+        print("PINNED_PERSISTENT_WORKER_COMPILES_MODEL_NOT_RUN",PIN)
         print("PINNED_REAL_CONTEXT_A_B_A_HARNESS_COMPILES_MODEL_NOT_RUN",PIN)
         exe=work/("speed-check.exe" if os.name=="nt" else "speed-check")
         command([compiler,"-std=c++17","-O0","-I",upstream/"src",

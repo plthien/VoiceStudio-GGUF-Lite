@@ -113,7 +113,7 @@ def make_bin(folder:Path, speed:bool, compiler=None):
             if(mode=="large"){for(int i=0;i<40000;i++)std::cout<<"x";return 0;}
             if(mode=="missing"){std::cout<<"--speed";return 0;}
             if(mode=="wrong"){std::cout<<"LiteNativeSpeeds/v1 --speed";return 0;}
-            std::cout<<"LiteNativeSpeed/v1 --speed <float>\n";
+            std::cout<<"LiteNativeSpeed/v1 --speed <float> LitePersistent/v1 --lite-worker-stdio\n";
             return 0;
         }
         '''),encoding="utf8")
@@ -129,6 +129,12 @@ def make_bin(folder:Path, speed:bool, compiler=None):
            "exe_sha256":sha(files[0]),
            "patch_sha256":sha(ROOT/"scripts/internal/instrument-native-speed.py"),
            "header_sha256":sha(ROOT/"scripts/internal/lite-native-speed.h")
+        }))
+        (folder/"persistent-capability.json").write_text(json.dumps({
+           "schema":"lite-persistent-v1","marker":"LitePersistent/v1","protocol_version":1,
+           "runtime_revision":RUNTIME_REVISION,"exe_sha256":sha(files[0]),
+           "patch_sha256":sha(ROOT/"scripts/internal/stage-persistent-worker.py"),
+           "source_sha256":sha(ROOT/"scripts/internal/lite-persistent-worker.cpp")
         }))
     return files
 
@@ -147,6 +153,7 @@ def case(tmp_path,ps_exe):
                           capture_output=True,text=True,timeout=8)
     assert direct.returncode==0,(direct.returncode,direct.stderr)
     assert "LiteNativeSpeed/v1" in direct.stdout and "--speed" in direct.stdout
+    assert "LitePersistent/v1" in direct.stdout and "--lite-worker-stdio" in direct.stdout
     private=tmp_path/"data"/"original-reference.wav"
     private.parent.mkdir()
     private.write_bytes(b"PRIVATE_FIXTURE_NEVER_MODIFIED")

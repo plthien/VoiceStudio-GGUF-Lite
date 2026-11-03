@@ -62,6 +62,7 @@ $stdout=Join-Path $private "stdout.private.log"
 $stderr=Join-Path $private "stderr.private.log"
 $oldBackend=[Environment]::GetEnvironmentVariable("OMNIVOICE_GGUF_BACKEND","Process")
 $oldDevice=[Environment]::GetEnvironmentVariable("OMNIVOICE_GGUF_DEVICE","Process")
+$oldGgmlBackend=[Environment]::GetEnvironmentVariable("GGML_BACKEND","Process")
 $proc=$null
 try {
   & $ffmpeg -nostdin -hide_banner -loglevel error -y -i $ReferenceAWav -vn -ac 1 -ar 24000 -c:a pcm_s16le -f s16le $rawA
@@ -70,6 +71,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Failed to normalize reference B" }
   [Environment]::SetEnvironmentVariable("OMNIVOICE_GGUF_BACKEND","vulkan","Process")
   [Environment]::SetEnvironmentVariable("OMNIVOICE_GGUF_DEVICE","0","Process")
+  [Environment]::SetEnvironmentVariable("GGML_BACKEND","Vulkan0","Process")
   $args=@($BaseGguf,$TokenizerGguf,$rawA,$TranscriptAFile,$rawB,$TranscriptBFile,
           [string]$Seed,$Speed.ToString("G9",[cultureinfo]::InvariantCulture))
   $quote=@()
@@ -101,6 +103,7 @@ try {
 finally {
   [Environment]::SetEnvironmentVariable("OMNIVOICE_GGUF_BACKEND",$oldBackend,"Process")
   [Environment]::SetEnvironmentVariable("OMNIVOICE_GGUF_DEVICE",$oldDevice,"Process")
+  [Environment]::SetEnvironmentVariable("GGML_BACKEND",$oldGgmlBackend,"Process")
   if ($null -ne $proc) {
     if (!$proc.HasExited) {
       $processId=[int]$proc.Id

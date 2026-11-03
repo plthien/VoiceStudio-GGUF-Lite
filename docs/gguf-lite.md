@@ -104,7 +104,7 @@ model files, generated audio or secrets into the public PR.
 
 ```powershell
 .\scripts\install-gguf-lite.ps1
-.\scripts\build-gguf-lite-vulkan.ps1
+.\scripts\build-gguf-lite-vulkan.ps1 # writes a fresh candidates\persistent-* directory; never active runtime
 .\scripts\run-gguf-lite.ps1 -Preflight
 
 # Inspect pinned model/component rights before explicit manual acceptance.
@@ -150,3 +150,30 @@ Use `http://127.0.0.1:3900/ui` after launching the same localhost FastAPI servic
 ## Full Lite readiness semantics (CLI and HTTP)
 
 The raw engine `runtime.preflight()` and `GET /engines/omnivoice-gguf/quants` keep **engine-only** readiness: pinned native files, Q8_0 base/tokenizer pair and observed NVIDIA GTX1650 Vulkan0. Both `python -m lite.preflight` and `GET /lite/readiness` now use the same `complete_readiness` evaluation: `runtime_ready` (engine), `tts_ready` (engine + accepted/reconciled terms + owned data directory), `cloning_ready` (TTS + FFmpeg available). The existing top-level `ready` is conservatively `cloning_ready` on both; `ffmpeg` and `ffmpeg_installed` are the same boolean. FFmpeg absence **does not** downgrade verified GPU engine or TTS prerequisites; external TTS clients must explicitly read `tts_ready` if they do not need cloning. `/health` remains liveness, `/lite/status` remains cheap without GPU/model scanning, and full readiness does not mean live inference succeeded.
+
+## Optional persistent native worker
+
+The saved default remains `legacy_oneshot` with a 600-second idle policy. A verified
+`LitePersistent/v1` candidate may be selected explicitly in **Runtime & Settings** or
+with `PUT /lite/worker/settings`. Persistent mode keeps one native child and one
+`ov_context` across speech spans and HTTP requests. Idle/manual unload and service
+shutdown free the context and reap the child. It never silently falls back to one-shot.
+
+Build an isolated candidate with `scripts/build-gguf-lite-vulkan.ps1 -OutputRuntime
+<fresh-directory>`. The build performs a model-free framed HELLO/SHUTDOWN check and
+writes a digest-bound `persistent-capability.json`; it does not activate the candidate.
+Activation and rollback remain owner-controlled through
+`scripts/switch-gguf-lite-runtime.ps1 -OwnerApproves`.
+
+Owner GTX 1650 acceptance (R25-R27) is deliberately separate from CI. After activation,
+start Lite in legacy mode, select persistent explicitly, then run:
+
+```powershell
+.\scripts\benchmark-persistent-worker.ps1 -VoiceA "<owned-A>" -VoiceB "<owned-B>"
+```
+
+The script exercises cold/warm requests, two/ten pauses, all three speeds, A/B/A,
+ten warm cycles, one-minute/Never idle, manual unload and recovery. It retains only
+privacy-filtered CSV/JSON metrics. Human listening, shutdown/cancellation, peak VRAM,
+memory growth and OOM behavior remain `OWNER TEST PENDING`; on failure select
+`legacy_oneshot` or rollback without deleting model or voice data.

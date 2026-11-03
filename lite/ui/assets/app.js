@@ -7,6 +7,7 @@ const titles={clone:['Voice Cloning','Create a voice from an owned reference rec
   runtime:['Runtime & Settings','Inspect pinned model and local inference readiness.']};
 let voices=[],chosen='',editor='',controller=null,ttsUrl=null,refUrl=null,cloneUrl=null,replaceUrl=null,diagnostic=null,diagnosticController=null,licenceFingerprint=null,licenceAccepted=false,working=false,runtimeChecking=false;
 const errors={INVALID_TRANSCRIPT:'Enter the exact transcript of the NEW reference (or explicitly confirm same words).',INVALID_REQUEST:'Check required fields and the exact transcript.',INVALID_AUDIO:'Reference could not be decoded. Use an owned WAV or MP3.',AUDIO_TOO_LARGE:'Recording exceeds the local size limit.',PROFILE_NOT_FOUND:'Voice no longer exists. Refresh the library.',PROFILE_ACTIVE:'Voice is currently in use. Try again after generation.',REFERENCE_INVALID:'Saved reference changed or failed integrity checks.',NATIVE_BUSY:'GPU is already processing a request.',LICENCE_NOT_READY:'Model provenance and explicit terms acceptance are required.',RUNTIME_NOT_READY:'Q8_0, native executable or Vulkan0 did not pass readiness.',NATIVE_TIMEOUT:'Native generation timed out.',CLIENT_DISCONNECTED:'Generation cancelled after browser disconnect.',NATIVE_FAILURE:'Native generation failed. No WAV was published.',NATIVE_PROOF_MISSING:'Device verification was missing or did not match NVIDIA Vulkan0.',INVALID_WAV:'The server response was not a valid 24 kHz PCM16 WAV.',MIGRATION_FAILED:'Legacy voice could not be migrated. No successful import was reported.',PURGE_INCOMPLETE:'Profile removed, but owned audio cleanup requires manual local review.',NATIVE_SPEED_UNAVAILABLE:'Native Speed requires rebuilt Lite Vulkan runtime. Baseline 1.00× is still available.',INVALID_PAUSE_MARKER:'Invalid pause tag. Use [pause], [pause 800ms], or [pause 1.5s] (1–10000ms).',PAUSE_LIMIT_EXCEEDED:'Up to 16 markers and 60 seconds of inserted pauses are allowed.',PAUSE_ASSEMBLY_FAILED:'Could not assemble verified native speech into a complete WAV.',MIGRATION_SOURCE_UNAVAILABLE:'Close VoiceStudio and check %APPDATA%/OmniVoice/omnivoice.db, or configure the trusted legacy root on the server.'};
+Object.assign(errors,{WORKER_BUSY:'The native worker is active; unload is available after synthesis completes.',PERSISTENT_WORKER_UNAVAILABLE:'Install and verify a LitePersistent/v1 candidate before selecting persistent mode.',INVALID_WORKER_SETTINGS:'Choose a supported execution mode and idle timeout.'});
 const safeError=e=>errors[e.code]||((e.name==='AbortError')?'Request cancelled.':'Local request failed. Check service status.');
 function notice(message,bad=false){const n=$('notice');n.textContent=message;n.className='notice'+(bad?' error':'');n.hidden=false;}
 function busy(button,state){button.disabled=state;button.setAttribute('aria-busy',String(state));}
@@ -39,7 +40,7 @@ function openView(view){if(!titles[view])return;
   for(const n of nav){const active=n.dataset.view===view;n.classList.toggle('active',active);if(active)n.setAttribute('aria-current','page');else n.removeAttribute('aria-current');}
   for(const key of Object.keys(titles))$('view-'+key).hidden=key!==view;
   $('page-title').textContent=titles[view][0];$('page-subtitle').textContent=titles[view][1];
-  if(view==='library')loadVoices();if(view==='runtime')refreshRuntime();if(view==='tts')loadSpeedCapability();
+  if(view==='library')loadVoices();if(view==='runtime'){refreshRuntime();refreshWorker();}if(view==='tts')loadSpeedCapability();
   window.location.hash=view;
 }
 nav.forEach(x=>x.addEventListener('click',()=>openView(x.dataset.view)));
@@ -182,6 +183,19 @@ $('tts-form').addEventListener('submit',async e=>{e.preventDefault();if(working)
 function appendDetail(root,key,val){const d=document.createElement('div');d.className='detail';const label=document.createElement('span');label.textContent=key;
   const value=document.createElement('strong');value.textContent=val==null?'Not verified':String(val);d.append(label,value);root.append(d);}
 function metric(name,value){const d=document.createElement('div');d.className='metric';const a=document.createElement('span');a.textContent=name;const b=document.createElement('strong');b.textContent=String(value);d.append(a,b);return d;}
+async function refreshWorker(){
+  try{const [settings,status,cap]=await Promise.all([api.request('/lite/worker/settings'),api.request('/lite/worker/status'),api.request('/lite/worker/capability')]);
+    $('worker-mode').value=settings.mode;$('worker-idle').value=settings.idle_timeout_seconds===null?'never':String(settings.idle_timeout_seconds);
+    $('worker-status').replaceChildren(metric('State',status.state),metric('Process',status.pid||'Not running'),metric('Load generation',status.worker_generation),metric('Cold loads',status.cold_load_count),metric('Syntheses',status.synthesis_count),metric('Context reuses',status.reuse_count),metric('Idle remaining',status.idle_remaining_seconds===null?(status.busy?'Busy':'Off / Never'):status.idle_remaining_seconds+' s'),metric('Capability',cap.supported?'LitePersistent/v1 verified':'Unavailable'));
+    $('worker-unload').disabled=status.busy||!status.resident;
+    $('worker-feedback').textContent=status.last_error?'Worker error: '+status.last_error:(status.mode==='persistent'?'Persistent mode selected explicitly.':'Legacy one-shot selected.');
+  }catch(err){$('worker-status').replaceChildren(metric('Worker status','Unavailable'));$('worker-feedback').textContent=safeError(err);}
+}
+$('worker-settings-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('worker-save');busy(button,true);
+  try{const raw=$('worker-idle').value;await api.json('/lite/worker/settings','PUT',{mode:$('worker-mode').value,idle_timeout_seconds:raw==='never'?null:Number(raw)});notice('Residency settings saved.');await refreshWorker();}
+  catch(err){notice(safeError(err),true);}finally{busy(button,false);}});
+$('worker-unload').addEventListener('click',async()=>{const button=$('worker-unload');busy(button,true);try{await api.request('/lite/worker/unload',{method:'POST'});notice('Native worker unloaded.');await refreshWorker();}catch(err){notice(safeError(err),true);}finally{busy(button,false);}});
+setInterval(()=>{if(!$('view-runtime').hidden&&!document.hidden)refreshWorker();},5000);
 async function refreshRuntime(){
   if(runtimeChecking)return;
   runtimeChecking=true;const b=$('runtime-refresh');busy(b,true);

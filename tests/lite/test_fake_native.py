@@ -59,7 +59,9 @@ def fixture(tmp_path, monkeypatch):
     path=bin_dir/"fake-native"
     path.write_text(FAKE)
     # Explicit Python interpreter is used on both Windows and Linux.
-    settings=Settings(data_dir=tmp_path,cache_dir=tmp_path,bin_dir=bin_dir,timeout=0.1)
+    # Windows process creation can exceed 100 ms under CI load; the synthetic
+    # slow path sleeps four seconds, so one second remains a deterministic bound.
+    settings=Settings(data_dir=tmp_path,cache_dir=tmp_path,bin_dir=bin_dir,timeout=1.0)
     monkeypatch.setattr("lite.native_runner.preflight",lambda settings: {"ready":True,"gpu":{"name":"NVIDIA GeForce GTX 1650","vendor_id":"0x10de"}})
     monkeypatch.setattr("lite.native_runner.native_files",lambda settings: (path,bin_dir/"ggml-vulkan.dll"))
     monkeypatch.setattr("lite.native_runner.model_pair",lambda settings: (tmp_path/"base.gguf",tmp_path/"codec.gguf"))

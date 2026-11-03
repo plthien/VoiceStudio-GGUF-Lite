@@ -101,6 +101,22 @@ function Assert-NativeManifest([string]$directory,[bool]$requireSpeed) {
         $info.header_sha256 -ne (Get-NativeSha256 $header)) {
       throw "Candidate speed receipt or patched EXE SHA invalid"
     }
+    $persistentReceipt=Join-Path $directory "persistent-capability.json"
+    if (!(Test-Path -LiteralPath $persistentReceipt -PathType Leaf)) {
+      throw "Lite persistent capability receipt missing"
+    }
+    $persistent=Get-Content -Raw -LiteralPath $persistentReceipt | ConvertFrom-Json
+    $persistentPatch=Join-Path $repo "scripts\internal\stage-persistent-worker.py"
+    $persistentSource=Join-Path $repo "scripts\internal\lite-persistent-worker.cpp"
+    if ($persistent.schema -ne "lite-persistent-v1" -or
+        $persistent.marker -ne "LitePersistent/v1" -or
+        $persistent.protocol_version -ne 1 -or
+        $persistent.runtime_revision -ne "886fc079838ca7400cb2b42b36e2a65aa1daabe8" -or
+        $persistent.exe_sha256 -ne (Get-NativeSha256 $exe) -or
+        $persistent.patch_sha256 -ne (Get-NativeSha256 $persistentPatch) -or
+        $persistent.source_sha256 -ne (Get-NativeSha256 $persistentSource)) {
+      throw "Candidate persistent receipt or patched EXE SHA invalid"
+    }
   }
 }
 . (Join-Path $PSScriptRoot "internal/speed-help-process.ps1")

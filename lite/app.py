@@ -20,6 +20,8 @@ from pydantic import BaseModel, Field, field_validator
 from .config import Settings, REPO_ID, BASE_NAME, TOKENIZER_NAME
 from .licence import Licence
 from .native_runner import Runner, NativeBusy, NativeFailure, NativeTimeout
+from .resident_worker import RuntimeRunner, persistent_capability
+from .worker_settings import WorkerSettings, WorkerSettingsStore, WorkerSettingsError
 from .profiles import Store, ProfileError
 from .runtime import preflight, RuntimeErrorLite
 from .readiness import complete_readiness
@@ -165,6 +167,10 @@ class AcceptTerms(BaseModel):
     fingerprint: str
     accepted: bool
 
+class WorkerSettingsPayload(BaseModel):
+    mode: str
+    idle_timeout_seconds: int | None
+
 def create_app(settings: Settings | None = None, store: Store | None = None,
                licence: Licence | None = None, runner: Runner | None = None) -> FastAPI:
     settings = settings or Settings.load()
@@ -177,7 +183,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
     app.state.settings = settings
     app.state.store = store or Store(settings)
     app.state.licence = licence or Licence(settings)
-    app.state.runner = runner or Runner(settings)
+    app.state.worker_settings = WorkerSettingsStore(settings.data_dir)
+    # Reading settings never starts native code. Persistent remains explicit opt-in.
+    app.state.worker_settings.load()
+    app.state.runner = runner or RuntimeRunner(settings, Runner(settings), app.state.worker_settings)
     # Admission ownership begins BEFORE mutable profile/reference resolution.
     # The runner retains its independent one-native-process lock.
     app.state.admission = asyncio.Lock()
@@ -260,6 +269,56 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
             "max_total_ms": MAX_TOTAL_MS,
             "sample_rate_hz": 24_000,
         }
+
+    @app.get("/lite/worker/capability")
+    async def worker_capability():
+        return await asyncio.to_thread(persistent_capability, settings)
+
+    @app.get("/lite/worker/settings")
+    def worker_settings_get():
+        return app.state.worker_settings.load().as_dict()
+
+    @app.put("/lite/worker/settings")
+    async def worker_settings_put(payload: WorkerSettingsPayload):
+        try:
+            candidate=WorkerSettings(payload.mode,payload.idle_timeout_seconds).validate()
+        except WorkerSettingsError:
+            return failure(422,"INVALID_WORKER_SETTINGS","Invalid worker mode or idle timeout")
+        if candidate.mode=="persistent":
+            capability=await asyncio.to_thread(persistent_capability,settings)
+            if not capability["supported"]:
+                return failure(409,"PERSISTENT_WORKER_UNAVAILABLE","Verified persistent worker is unavailable")
+        app.state.worker_settings.save(candidate)
+        runtime=getattr(app.state.runner,"persistent",None)
+        if runtime and not runtime.lock.locked():
+            if candidate.mode=="legacy_oneshot" and runtime.state=="READY":
+                await runtime.unload_now()
+            elif candidate.mode=="persistent" and runtime.state=="READY":
+                runtime._arm_idle()
+        return candidate.as_dict()
+
+    @app.get("/lite/worker/status")
+    def worker_status():
+        selected=app.state.worker_settings.load()
+        runtime=getattr(app.state.runner,"persistent",None)
+        status=runtime.status() if runtime else {
+            "state":"UNLOADED","resident":False,"pid":None,"worker_generation":0,
+            "context_identity_verified":False,"cold_load_count":0,"synthesis_count":0,
+            "reuse_count":0,"idle_remaining_seconds":None,"busy":app.state.runner.lock.locked(),
+            "last_error":None,"vram_status":"OWNER TEST PENDING"}
+        return {**status,"mode":selected.mode,"idle_timeout_seconds":selected.idle_timeout_seconds}
+
+    @app.post("/lite/worker/unload")
+    async def worker_unload():
+        runtime=getattr(app.state.runner,"persistent",None)
+        if app.state.admission.locked() or app.state.runner.lock.locked() or (runtime and runtime.lock.locked()):
+            return failure(409,"WORKER_BUSY","Worker is active")
+        if runtime:
+            try:
+                await runtime.unload_now()
+            except NativeBusy:
+                return failure(409,"WORKER_BUSY","Worker is active")
+        return {"unloaded":True,"state":"UNLOADED"}
 
     @app.get("/lite/migration/preview")
     def migration_dry_run():
@@ -451,11 +510,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
         except ProfileError:
             return failure(409, "REFERENCE_INVALID", "Stored reference is invalid")
         try:
+            stop_watcher=asyncio.Event()
             async def detect_disconnect():
-                while True:
+                while not stop_watcher.is_set():
                     if await request.is_disconnected():
                         return
-                    await asyncio.sleep(0.1)
+                    try:
+                        await asyncio.wait_for(stop_watcher.wait(),0.1)
+                    except asyncio.TimeoutError:
+                        pass
             kwargs=dict(profile=row,reference=reference,text=payload.input,
                         language=payload.language,seed=payload.seed,
                         request_id=str(uuid.uuid4()))
@@ -527,18 +590,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None,
                            if all(k in info for k in ("elapsed_s","audio_s","rtf")) else {})}
                        if info.get("verification_status")=="verified" else {})})
             finally:
-                watcher.cancel()
+                stop_watcher.set()
                 if not generation.done():
                     generation.cancel()
                     with contextlib.suppress(BaseException):
                         await generation
                 with contextlib.suppress(BaseException):
-                    await watcher
+                    await asyncio.wait_for(watcher,1)
         except NativeBusy:
             return failure(429, "NATIVE_BUSY", "One native inference already active", retry=True)
         except NativeTimeout:
             return failure(504, "NATIVE_TIMEOUT", "Native inference deadline exceeded")
-        except RuntimeErrorLite:
+        except RuntimeErrorLite as exc:
+            if "PERSISTENT_WORKER_UNAVAILABLE" in str(exc):
+                return failure(503,"PERSISTENT_WORKER_UNAVAILABLE","Verified persistent worker is unavailable")
             return failure(503, "RUNTIME_NOT_READY", "Pinned Vulkan Q8_0 runtime not ready")
         except NativeFailure:
             return failure(500, "NATIVE_FAILURE", "Native inference failed")

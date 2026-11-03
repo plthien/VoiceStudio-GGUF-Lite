@@ -92,8 +92,9 @@ function Assert-ExecutableSpeedHelp([string]$directory) {
       throw "Native Speed candidate help output exceeded 32 KiB"
     }
     $helpText=(Get-Content -Raw -LiteralPath $stdout)+[Environment]::NewLine+(Get-Content -Raw -LiteralPath $stderr)
-    if (!$helpText.Contains("LiteNativeSpeed/v1") -or !$helpText.Contains("--speed")) {
-      throw "Native Speed candidate help capability marker/option missing"
+    if (!$helpText.Contains("LiteNativeSpeed/v1") -or !$helpText.Contains("--speed") -or
+        !$helpText.Contains("LitePersistent/v1") -or !$helpText.Contains("--lite-worker-stdio")) {
+      throw "Native candidate help capability marker/option missing"
     }
   } catch {
     $problem=$_.Exception.Message
