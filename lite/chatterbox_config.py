@@ -104,7 +104,8 @@ def diagnostic(settings: ChatterboxSettings) -> dict:
     if not shutil.which("ffmpeg"):
         issues.append("FFMPEG_UNAVAILABLE")
     return {"installed": installed, "model_manifest_recorded": recorded, "model_hash_verified": False,
-            "hash_check": "on worker load or --verify", "ready": not issues,
+            "hash_check": "on worker load or --verify",
+            "installation_preflight_ready":not issues, "ready":False,
             "cuda": "OWNER TEST PENDING", "model_revision": MODEL_REVISION,
             "source_revision": SOURCE_REVISION, "issues": issues}
 
@@ -150,7 +151,8 @@ def main():
     if args.verify:
         ok, issues = verify_model_files(settings)
         report.update(model_hash_verified=ok, issues=sorted(set(report["issues"] + issues)),
-                      ready=report["ready"] and ok)
+                      installation_preflight_ready=report["installation_preflight_ready"] and ok,
+                      ready=False)
     if args.cuda_probe:
         report["cuda"] = probe_cuda(settings)
         if not report["cuda"]["available"]:

@@ -211,7 +211,13 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
 
     @app.get("/chatterbox/readiness")
     def readiness():
-        return {**diagnostic(settings), "worker": app.state.service.status()}
+        status=app.state.service.status()
+        result=diagnostic(settings)
+        attested=bool(status.get("resident") and status.get("state")=="READY" and
+                      isinstance(status.get("cuda"),dict) and status["cuda"].get("name"))
+        result["model_hash_verified"]=attested
+        result["ready"]=bool(attested and result["installation_preflight_ready"])
+        return {**result,"worker":status}
 
     @app.get("/chatterbox/runtime/status")
     def runtime_status():
@@ -497,6 +503,9 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                 ):
                     if type(memory.get(key)) is int and memory[key] >= 0:
                         meta[header] = str(memory[key])
+                if time.monotonic() >= info["deadline_at"]:
+                    await app.state.service.stop()
+                    return failure(504,"DEADLINE_EXCEEDED")
                 return Response(data, media_type="audio/wav", headers=meta)
             except asyncio.CancelledError:
                 return failure(499, "CANCELLED")

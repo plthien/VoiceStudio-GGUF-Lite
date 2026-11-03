@@ -62,7 +62,8 @@ def test_benchmark_cli_json_csv_and_exit(tmp_path,monkeypatch,audio_s,wall_s,exp
         {"state":"PASS","audio_s":audio_s,"sections":1,"voice_version":2,
          "model_revision":MODEL_REVISION})
     ticks=iter([100,100+wall_s])
-    monkeypatch.setattr(bench.time,"monotonic",lambda:next(ticks))
+    import types
+    monkeypatch.setattr(bench,"time",types.SimpleNamespace(monotonic=lambda:next(ticks)))
     monkeypatch.setattr(sys,"argv",["benchmark","--mode","LongForm","--voice-id","test-voice",
                                    "--manifest",str(manifest),"--output",str(output)])
     assert bench.main()==expected

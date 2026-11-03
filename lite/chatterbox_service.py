@@ -217,7 +217,8 @@ class TurboService:
         data = await self._rpc({"cmd": "LOAD", "model_dir": str(self.settings.model_dir)}, deadline)
         self.loads += int(data["loads"])
         self.device = data.get("device")
-        if not isinstance(self.device, dict) or not self.device.get("name"):
+        if (not isinstance(self.device,dict) or not isinstance(self.device.get("name"),str)
+            or not self.device["name"] or type(self.device.get("index")) is not int):
             raise TurboError("CUDA_PROOF_MISSING")
         self.state = "READY"
 
