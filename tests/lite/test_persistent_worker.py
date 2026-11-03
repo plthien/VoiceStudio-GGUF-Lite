@@ -170,15 +170,18 @@ def test_cancellation_and_worker_death_between_spans_publish_nothing(persistent)
 
 def test_idle_generation_token_prevents_old_timer_unload_race(persistent):
     worker,p=persistent
-    worker.settings_provider=lambda:WorkerSettings("persistent",.08)
+    # Keep the boundaries comfortably outside the Windows scheduler quantum.
+    # This still exercises an old timer firing after a newer request, without
+    # turning runner contention into a false failure.
+    worker.settings_provider=lambda:WorkerSettings("persistent",.6)
     async def run():
         await worker.generate(text="first",**p);generation=worker.generation;pid=worker.process.pid
-        await asyncio.sleep(.04)
+        await asyncio.sleep(.1)
         await worker.generate(text="second",**{**p,"request_id":"second"})
-        await asyncio.sleep(.05)
+        await asyncio.sleep(.2)
         assert worker.state=="READY" and worker.generation==generation and worker.process.pid==pid
-        await asyncio.sleep(.06)
-        for _ in range(100):
+        await asyncio.sleep(.45)
+        for _ in range(200):
             if worker.state=="UNLOADED": break
             await asyncio.sleep(.01)
         assert worker.state=="UNLOADED" and worker.process is None
