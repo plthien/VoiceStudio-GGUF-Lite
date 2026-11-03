@@ -60,7 +60,11 @@ while True:
  elif c==4: send(104,s)
  elif c==5: send(104,s);break
  elif c==6:
-  body=b'LitePerf/v1'+struct.pack('<III16QIII',1,152,0,5000,20,10,5,60,40,30,5,200,30,1,1,1,2400,9600,1,32,1,1)
+  cumulative=os.getenv('LITE_FAKE_CUMULATIVE','0')=='1'
+  hits=max(0,synth-1) if cumulative else 1
+  misses=1
+  ref_hit=int(synth>1) if cumulative else 1
+  body=b'LitePerf/v1'+struct.pack('<III16QIII',1,152,0,5000,20,10,5,60,40,30,5,200,30,1,hits,misses,2400,9600,1,32,1,ref_hit)
   send(105,s,body)
  else: send(255,s)
 '''
@@ -550,3 +554,36 @@ def test_capability_receipt_binds_exe_pin_and_patch_sources(tmp_path,monkeypatch
     (bin_dir/"performance-candidate.json").write_text(json.dumps(candidate))
     path.write_text(json.dumps({**receipt,"source_sha256":"0"*64}))
     module._CAPABILITY_CACHE.clear();assert module.persistent_capability(settings)["supported"] is False
+
+
+def test_fake_native_zero_two_ten_pause_spans_aggregate_all_syntheses(persistent, monkeypatch):
+    """Complete RESULT/PERF exchange for each span, cumulative counters delta."""
+    worker, p = persistent
+    worker._perf_enabled = True
+    monkeypatch.setenv("LITE_FAKE_CUMULATIVE", "1")
+
+    async def run():
+        for pauses in (0, 2, 10):
+            script_text = " alpha ".join(["one"] * (pauses + 1))
+            if pauses:
+                script_text = " [pause 250ms] ".join(["word"] * (pauses + 1))
+            script = parse_pause_script(script_text)
+            previous = worker._last_native_perf
+            prior_hits = previous["reference_cache_hits"] if previous else 0
+            result, info = await worker.generate_paused(
+                script=script, **{k: v for k, v in p.items() if k != "request_id"},
+                request_id=f"pauses-{pauses}"
+            )
+            assert result.startswith(b"RIFF")
+            perf = worker.last_performance
+            assert perf["span_count"] == pauses + 1
+            assert perf["native_total_us"] == 200 * (pauses + 1)
+            assert perf["ref_codec_encode_us"] == 10 * (pauses + 1)
+            assert perf["codec_decode_us"] == 30 * (pauses + 1)
+            assert perf["model_load_us"] == 5000
+            assert perf["reference_cache_hits"] == worker._last_native_perf["reference_cache_hits"] - prior_hits
+            assert perf["reference_cache_misses"] in (0, 1)
+            assert perf["ref_cache_hit_count"] == (0 if pauses == 0 else pauses + 1)
+            assert info["pause_count"] == pauses
+        await worker.stop()
+    asyncio.run(run())
