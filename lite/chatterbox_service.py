@@ -26,6 +26,22 @@ class TurboError(RuntimeError):
         super().__init__(code)
 
 
+def finalize_audio(script, speech_wavs, max_output_bytes):
+    """Pure bounded final assembly/validation. Called outside the event loop."""
+    if script:
+        data, meta = assemble_pause_wav(script, speech_wavs,
+            max_bytes=max_output_bytes, max_seconds=600)
+    else:
+        data=speech_wavs[0]
+        initial=wav_info(data,max_bytes=max_output_bytes,max_seconds=600)
+        meta={"pause_count":0,"pause_frames":0,"speech_frames":initial["frames"],
+              "audio_frames":initial["frames"],"speech_segments":1}
+    info=wav_info(data,max_bytes=max_output_bytes,max_seconds=600)
+    if info["frames"]!=meta["audio_frames"]:
+        raise TurboError("AUDIO_INTEGRITY_FAILURE")
+    return data,meta,info
+
+
 class TurboService:
     def __init__(self, settings: ChatterboxSettings):
         self.settings = settings
@@ -194,8 +210,9 @@ class TurboService:
             try:
                 await self._rpc({"cmd": "INVALIDATE", "voice": voice},
                                 time.monotonic() + 10)
-            except BaseException:
+            except BaseException as exc:
                 await self._kill()
+                raise TurboError("CACHE_INVALIDATION_WORKER_REAPED") from exc
 
     async def synthesize(self, *, profile: dict, reference: Path, text: str,
                          script: PauseScript | None, speed: float, seed: int | None) -> tuple[bytes, dict]:
@@ -221,7 +238,11 @@ class TurboService:
                         "text": part.text, "seed": (seed + i) % 2147483648 if seed is not None else None,
                     }, deadline)
                     raw = base64.b64decode(answer["wav"], validate=True)
-                    wav_info(raw, max_bytes=self.settings.max_output_bytes, max_seconds=600)
+                    left=deadline-time.monotonic()
+                    if left<=0: raise TurboError("DEADLINE_EXCEEDED")
+                    await asyncio.wait_for(asyncio.to_thread(
+                        wav_info,raw,max_bytes=self.settings.max_output_bytes,
+                        max_seconds=600),left)
                     if speed != 1.0:
                         raw = await asyncio.wait_for(
                             stretch_speech_async(raw, speed,
@@ -233,24 +254,23 @@ class TurboService:
                         last_memory = answer["memory"]
                     self.hits = answer.get("cache_hits", self.hits)
                     self.syntheses = answer.get("syntheses", self.syntheses)
-                if script:
-                    data, meta = assemble_pause_wav(script, speech_wavs,
-                        max_bytes=self.settings.max_output_bytes, max_seconds=600)
-                else:
-                    data = speech_wavs[0]
-                    info = wav_info(data, max_bytes=self.settings.max_output_bytes, max_seconds=600)
-                    meta = {"pause_count": 0, "pause_frames": 0, "speech_frames": info["frames"],
-                            "audio_frames": info["frames"], "speech_segments": 1}
-                info = wav_info(data, max_bytes=self.settings.max_output_bytes, max_seconds=600)
-                if info["frames"] != meta["audio_frames"]:
-                    raise TurboError("AUDIO_INTEGRITY_FAILURE")
+                left=deadline-time.monotonic()
+                if left<=0: raise TurboError("DEADLINE_EXCEEDED")
+                try:
+                    data,meta,info=await asyncio.wait_for(asyncio.to_thread(
+                        finalize_audio,script,speech_wavs,self.settings.max_output_bytes),left)
+                except asyncio.TimeoutError as exc:
+                    raise TurboError("DEADLINE_EXCEEDED") from exc
+                if time.monotonic()>=deadline:
+                    raise TurboError("DEADLINE_EXCEEDED")
                 elapsed = time.monotonic() - started
                 speech_s = meta["speech_frames"] / 24000
                 audio_s = info["seconds"]
                 self.state = "READY"
                 self.last_error = None
                 return data, {**meta, "audio_s": audio_s, "speech_s": speech_s,
-                              "elapsed_s": elapsed, "rtf": elapsed / audio_s,
+                              "elapsed_s": elapsed, "deadline_at":deadline,
+                              "rtf": elapsed / audio_s,
                               "speech_rtf": elapsed / speech_s,
                               "device": self.device, "memory": last_memory,
                               "speed_mode": "postprocess_atempo",
