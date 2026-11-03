@@ -557,3 +557,62 @@ def test_postcommit_store_cleanup_error_reaps_worker(api,monkeypatch):
     assert response.json()["error"]["code"]=="MUTATION_COMMITTED_CLEANUP_REQUIRED"
     assert client.get("/profiles/"+voice).status_code==404
     assert service.state=="UNLOADED"
+
+
+def test_streaming_upload_limit_without_content_length():
+    """ASGI actual received bytes are capped even when no Content-Length exists."""
+    from lite.chatterbox_app import SizeGuard
+    from fastapi.responses import PlainTextResponse
+    messages=[]
+    async def target(scope,receive,send):
+        await receive()
+        await PlainTextResponse("ok")(scope,receive,send)
+    guard=SizeGuard(target,limit=4)
+    scope={"type":"http","http_version":"1.1","method":"POST","scheme":"http",
+           "path":"/upload","raw_path":b"/upload","query_string":b"",
+           "headers":[],"client":("testclient",123),"server":("testserver",80)}
+    async def incoming():
+        return {"type":"http.request","body":b"OVER_THE_LIMIT","more_body":False}
+    async def sent(message):
+        messages.append(message)
+    asyncio.run(guard(scope,incoming,sent))
+    assert messages and messages[0]["type"]=="http.response.start"
+    assert messages[0]["status"]==413
+
+
+def test_reference_digest_cache_key_changes_without_version_change(tmp_path,monkeypatch):
+    import lite.chatterbox_worker as worker
+    settings=ChatterboxSettings(root=tmp_path)
+    monkeypatch.setattr(worker.ChatterboxSettings,"load",classmethod(lambda cls:settings))
+    class Cond:
+        def to(self,device):return self
+    class Model:
+        conds=None
+        def prepare_conditionals(self,path):self.conds=Cond()
+        def generate(self,text):return None
+    class Cuda:
+        OutOfMemoryError=MemoryError
+        def manual_seed_all(self,value):pass
+        def mem_get_info(self):return (100,200)
+        def memory_allocated(self):return 1
+        def memory_reserved(self):return 1
+        def max_memory_allocated(self):return 1
+    class Torch:
+        cuda=Cuda()
+        def manual_seed(self,value):pass
+        def inference_mode(self):return contextlib.nullcontext()
+    monkeypatch.setattr(worker,"pcm_wav",lambda x:audio())
+    engine=worker.Engine();engine.model=Model();engine.torch=Torch()
+    path=settings.data_dir/"voices"/"A"/"1"/"reference.wav"
+    path.parent.mkdir(parents=True);path.write_bytes(audio(6))
+    def request():
+        return {"voice":"A","version":1,"reference":str(path),
+                "reference_sha":hashlib.sha256(path.read_bytes()).hexdigest(),
+                "text":"Synthetic","seed":42}
+    engine.generate(request())
+    old=next(iter(engine.cache))
+    path.write_bytes(audio(7))
+    engine.generate(request())
+    assert len(engine.cache)==2 and engine.hits==0
+    assert old in engine.cache
+    assert old[2]!=request()["reference_sha"]
