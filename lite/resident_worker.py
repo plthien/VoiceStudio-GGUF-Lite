@@ -106,6 +106,8 @@ class ResidentWorkerSupervisor:
         self._idle_task: asyncio.Task | None = None
         self._idle_deadline: float | None = None
         self._idle_token = 0
+        self._verified_models: tuple[Path, Path] | None = None
+        self._model_file_identity: tuple | None = None
 
     async def _await_deadline(self, awaitable, deadline: float):
         try:
@@ -191,14 +193,20 @@ class ResidentWorkerSupervisor:
 
     async def _start(self, deadline: float):
         remaining(deadline)
-        cap = persistent_capability(self.settings)
+        cap = await self._await_deadline(
+            asyncio.to_thread(persistent_capability, self.settings), deadline)
         if not cap["supported"]:
             raise RuntimeErrorLite("PERSISTENT_WORKER_UNAVAILABLE")
         state = await self._await_deadline(asyncio.to_thread(preflight, self.settings), deadline)
         if not state["ready"]:
             raise RuntimeErrorLite("Runtime is not ready")
-        exe, _ = native_files(self.settings)
-        base, codec = model_pair(self.settings)
+        exe, _ = await self._await_deadline(
+            asyncio.to_thread(native_files, self.settings), deadline)
+        models = await self._await_deadline(
+            asyncio.to_thread(model_pair, self.settings), deadline)
+        model_identity = await self._await_deadline(
+            asyncio.to_thread(self._model_identity, models), deadline)
+        base, codec = models
         self.state = "LOADING"
         self.last_error = None
         self._stderr.clear()
@@ -228,8 +236,18 @@ class ResidentWorkerSupervisor:
                 raise NativeFailure("Loaded worker native proof missing")
             if native_init != 1 or native_synth != 0 or not context:
                 raise NativeFailure("Persistent worker context counters invalid")
+            # Close the verify-to-load race: the paths sent to ov_init must
+            # still pass the full pinned SHA check after LOAD completes.
+            loaded_models = await self._await_deadline(
+                asyncio.to_thread(model_pair, self.settings), deadline)
+            loaded_identity = await self._await_deadline(
+                asyncio.to_thread(self._model_identity, loaded_models), deadline)
+            if loaded_models != models or loaded_identity != model_identity:
+                raise NativeFailure("Pinned model changed during worker load")
             self.context_identity = context
             self._native_synthesis_count = 0
+            self._verified_models = loaded_models
+            self._model_file_identity = loaded_identity
             self.generation += 1
             self.cold_load_count += 1
             self._proof = proof
@@ -244,6 +262,8 @@ class ResidentWorkerSupervisor:
         stderr_task, self._stderr_task = self._stderr_task, None
         self.state = "ERROR"
         self.context_identity = None
+        self._verified_models = None
+        self._model_file_identity = None
         self._cancel_idle()
         if proc:
             await self._terminate(proc)
@@ -286,10 +306,50 @@ class ResidentWorkerSupervisor:
                 raise NativeFailure("Reference duration violates bound")
             return source.readframes(source.getnframes())
 
-    async def _integrity_snapshot(self, reference: Path, deadline: float):
-        models = await self._await_deadline(asyncio.to_thread(model_pair, self.settings), deadline)
-        pcm = await self._await_deadline(asyncio.to_thread(self._reference_pcm, reference), deadline)
-        return tuple(str(path.resolve(strict=True)) for path in models), hashlib.sha256(pcm).digest()
+    @staticmethod
+    def _model_identity(models: tuple[Path, Path]) -> tuple:
+        identity = []
+        for path in models:
+            resolved = path.resolve(strict=True)
+            source_stat = path.lstat()
+            target_stat = resolved.stat()
+            identity.append((str(path), str(resolved), source_stat.st_dev, source_stat.st_ino,
+                             source_stat.st_size, source_stat.st_mtime_ns, source_stat.st_ctime_ns,
+                             target_stat.st_dev, target_stat.st_ino, target_stat.st_size,
+                             target_stat.st_mtime_ns, target_stat.st_ctime_ns))
+        return tuple(identity)
+
+    async def _check_resident_models(self, deadline: float):
+        if not self._verified_models or not self._model_file_identity:
+            raise NativeFailure("Resident model identity is unavailable")
+        current = await self._await_deadline(
+            asyncio.to_thread(self._model_identity, self._verified_models), deadline)
+        if current != self._model_file_identity:
+            # A changed identity always invalidates the loaded context. Re-run
+            # the full pinned SHA verification so a malicious/invalid change
+            # cannot be treated as a benign cache refresh.
+            await self._await_deadline(asyncio.to_thread(model_pair, self.settings), deadline)
+            raise NativeFailure("Pinned model changed while worker was resident")
+
+    @classmethod
+    def _reference_identity(cls, reference: Path):
+        pcm = cls._reference_pcm(reference)
+        return str(reference.resolve(strict=True)), hashlib.sha256(pcm).digest()
+
+    async def _reference_snapshot(self, reference: Path, deadline: float):
+        return await self._await_deadline(
+            asyncio.to_thread(self._reference_identity, reference), deadline)
+
+    async def _prepare_operation(self, reference: Path, deadline: float):
+        if not self.process or self.process.returncode is not None or self.state == "ERROR":
+            await self._start(deadline)
+        await self._check_resident_models(deadline)
+        return await self._reference_snapshot(reference, deadline)
+
+    async def _finish_operation(self, reference: Path, expected, deadline: float):
+        await self._check_resident_models(deadline)
+        if await self._reference_snapshot(reference, deadline) != expected:
+            raise NativeFailure("Pinned reference changed during generation")
 
     async def _synth(self, *, profile, reference, text, language, seed, speed,
                      deadline: float):
@@ -335,12 +395,11 @@ class ResidentWorkerSupervisor:
             self._cancel_idle(); self.active_id = profile["id"]; started = time.monotonic()
             deadline = started + self.settings.timeout
             try:
-                integrity = await self._integrity_snapshot(reference, deadline)
+                integrity = await self._prepare_operation(reference, deadline)
                 data, frames = await self._synth(profile=profile, reference=reference, text=text,
                                                  language=language, seed=seed, speed=speed,
                                                  deadline=deadline)
-                if await self._integrity_snapshot(reference, deadline) != integrity:
-                    raise NativeFailure("Pinned model or reference changed during generation")
+                await self._finish_operation(reference, integrity, deadline)
                 remaining(deadline)
                 elapsed = time.monotonic() - started
                 return data, {"request_id": request_id, "profile_id": profile["id"], "quant": "Q8_0",
@@ -361,7 +420,7 @@ class ResidentWorkerSupervisor:
             self._cancel_idle(); self.active_id = profile["id"]; started = time.monotonic(); segments = []
             deadline = started + self.settings.timeout
             try:
-                integrity = await self._integrity_snapshot(reference, deadline)
+                integrity = await self._prepare_operation(reference, deadline)
                 for index, part in enumerate(p for p in script.parts if isinstance(p, SpeechPart)):
                     span_seed = None if seed is None else (seed + index) % 2147483648
                     data, _ = await self._synth(profile=profile, reference=reference, text=part.text,
@@ -370,8 +429,7 @@ class ResidentWorkerSupervisor:
                     segments.append(data)
                 remaining(deadline)
                 data, counts = assemble_pause_wav(script, segments, max_bytes=self.settings.max_output_bytes)
-                if await self._integrity_snapshot(reference, deadline) != integrity:
-                    raise NativeFailure("Pinned model or reference changed during generation")
+                await self._finish_operation(reference, integrity, deadline)
                 remaining(deadline)
                 elapsed = time.monotonic() - started
                 speech_s = counts["speech_frames"] / 24000
@@ -391,7 +449,8 @@ class ResidentWorkerSupervisor:
         self._cancel_idle()
         proc = self.process
         if not proc:
-            self.state = "UNLOADED"; self.context_identity = None; return
+            self.state = "UNLOADED"; self.context_identity = None
+            self._verified_models = None; self._model_file_identity = None; return
         self.state = "UNLOADING"
         cleanup_deadline = time.monotonic() + 10
         try:
@@ -411,6 +470,7 @@ class ResidentWorkerSupervisor:
                 with contextlib.suppress(BaseException):
                     await stderr_task
             self.process = None; self.context_identity = None; self.state = "UNLOADED"
+            self._verified_models = None; self._model_file_identity = None
 
     async def unload_now(self):
         if self.lock.locked(): raise NativeBusy("Worker is busy")

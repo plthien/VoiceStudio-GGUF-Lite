@@ -4,6 +4,7 @@ import os
 import struct
 import sys
 import textwrap
+import time
 import wave
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from lite.config import Settings
 from lite.pause import parse_pause_script
 from lite.resident_worker import ResidentWorkerSupervisor, remaining
 from lite.native_runner import NativeBusy, NativeFailure, NativeTimeout
+from lite.runtime import RuntimeErrorLite
 from lite.worker_settings import (ALLOWED_IDLE_TIMEOUTS, WorkerSettings,
                                   WorkerSettingsError, WorkerSettingsStore)
 
@@ -131,6 +133,129 @@ def test_crash_or_timeout_clears_residency_without_replay(persistent,text,error)
 def test_remaining_rejects_expired_absolute_deadline():
     with pytest.raises(NativeTimeout):
         remaining(0)
+
+@pytest.mark.parametrize("operation",["persistent_capability","native_files","model_pair"])
+def test_slow_cold_filesystem_verification_obeys_deadline_before_spawn(
+        persistent,monkeypatch,operation):
+    worker,p=persistent
+    import lite.resident_worker as module
+    original=getattr(module,operation)
+    def slow(*args,**kwargs):
+        time.sleep(.45)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(module,operation,slow)
+    spawned=[]
+    monkeypatch.setattr(module,"persistent_command",lambda exe:(spawned.append(exe) or [sys.executable,str(exe)]))
+    worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                             worker.settings.bin_dir,.2)
+    async def run():
+        with pytest.raises(NativeTimeout): await worker.generate(text="never-spawn",**p)
+        assert not spawned and worker.process is None and worker.state=="ERROR"
+    asyncio.run(run())
+
+def test_expired_deadline_cancels_subprocess_creation_before_native_spawn(persistent,monkeypatch):
+    worker,p=persistent
+    import lite.resident_worker as module
+    real_spawn=module.asyncio.create_subprocess_exec
+    spawned=[]
+    async def slow_spawn(*args,**kwargs):
+        await asyncio.sleep(.45)
+        spawned.append(args)
+        return await real_spawn(*args,**kwargs)
+    monkeypatch.setattr(module.asyncio,"create_subprocess_exec",slow_spawn)
+    worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                             worker.settings.bin_dir,.2)
+    async def run():
+        with pytest.raises(NativeTimeout): await worker.generate(text="no-process",**p)
+        assert not spawned and worker.process is None and worker.state=="ERROR"
+    asyncio.run(run())
+
+def test_warm_requests_reuse_cryptographically_verified_model_identity(persistent,monkeypatch):
+    worker,p=persistent
+    import lite.resident_worker as module
+    verified=module.model_pair
+    calls=[]
+    def counted(settings):
+        calls.append(1)
+        return verified(settings)
+    monkeypatch.setattr(module,"model_pair",counted)
+    async def run():
+        first,_=await worker.generate(text="cold",**p)
+        second,_=await worker.generate(text="warm",**{**p,"request_id":"warm"})
+        assert first.startswith(b"RIFF") and second.startswith(b"RIFF")
+        assert len(calls)==2 and worker.cold_load_count==1 and worker.reuse_count==1
+        await worker.stop()
+    asyncio.run(run())
+
+def test_invalid_model_change_forces_full_verification_and_fault(persistent,monkeypatch):
+    worker,p=persistent
+    import lite.resident_worker as module
+    verified=module.model_pair
+    base=worker.settings.data_dir/"base.gguf"
+    calls=[]
+    def validating(settings):
+        calls.append(1)
+        if base.read_bytes()!=b"base":
+            raise RuntimeErrorLite("Q8 trusted SHA256 mismatch")
+        return verified(settings)
+    monkeypatch.setattr(module,"model_pair",validating)
+    async def run():
+        await worker.generate(text="cold",**p)
+        base.write_bytes(b"evil")
+        with pytest.raises(RuntimeErrorLite):
+            await worker.generate(text="must-fail",**{**p,"request_id":"changed"})
+        assert len(calls)==3 and worker.process is None and worker.state=="ERROR"
+        assert worker.synthesis_count==1
+    asyncio.run(run())
+
+def test_verified_model_identity_change_invalidates_context_then_cold_starts(persistent,monkeypatch):
+    worker,p=persistent
+    import lite.resident_worker as module
+    verified=module.model_pair
+    base=worker.settings.data_dir/"base.gguf"
+    calls=[]
+    def counted(settings):
+        calls.append(1)
+        return verified(settings)
+    monkeypatch.setattr(module,"model_pair",counted)
+    async def run():
+        await worker.generate(text="cold",**p)
+        first_generation=worker.generation
+        base.write_bytes(b"new!")
+        with pytest.raises(NativeFailure):
+            await worker.generate(text="stale-context",**{**p,"request_id":"stale"})
+        assert worker.process is None and worker.synthesis_count==1 and len(calls)==3
+        data,_=await worker.generate(text="new-cold",**{**p,"request_id":"new-cold"})
+        assert data.startswith(b"RIFF") and worker.generation==first_generation+1 and len(calls)==5
+        await worker.stop()
+    asyncio.run(run())
+
+def test_model_change_during_generation_cannot_publish(persistent,monkeypatch):
+    worker,p=persistent
+    import lite.resident_worker as module
+    verified=module.model_pair
+    base=worker.settings.data_dir/"base.gguf"
+    calls=[]
+    monkeypatch.setattr(module,"model_pair",lambda settings:(calls.append(1) or verified(settings)))
+    async def run():
+        task=asyncio.create_task(worker.generate(text="DELAY400 model",**p))
+        while worker.state!="GENERATING": await asyncio.sleep(.005)
+        base.write_bytes(b"swap")
+        with pytest.raises(NativeFailure): await task
+        assert worker.process is None and worker.state=="ERROR" and len(calls)==3
+    asyncio.run(run())
+
+def test_model_change_during_native_load_is_reverified_and_reaped(persistent,monkeypatch):
+    worker,p=persistent
+    base=worker.settings.data_dir/"base.gguf"
+    monkeypatch.setenv("LITE_FAKE_LOAD_DELAY","0.4")
+    async def run():
+        task=asyncio.create_task(worker.generate(text="never-publish",**p))
+        while worker.state!="LOADING": await asyncio.sleep(.005)
+        base.write_bytes(b"swap")
+        with pytest.raises(NativeFailure): await task
+        assert worker.process is None and worker.state=="ERROR" and worker.synthesis_count==0
+    asyncio.run(run())
 
 def test_multispan_uses_one_cumulative_deadline_and_recovers_without_replay(persistent):
     worker,p=persistent
