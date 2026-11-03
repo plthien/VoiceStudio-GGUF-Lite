@@ -7,6 +7,7 @@ param(
   [int]$VoiceVersion=0,
   [int]$Seed=42,
   [double]$Speed=1.0,
+  [int]$ClientTimeoutSeconds=930,
   [switch]$ContinueOnFailure,
   [int[]]$RetryUncertainSections=@()
 )
@@ -17,6 +18,9 @@ $clock=[Diagnostics.Stopwatch]::StartNew()
 $root=(Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $base="http://127.0.0.1:$Port"
 $resuming=-not [string]::IsNullOrWhiteSpace($RunDir)
+if($ClientTimeoutSeconds -lt 15 -or $ClientTimeoutSeconds -gt 3600){
+  throw "INVALID_CLIENT_HTTP_TIMEOUT: must be 15..3600 seconds"
+}
 
 function Get-ProfileSnapshot {
   $encoded=[Uri]::EscapeDataString($Voice)
@@ -150,6 +154,8 @@ function Flush-LongformMetrics {
     schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;
     audio_s=$audio;speech_s=$speech;qualified_fresh_run=$false;resumed_run=$resuming;
     overall_status="IN_PROGRESS";restore_status="PENDING";sections=@($rows);
+    client_http_timeout_s=$ClientTimeoutSeconds;server_section_timeout_s=$runtimeBinding.server_timeout_s;
+    job_wall_sla_max=1800;job_audio_sla_min=600;
     privacy="No voice IDs, text or private filesystem paths"}
   $names=@($rows|ForEach-Object{$_.PSObject.Properties.Name}|Select-Object -Unique)
   if(!$names.Count){$names=@("index","status")}
@@ -239,7 +245,7 @@ try {
       Write-AtomicJson $journalPath $record
       Assert-RuntimeUnchanged $runtimeBinding | Out-Null
       $payload=@{model="omnivoice-gguf";voice=$Voice;input=$section.text;response_format="wav";speed=$Speed;seed=[int]$section.seed}|ConvertTo-Json -Compress
-      $response=Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/v1/audio/speech" -ContentType "application/json" -Body $payload -OutFile $tmp -PassThru
+      $response=Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/v1/audio/speech" -ContentType "application/json" -Body $payload -OutFile $tmp -PassThru -TimeoutSec $ClientTimeoutSeconds
       $timer.Stop()
       if((Get-HeaderValue $response "X-Lite-Verification-Status") -cne "verified" -or
          (Get-HeaderValue $response "X-Lite-Verified-Backend") -cne "Vulkan0" -or
@@ -328,8 +334,11 @@ try {
   $speechTotal=($rows|Where-Object{$_.status -eq 'PASS'}|Measure-Object -Property speech_s -Sum).Sum
   $elapsed=$clock.Elapsed.TotalSeconds
   $success=(-not $restoreFailed -and !$runError -and $wavs.Count -eq $spec.sections.Count -and (Test-Path -LiteralPath (Join-Path $run "final.wav")))
-  $qualified=(-not $resuming -and $success -and @($rows|Where-Object{$_.status -ne 'PASS' -or $_.resumed -eq $true}).Count -eq 0)
-  @{schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;audio_s=$audioTotal;speech_s=$speechTotal;final_rtf=$(if($audioTotal){$elapsed/$audioTotal}else{$null});speech_rtf=$(if($speechTotal){$elapsed/$speechTotal}else{$null});qualified_fresh_run=$qualified;resumed_run=$resuming;overall_status=$(if($success){"PASS"}else{"FAIL"});restore_status=$(if($restoreFailed){"FAIL"}else{"PASS"});errors=@($runError,$(if($restoreFailed){"SETTINGS_RESTORE_FAILED"}else{$null})|Where-Object{$_});sections=$rows;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ForEach-Object{ Write-AtomicJson (Join-Path $run "metrics.json") $_ }
+  $qualified=(-not $resuming -and $success -and $audioTotal -ge 600 -and $elapsed -le 1800 -and
+              @($rows|Where-Object{$_.status -ne 'PASS' -or $_.resumed -eq $true}).Count -eq 0)
+  @{schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;audio_s=$audioTotal;speech_s=$speechTotal;final_rtf=$(if($audioTotal){$elapsed/$audioTotal}else{$null});speech_rtf=$(if($speechTotal){$elapsed/$speechTotal}else{$null});qualified_fresh_run=$qualified;resumed_run=$resuming;job_wall_sla_max=1800;job_audio_sla_min=600;
+    client_http_timeout_s=$ClientTimeoutSeconds;server_section_timeout_s=$runtimeBinding.server_timeout_s;
+    gpu_stats_status="GPU_STATS_UNAVAILABLE";overall_status=$(if($success){"PASS"}else{"FAIL"});restore_status=$(if($restoreFailed){"FAIL"}else{"PASS"});errors=@($runError,$(if($restoreFailed){"SETTINGS_RESTORE_FAILED"}else{$null})|Where-Object{$_});sections=$rows;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ForEach-Object{ Write-AtomicJson (Join-Path $run "metrics.json") $_ }
 }
 $clock.Stop()
 if($restoreFailed -or $runError){
