@@ -5,6 +5,7 @@ on:
       - 'lite/chatterbox*'
       - 'scripts/*chatterbox*'
       - 'scripts/internal/download-chatterbox-model.py'
+      - 'scripts/internal/chatterbox-sha256.ps1'
       - 'tests/chatterbox/**'
       - 'requirements-chatterbox.txt'
       - 'docs/chatterbox-turbo-pr2.md'
@@ -44,7 +45,7 @@ jobs:
         shell: pwsh
         run: |
           $err=@()
-          Get-ChildItem scripts -Filter '*chatterbox*.ps1' | ForEach-Object {
+          Get-ChildItem scripts -Recurse -File -Filter '*chatterbox*.ps1' | ForEach-Object {
             $tok=$null;$parseErrors=$null
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tok,[ref]$parseErrors) | Out-Null
             if($parseErrors){$err+=$parseErrors}
