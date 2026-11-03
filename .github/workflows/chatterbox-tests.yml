@@ -7,6 +7,7 @@ on:
       - 'scripts/internal/download-chatterbox-model.py'
       - 'tests/chatterbox/**'
       - 'requirements-chatterbox.txt'
+      - 'docs/chatterbox-turbo-pr2.md'
       - '.github/workflows/chatterbox-tests.yml'
   workflow_dispatch:
 jobs:
