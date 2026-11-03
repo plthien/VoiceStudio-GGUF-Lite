@@ -504,3 +504,24 @@ def test_final_concatenate_stops_consuming_after_900s(tmp_path):
     with pytest.raises(AudioError,match="FINAL_AUDIO_LIMIT_EXCEEDED"):
         concatenate(lazy_wavs())
     assert visited==[600,301]
+
+
+def test_report_archive_write_error_keeps_previous_latest(tmp_path,monkeypatch):
+    import lite.chatterbox_benchmark as bench
+    folder=tmp_path/"bench"
+    run_folder=folder/"runs"/"new-run"
+    run_folder.mkdir(parents=True)
+    previous=[{"case":"longform","state":"PASS","run_id":"previous-run"}]
+    bench.save_reports(folder,previous)
+    old_json=(folder/"owner-metrics.json").read_bytes()
+    old_csv=(folder/"owner-metrics.csv").read_bytes()
+    original=bench.atomic
+    def fail_archive_csv(path,data):
+        if path==run_folder/"owner-metrics.csv":
+            raise OSError("INJECTED_ARCHIVE_IO_FAILURE")
+        return original(path,data)
+    monkeypatch.setattr(bench,"atomic",fail_archive_csv)
+    with pytest.raises(OSError,match="INJECTED_ARCHIVE_IO_FAILURE"):
+        bench.save_reports(folder,[{"case":"longform","state":"FAIL"}],run_folder)
+    assert (folder/"owner-metrics.json").read_bytes()==old_json
+    assert (folder/"owner-metrics.csv").read_bytes()==old_csv
