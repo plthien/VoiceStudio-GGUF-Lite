@@ -38,7 +38,7 @@ TRUSTED_BASELINE_WORKER_SOURCES = {
     "9985f49c8650661e70e6e5ce4057b50e0ed63fc03a7c39cce21a958fe7f18e70",
 }
 _CAPABILITY_CACHE: dict[tuple, dict] = {}
-_CONTROLS = re.compile(rb"^\\[LiteControls/v1\\] maskgit_steps=(32|24|16|12|8) flash_attention=([01]) ref_cache_enabled=([01])$",re.M)
+_CONTROLS = re.compile(rb"^\[LiteControls/v1\] maskgit_steps=(32|24|16|12|8) flash_attention=([01]) ref_cache_enabled=([01])$",re.M)
 
 
 def native_control_attestation(stderr: bytes) -> dict:
