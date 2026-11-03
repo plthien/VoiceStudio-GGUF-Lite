@@ -32,6 +32,14 @@ CAPABILITY, READY, RESULT, OK, ERROR = 101, 102, 103, 104, 255
 CAPABILITY_MARKER = b"LitePersistent/v1"
 _CAPABILITY_CACHE: dict[tuple, dict] = {}
 
+
+def remaining(deadline: float) -> float:
+    """Return the one-operation budget without ever refreshing it."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise NativeTimeout("Persistent generation deadline exceeded")
+    return left
+
 def persistent_command(exe: Path) -> list[str]:
     return [str(exe)]
 
@@ -99,6 +107,20 @@ class ResidentWorkerSupervisor:
         self._idle_deadline: float | None = None
         self._idle_token = 0
 
+    async def _await_deadline(self, awaitable, deadline: float):
+        try:
+            budget = remaining(deadline)
+        except BaseException:
+            close = getattr(awaitable, "close", None)
+            if close:
+                close()
+            raise
+        try:
+            async with asyncio.timeout(budget):
+                return await awaitable
+        except TimeoutError as exc:
+            raise NativeTimeout("Persistent generation deadline exceeded") from exc
+
     def status(self) -> dict:
         busy = self.lock.locked() or self.state in {"LOADING", "GENERATING", "UNLOADING"}
         remaining = None
@@ -144,7 +166,8 @@ class ResidentWorkerSupervisor:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(proc.wait(), 10)
 
-    async def _frame(self, command: int, payload: bytes = b"", *, limit=MAX_CONTROL):
+    async def _frame(self, command: int, payload: bytes = b"", *, deadline: float,
+                     limit=MAX_CONTROL):
         proc = self.process
         if not proc or proc.returncode is not None:
             raise NativeFailure("Persistent worker is not running")
@@ -154,25 +177,24 @@ class ResidentWorkerSupervisor:
         seq = self._sequence
         proc.stdin.write(HEADER.pack(MAGIC, VERSION, command, seq, len(payload)) + payload)
         try:
-            await proc.stdin.drain()
-            raw = await asyncio.wait_for(proc.stdout.readexactly(HEADER.size), self.settings.timeout)
+            await self._await_deadline(proc.stdin.drain(), deadline)
+            raw = await self._await_deadline(proc.stdout.readexactly(HEADER.size), deadline)
             magic, version, reply, reply_seq, length = HEADER.unpack(raw)
             if magic != MAGIC or version != VERSION or reply_seq != seq or length > limit:
                 raise NativeFailure("Persistent worker returned an invalid frame")
-            body = await asyncio.wait_for(proc.stdout.readexactly(length), self.settings.timeout)
-        except asyncio.TimeoutError as exc:
-            raise NativeTimeout("Persistent worker command timed out") from exc
+            body = await self._await_deadline(proc.stdout.readexactly(length), deadline)
         except (asyncio.IncompleteReadError, BrokenPipeError, ConnectionResetError) as exc:
             raise NativeFailure("Persistent worker disconnected") from exc
         if reply == ERROR:
             raise NativeFailure("Persistent native operation failed")
         return reply, body
 
-    async def _start(self):
+    async def _start(self, deadline: float):
+        remaining(deadline)
         cap = persistent_capability(self.settings)
         if not cap["supported"]:
             raise RuntimeErrorLite("PERSISTENT_WORKER_UNAVAILABLE")
-        state = await asyncio.to_thread(preflight, self.settings)
+        state = await self._await_deadline(asyncio.to_thread(preflight, self.settings), deadline)
         if not state["ready"]:
             raise RuntimeErrorLite("Runtime is not ready")
         exe, _ = native_files(self.settings)
@@ -180,18 +202,19 @@ class ResidentWorkerSupervisor:
         self.state = "LOADING"
         self.last_error = None
         self._stderr.clear()
-        self.process = await asyncio.create_subprocess_exec(
+        self.process = await self._await_deadline(asyncio.create_subprocess_exec(
             *persistent_command(exe), "--lite-worker-stdio", cwd=str(self.settings.bin_dir),
             env=native_env(self.settings), stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             start_new_session=(os.name != "nt"),
-            creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0))
+            creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0)), deadline)
         self._stderr_task = asyncio.create_task(self._drain_stderr(self.process))
         try:
-            reply, body = await self._frame(HELLO)
+            reply, body = await self._frame(HELLO, deadline=deadline)
             if reply != CAPABILITY or body != CAPABILITY_MARKER:
                 raise NativeFailure("Persistent worker handshake failed")
-            reply, body = await self._frame(LOAD, _field(str(base).encode()) + _field(str(codec).encode()))
+            reply, body = await self._frame(
+                LOAD, _field(str(base).encode()) + _field(str(codec).encode()), deadline=deadline)
             if reply != READY or len(body) != 16:
                 raise NativeFailure("Persistent worker load reply invalid")
             context, native_init, native_synth = struct.unpack("<QII", body)
@@ -200,7 +223,7 @@ class ResidentWorkerSupervisor:
                     proof = native_attestation(bytes(self._stderr), state["gpu"])
                     break
                 except NativeFailure:
-                    await asyncio.sleep(.01)
+                    await self._await_deadline(asyncio.sleep(.01), deadline)
             else:
                 raise NativeFailure("Loaded worker native proof missing")
             if native_init != 1 or native_synth != 0 or not context:
@@ -263,12 +286,19 @@ class ResidentWorkerSupervisor:
                 raise NativeFailure("Reference duration violates bound")
             return source.readframes(source.getnframes())
 
-    async def _synth(self, *, profile, reference, text, language, seed, speed):
+    async def _integrity_snapshot(self, reference: Path, deadline: float):
+        models = await self._await_deadline(asyncio.to_thread(model_pair, self.settings), deadline)
+        pcm = await self._await_deadline(asyncio.to_thread(self._reference_pcm, reference), deadline)
+        return tuple(str(path.resolve(strict=True)) for path in models), hashlib.sha256(pcm).digest()
+
+    async def _synth(self, *, profile, reference, text, language, seed, speed,
+                     deadline: float):
         if not self.process or self.process.returncode is not None or self.state == "ERROR":
-            await self._start()
+            await self._start(deadline)
+        remaining(deadline)
         lang = (language or profile["language"]).strip().lower().encode()
         text_b, ref_text = text.encode(), profile["ref_text"].encode()
-        pcm = await asyncio.to_thread(self._reference_pcm, reference)
+        pcm = await self._await_deadline(asyncio.to_thread(self._reference_pcm, reference), deadline)
         effective, _ = speed_to_native(speed)
         seed_value = secrets.randbits(31) if seed is None else seed
         payload = struct.pack("<If", seed_value, effective)
@@ -276,7 +306,8 @@ class ResidentWorkerSupervisor:
         self.state = "GENERATING"
         # RESULT has 24 bytes of metadata; the published PCM WAV adds a
         # canonical 44-byte header. Bound the complete eventual response.
-        reply, body = await self._frame(SYNTH, payload, limit=self.settings.max_output_bytes - 20)
+        reply, body = await self._frame(
+            SYNTH, payload, deadline=deadline, limit=self.settings.max_output_bytes - 20)
         if reply != RESULT or len(body) < 24:
             raise NativeFailure("Persistent worker result invalid")
         context, native_init, native_synth, rate, frames = struct.unpack("<QIIII", body[:24])
@@ -292,6 +323,7 @@ class ResidentWorkerSupervisor:
         out = io.BytesIO()
         with wave.open(out, "wb") as target:
             target.setnchannels(1); target.setsampwidth(2); target.setframerate(24000); target.writeframes(raw)
+        remaining(deadline)
         self.state = "READY"
         return out.getvalue(), frames
 
@@ -301,9 +333,15 @@ class ResidentWorkerSupervisor:
             raise NativeBusy("GPU is busy with another request")
         async with self.lock:
             self._cancel_idle(); self.active_id = profile["id"]; started = time.monotonic()
+            deadline = started + self.settings.timeout
             try:
+                integrity = await self._integrity_snapshot(reference, deadline)
                 data, frames = await self._synth(profile=profile, reference=reference, text=text,
-                                                 language=language, seed=seed, speed=speed)
+                                                 language=language, seed=seed, speed=speed,
+                                                 deadline=deadline)
+                if await self._integrity_snapshot(reference, deadline) != integrity:
+                    raise NativeFailure("Pinned model or reference changed during generation")
+                remaining(deadline)
                 elapsed = time.monotonic() - started
                 return data, {"request_id": request_id, "profile_id": profile["id"], "quant": "Q8_0",
                               **self._proof, "elapsed_s": round(elapsed, 3), "audio_s": frames / 24000,
@@ -321,13 +359,20 @@ class ResidentWorkerSupervisor:
         if self.lock.locked(): raise NativeBusy("GPU is busy with another request")
         async with self.lock:
             self._cancel_idle(); self.active_id = profile["id"]; started = time.monotonic(); segments = []
+            deadline = started + self.settings.timeout
             try:
+                integrity = await self._integrity_snapshot(reference, deadline)
                 for index, part in enumerate(p for p in script.parts if isinstance(p, SpeechPart)):
                     span_seed = None if seed is None else (seed + index) % 2147483648
                     data, _ = await self._synth(profile=profile, reference=reference, text=part.text,
-                                                language=language, seed=span_seed, speed=speed)
+                                                language=language, seed=span_seed, speed=speed,
+                                                deadline=deadline)
                     segments.append(data)
+                remaining(deadline)
                 data, counts = assemble_pause_wav(script, segments, max_bytes=self.settings.max_output_bytes)
+                if await self._integrity_snapshot(reference, deadline) != integrity:
+                    raise NativeFailure("Pinned model or reference changed during generation")
+                remaining(deadline)
                 elapsed = time.monotonic() - started
                 speech_s = counts["speech_frames"] / 24000
                 total_s = counts["audio_frames"] / 24000
@@ -348,12 +393,13 @@ class ResidentWorkerSupervisor:
         if not proc:
             self.state = "UNLOADED"; self.context_identity = None; return
         self.state = "UNLOADING"
+        cleanup_deadline = time.monotonic() + 10
         try:
-            reply, body = await self._frame(UNLOAD)
+            reply, body = await self._frame(UNLOAD, deadline=cleanup_deadline)
             if reply != OK or body:
                 raise NativeFailure("Persistent unload reply invalid")
             with contextlib.suppress(Exception):
-                await self._frame(SHUTDOWN)
+                await self._frame(SHUTDOWN, deadline=cleanup_deadline)
             with contextlib.suppress(Exception):
                 proc.stdin.close()
             await asyncio.wait_for(proc.wait(), 10)

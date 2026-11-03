@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import struct
 import sys
 import textwrap
@@ -10,8 +11,8 @@ import pytest
 
 from lite.config import Settings
 from lite.pause import parse_pause_script
-from lite.resident_worker import ResidentWorkerSupervisor
-from lite.native_runner import NativeFailure
+from lite.resident_worker import ResidentWorkerSupervisor, remaining
+from lite.native_runner import NativeBusy, NativeFailure, NativeTimeout
 from lite.worker_settings import (ALLOWED_IDLE_TIMEOUTS, WorkerSettings,
                                   WorkerSettingsError, WorkerSettingsStore)
 
@@ -28,21 +29,30 @@ while True:
  if not h: break
  magic,v,c,s,n=H.unpack(h);p=sys.stdin.buffer.read(n)
  if magic!=M or v!=1 or len(p)!=n: break
- if c==1: send(101,s,b'LitePersistent/v1')
+ if c==1:
+  time.sleep(float(os.getenv('LITE_FAKE_HELLO_DELAY','0')))
+  send(101,s,b'LitePersistent/v1')
  elif c==2:
+  time.sleep(float(os.getenv('LITE_FAKE_LOAD_DELAY','0')))
   init+=1
   print('[LiteAttest/v1] backend=Vulkan0; device=Vulkan0; description=NVIDIA GeForce GTX 1650',file=sys.stderr,flush=True)
   send(102,s,struct.pack('<QII',ctx,init,synth))
+  time.sleep(float(os.getenv('LITE_FAKE_BEFORE_SYNTH_READ','0')))
  elif c==3:
   seed,speed=struct.unpack_from('<If',p);a=8
   text,a=field(p,a);lang,a=field(p,a);reftext,a=field(p,a);pcm,a=field(p,a)
   if text==b'CRASH': os._exit(19)
   if text==b'SLOW': time.sleep(3)
+  if text.startswith(b'DELAY250'): time.sleep(.25)
+  if text.startswith(b'DELAY400'): time.sleep(.4)
+  if text==b'LATEHEADER': time.sleep(1)
   synth+=1;value=(sum(text)+seed+sum(pcm[:20]))%30000
   raw=struct.pack('<h',value)*2400
   body=struct.pack('<QIIII',ctx,init,synth,24000,2400)+raw
   if text==b'BADSEQ': send(103,s+1,body)
   elif text==b'OVERSIZE': sys.stdout.buffer.write(H.pack(M,1,103,s,100*1024*1024+99));sys.stdout.buffer.flush()
+  elif text==b'PARTIAL':
+   sys.stdout.buffer.write(H.pack(M,1,103,s,len(body))+body[:7]);sys.stdout.buffer.flush();time.sleep(3)
   else: send(103,s,body)
  elif c==4: send(104,s)
  elif c==5: send(104,s);break
@@ -61,8 +71,11 @@ def persistent(tmp_path,monkeypatch):
     monkeypatch.setattr("lite.resident_worker.persistent_capability",lambda _: {"supported":True})
     monkeypatch.setattr("lite.resident_worker.preflight",lambda _: {"ready":True,"gpu":{"name":"NVIDIA GeForce GTX 1650","vendor_id":"0x10de"}})
     monkeypatch.setattr("lite.resident_worker.native_files",lambda _: (fake,bin_dir/"ggml-vulkan.dll"))
+    (tmp_path/"base.gguf").write_bytes(b"base")
+    (tmp_path/"codec.gguf").write_bytes(b"codec")
     monkeypatch.setattr("lite.resident_worker.model_pair",lambda _: (tmp_path/"base.gguf",tmp_path/"codec.gguf"))
-    monkeypatch.setattr("lite.resident_worker.native_env",lambda _: dict())
+    monkeypatch.setattr("lite.resident_worker.native_env",lambda _: {
+        key:value for key,value in os.environ.items() if key.startswith("LITE_FAKE_")})
     monkeypatch.setattr("lite.resident_worker.persistent_command",lambda exe:[sys.executable,str(exe)])
     policy=WorkerSettings("persistent",None)
     worker=ResidentWorkerSupervisor(settings,lambda:policy)
@@ -113,6 +126,144 @@ def test_crash_or_timeout_clears_residency_without_replay(persistent,text,error)
         data,_=await worker.generate(text="new explicit request",**p)
         assert data.startswith(b"RIFF") and worker.cold_load_count==prior_loads+1
         await worker.stop()
+    asyncio.run(run())
+
+def test_remaining_rejects_expired_absolute_deadline():
+    with pytest.raises(NativeTimeout):
+        remaining(0)
+
+def test_multispan_uses_one_cumulative_deadline_and_recovers_without_replay(persistent):
+    worker,p=persistent
+    worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                             worker.settings.bin_dir,.65)
+    script=parse_pause_script("DELAY250 one [pause] DELAY250 two [pause] DELAY250 three")
+    async def run():
+        started=asyncio.get_running_loop().time()
+        with pytest.raises(NativeTimeout):
+            await worker.generate_paused(
+                script=script,**{k:v for k,v in p.items() if k!="request_id"},request_id="cumulative")
+        assert asyncio.get_running_loop().time()-started < 1.25
+        assert worker.process is None and worker.state=="ERROR" and worker._idle_deadline is None
+        prior=worker.cold_load_count
+        worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                                 worker.settings.bin_dir,2)
+        data,_=await worker.generate(text="new explicit",**{**p,"request_id":"after-timeout"})
+        assert data.startswith(b"RIFF") and worker.cold_load_count==prior+1
+        await worker.stop()
+    asyncio.run(run())
+
+@pytest.mark.parametrize("script_text",[
+    "DELAY400 first [pause] DELAY400 second",
+    "first [pause] second [pause] SLOW",
+])
+def test_second_or_final_span_timeout_reaps_and_publishes_nothing(persistent,script_text):
+    worker,p=persistent
+    worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                             worker.settings.bin_dir,.65)
+    async def run():
+        with pytest.raises(NativeTimeout):
+            await worker.generate_paused(
+                script=parse_pause_script(script_text),
+                **{k:v for k,v in p.items() if k!="request_id"},request_id="span-timeout")
+        assert worker.process is None and worker.state=="ERROR" and worker._idle_task is None
+    asyncio.run(run())
+
+def test_competing_request_rejected_until_timeout_cleanup_then_explicit_recovery(persistent):
+    worker,p=persistent
+    worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                             worker.settings.bin_dir,.55)
+    async def run():
+        first=asyncio.create_task(worker.generate(text="SLOW",**p))
+        while worker.state!="GENERATING": await asyncio.sleep(.005)
+        with pytest.raises(NativeBusy):
+            await worker.generate(text="competitor",**{**p,"request_id":"competing"})
+        with pytest.raises(NativeTimeout): await first
+        assert worker.process is None and worker.state=="ERROR"
+        worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                                 worker.settings.bin_dir,2)
+        data,_=await worker.generate(text="recovery",**{**p,"request_id":"recovery"})
+        assert data.startswith(b"RIFF")
+        await worker.stop()
+    asyncio.run(run())
+
+@pytest.mark.parametrize("text",["LATEHEADER","PARTIAL"])
+def test_header_and_payload_reads_share_absolute_budget(persistent,text):
+    worker,p=persistent
+    worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                             worker.settings.bin_dir,.4)
+    async def run():
+        with pytest.raises(NativeTimeout): await worker.generate(text=text,**p)
+        assert worker.process is None and worker.state=="ERROR"
+    asyncio.run(run())
+
+def test_cold_hello_and_load_share_deadline(persistent,monkeypatch):
+    worker,p=persistent
+    monkeypatch.setenv("LITE_FAKE_HELLO_DELAY","0.25")
+    monkeypatch.setenv("LITE_FAKE_LOAD_DELAY","0.30")
+    worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                             worker.settings.bin_dir,.45)
+    async def run():
+        with pytest.raises(NativeTimeout): await worker.generate(text="never",**p)
+        assert worker.process is None and worker.state=="ERROR"
+    asyncio.run(run())
+
+def test_stdin_drain_is_bounded_by_same_deadline(persistent,monkeypatch,tmp_path):
+    worker,p=persistent
+    monkeypatch.setenv("LITE_FAKE_BEFORE_SYNTH_READ","1")
+    large=tmp_path/"large-reference.wav"
+    with wave.open(str(large),"wb") as out:
+        out.setnchannels(1);out.setsampwidth(2);out.setframerate(24000)
+        out.writeframes(b"\x01\x00"*(60*24000))
+    worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                             worker.settings.bin_dir,.45)
+    async def run():
+        with pytest.raises(NativeTimeout):
+            await worker.generate(text="drain",**{**p,"reference":large})
+        assert worker.process is None and worker.state=="ERROR"
+    asyncio.run(run())
+
+def test_cancellation_while_transmitting_reaps_before_unlock(persistent,monkeypatch,tmp_path):
+    worker,p=persistent
+    monkeypatch.setenv("LITE_FAKE_BEFORE_SYNTH_READ","2")
+    large=tmp_path/"cancel-reference.wav"
+    with wave.open(str(large),"wb") as out:
+        out.setnchannels(1);out.setsampwidth(2);out.setframerate(24000)
+        out.writeframes(b"\x01\x00"*(60*24000))
+    async def run():
+        task=asyncio.create_task(worker.generate(text="cancel-drain",**{**p,"reference":large}))
+        while worker.state!="GENERATING": await asyncio.sleep(.005)
+        await asyncio.sleep(.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError): await task
+        assert worker.process is None and worker.state=="ERROR" and not worker.lock.locked()
+    asyncio.run(run())
+
+def test_final_assembly_is_inside_deadline_and_faults_resident_context(persistent,monkeypatch):
+    worker,p=persistent
+    import lite.resident_worker as module
+    original=module.assemble_pause_wav
+    def late_assembly(*args,**kwargs):
+        __import__("time").sleep(.7)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(module,"assemble_pause_wav",late_assembly)
+    worker.settings=Settings(worker.settings.data_dir,worker.settings.cache_dir,
+                             worker.settings.bin_dir,.5)
+    async def run():
+        with pytest.raises(NativeTimeout):
+            await worker.generate_paused(
+                script=parse_pause_script("first [pause] second"),
+                **{k:v for k,v in p.items() if k!="request_id"},request_id="late-assembly")
+        assert worker.process is None and worker.state=="ERROR" and worker._idle_task is None
+    asyncio.run(run())
+
+def test_final_reference_integrity_is_inside_operation_and_fail_closed(persistent):
+    worker,p=persistent
+    async def run():
+        task=asyncio.create_task(worker.generate(text="DELAY400 integrity",**p))
+        while worker.state!="GENERATING": await asyncio.sleep(.005)
+        make_wav(p["reference"],99)
+        with pytest.raises(NativeFailure): await task
+        assert worker.process is None and worker.state=="ERROR"
     asyncio.run(run())
 
 def test_atomic_settings_all_policies_and_invalid_values(tmp_path):

@@ -33,8 +33,12 @@ jobs:
         run: |
           python -m compileall -q lite
           ffmpeg -version
-      - name: Compile and verify pinned native speed patch (no GPU)
+      - name: Compile and verify pinned native patch contracts (Windows, no GPU)
+        if: runner.os == 'Windows'
         run: python scripts/internal/verify-native-speed.py
+      - name: Link real pinned native worker and run handshake (Linux CPU, no model/GPU)
+        if: runner.os == 'Linux'
+        run: python scripts/internal/verify-native-speed.py --link-worker
       - name: NS04 Windows PowerShell 5.1 real process cleanup
         if: runner.os == 'Windows'
         shell: pwsh

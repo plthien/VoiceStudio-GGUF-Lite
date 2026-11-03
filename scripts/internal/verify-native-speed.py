@@ -1,6 +1,6 @@
-"""Stage exact upstream pin, apply BOTH source patches and compile/run estimator harness.
+"""Stage the exact pin and verify patches, ABI, and optional real target link.
 
-Windows/Ubuntu CI. No full GGUF build, no GPU claims, no vendored upstream.
+Windows/Ubuntu CI. No model files, GPU inference, or vendored upstream.
 """
 from pathlib import Path
 import hashlib,os,shutil,subprocess,sys,tempfile
@@ -10,9 +10,13 @@ PIN="886fc079838ca7400cb2b42b36e2a65aa1daabe8"
 SOURCES=["CMakeLists.txt","src/duration-estimator.h","src/omnivoice.h","src/omnivoice.cpp",
          "src/pipeline-tts.cpp","src/pipeline-tts.h","src/backend.h","tools/omnivoice-tts.cpp"]
 def command(args,**kwargs):
-    return subprocess.run([str(a) for a in args],check=True,timeout=180,**kwargs)
+    timeout=kwargs.pop("timeout",180)
+    return subprocess.run([str(a) for a in args],check=True,timeout=timeout,**kwargs)
 
 def main():
+    link_worker = sys.argv[1:] == ["--link-worker"]
+    if sys.argv[1:] not in ([], ["--link-worker"]):
+        raise SystemExit("usage: verify-native-speed.py [--link-worker]")
     with tempfile.TemporaryDirectory(prefix="lite-native-speed-ci-") as t:
         work=Path(t)
         upstream=work/"upstream"
@@ -21,7 +25,11 @@ def main():
                  "https://github.com/ServeurpersoCom/omnivoice.cpp.git",PIN])
         sha=command(["git","-C",upstream,"rev-parse","FETCH_HEAD"],capture_output=True,text=True).stdout.strip()
         assert sha==PIN,(sha,PIN)
-        command(["git","-C",upstream,"checkout","FETCH_HEAD","--",*SOURCES])
+        if link_worker:
+            command(["git","-C",upstream,"checkout","--detach","FETCH_HEAD"])
+            command(["git","-C",upstream,"submodule","update","--init","--recursive"], timeout=900)
+        else:
+            command(["git","-C",upstream,"checkout","FETCH_HEAD","--",*SOURCES])
         before={name:hashlib.sha256((upstream/name).read_bytes()).hexdigest() for name in SOURCES}
         v2=work/"legacy-v2"
         v2.mkdir()
@@ -139,6 +147,27 @@ int main() { assert(OV_ABI_VERSION==2); assert(legacy_v2_compatible()==(int)size
         command([abi_exe])
         print("PINNED_NATIVE_ABI_V2_GUARDED_INITIALIZER_PASS",PIN)
         print("PINNED_NATIVE_SPEED_PATCH_AND_COMPILED_ESTIMATOR_PASS",PIN)
+        if link_worker:
+            build=work/"real-linked-worker"
+            command(["cmake","-S",upstream,"-B",build,"-DCMAKE_BUILD_TYPE=Release",
+                     "-DGGML_VULKAN=OFF","-DGGML_BACKEND_DL=OFF",
+                     "-DBUILD_SHARED_LIBS=OFF","-DGGML_NATIVE=OFF",
+                     "-DGGML_CPU_ALL_VARIANTS=OFF"], timeout=900)
+            command(["cmake","--build",build,"--config","Release","--target",
+                     "omnivoice-tts","--parallel","2"], timeout=1200)
+            names={"omnivoice-tts","omnivoice-tts.exe"}
+            candidates=[p for p in build.rglob("omnivoice-tts*")
+                        if p.is_file() and p.name in names]
+            if len(candidates)!=1:
+                raise RuntimeError(f"linked omnivoice-tts candidate not unique: {candidates}")
+            linked=candidates[0]
+            help_result=command([linked,"--help"],capture_output=True,text=True)
+            help_text=help_result.stdout+help_result.stderr
+            assert "LitePersistent/v1" in help_text and "LiteNativeSpeed/v1" in help_text
+            handshake=command([sys.executable,ROOT/"scripts/internal/verify-persistent-handshake.py",linked],
+                              capture_output=True,text=True)
+            assert "PERSISTENT_HANDSHAKE_PASS" in handshake.stdout
+            print("PINNED_REAL_OMNIVOICE_TARGET_LINK_AND_HANDSHAKE_PASS_CPU_NO_MODEL",PIN)
         print("PINNED_SOURCE_HASHES",before)
 if __name__=="__main__":
     main()

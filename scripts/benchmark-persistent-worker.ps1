@@ -1,12 +1,36 @@
 param(
-  [Parameter(Mandatory=$true)][string]$VoiceA,
-  [Parameter(Mandatory=$true)][string]$VoiceB,
+  [string]$VoiceA="",
+  [string]$VoiceB="",
   [string]$Output="D:\VoiceStudioBuild\lite\benchmarks\persistent-worker",
-  [int]$Port=3900
+  [int]$Port=3900,
+  [string]$CiMockSpeechUrl=""
 )
 # OWNER LIVE ONLY: real Q8_0/GTX1650 metrics. Never run in CI or export voice IDs/text/audio.
 $ErrorActionPreference="Stop"
 $base="http://127.0.0.1:$Port"
+function Invoke-SpeechRequest([string]$Uri,[string]$Payload,[string]$OutFile) {
+  # -UseBasicParsing prevents Windows PowerShell 5.1 from invoking the legacy
+  # Internet Explorer engine or displaying its first-run security prompt.
+  Invoke-WebRequest -UseBasicParsing -Method Post -Uri $Uri -ContentType "application/json" -Body $Payload -OutFile $OutFile -PassThru
+}
+if ($CiMockSpeechUrl) {
+  # CI-only localhost exercise of the exact request helper. It neither changes
+  # worker settings nor writes an owner report, and its fixture contains no
+  # private voice, transcript, audio or filesystem data.
+  $smoke=[IO.Path]::GetTempFileName()
+  try {
+    $payload=@{model="omnivoice-gguf";voice="ci-smoke";input="CI smoke";response_format="wav";speed=1.0;seed=42}|ConvertTo-Json -Compress
+    $response=Invoke-SpeechRequest $CiMockSpeechUrl $payload $smoke
+    if ((Get-Item -LiteralPath $smoke).Length -lt 46 -or $response.Headers['X-Lite-Verification-Status'] -ne 'verified') {
+      throw "Mock speech response was unverified or truncated"
+    }
+    Write-Output "BENCHMARK_HTTP_SMOKE_PASS"
+  } finally {
+    if (Test-Path -LiteralPath $smoke) { Remove-Item -LiteralPath $smoke -Force }
+  }
+  exit 0
+}
+if (!$VoiceA -or !$VoiceB) { throw "VoiceA and VoiceB are required for the owner benchmark" }
 $dir=Join-Path $Output ([DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss"))
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $rows=New-Object System.Collections.Generic.List[object]
@@ -14,6 +38,11 @@ function Get-Vram {
   $raw=& nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>$null
   if ($LASTEXITCODE -ne 0) { return $null }
   $total=0;foreach($line in $raw){if($line -match '^\s*(\d+)\s*$'){$total += [int]$Matches[1]}};return $total
+}
+function Stop-Monitor($Monitor) {
+  if (!$Monitor) { return }
+  try { if (!$Monitor.HasExited) { $Monitor.Kill() } } catch { }
+  try { $Monitor.WaitForExit() } catch { }
 }
 function Set-Worker([string]$Mode,$Idle){$body=@{mode=$Mode;idle_timeout_seconds=$Idle}|ConvertTo-Json -Compress;Invoke-RestMethod -Method Put -Uri "$base/lite/worker/settings" -ContentType "application/json" -Body $body|Out-Null}
 function Status { Invoke-RestMethod -Uri "$base/lite/worker/status" }
@@ -23,12 +52,12 @@ function Invoke-Sample([string]$Label,[string]$Voice,[string]$Text,[double]$Spee
   try {
     $monitor=Start-Process -FilePath "nvidia-smi.exe" -ArgumentList @('--query-gpu=memory.used','--format=csv,noheader,nounits','--loop-ms=250') -WindowStyle Hidden -RedirectStandardOutput $vramLog -RedirectStandardError (Join-Path $dir ("private-"+$token+".err")) -PassThru
     $payload=@{model="omnivoice-gguf";voice=$Voice;input=$Text;response_format="wav";speed=$Speed;seed=$Seed}|ConvertTo-Json -Compress
-    $response=Invoke-WebRequest -Method Post -Uri "$base/v1/audio/speech" -ContentType "application/json" -Body $payload -OutFile $temp -PassThru
-    $clock.Stop();if($monitor -and !$monitor.HasExited){$monitor.Kill();$monitor.WaitForExit()};$state=Status;$after=Get-Vram
+    $response=Invoke-SpeechRequest "$base/v1/audio/speech" $payload $temp
+    $clock.Stop();Stop-Monitor $monitor;$state=Status;$after=Get-Vram
     $peak=$after;if(Test-Path -LiteralPath $vramLog){foreach($line in (Get-Content -LiteralPath $vramLog)){if($line -match '^\s*(\d+)\s*$' -and [int]$Matches[1] -gt $peak){$peak=[int]$Matches[1]}}}
     if((Get-Item $temp).Length -lt 46 -or $response.Headers['X-Lite-Verification-Status'] -ne 'verified'){throw "Unverified or truncated WAV"}
     $rows.Add([pscustomobject]@{case=$Label;utc=[DateTime]::UtcNow.ToString("o");speed=$Speed;seed=$Seed;http_ms=[math]::Round($clock.Elapsed.TotalMilliseconds,1);server_elapsed_s=$response.Headers['X-Lite-Elapsed-S'];audio_s=$response.Headers['X-Lite-Audio-S'];speech_s=$response.Headers['X-Lite-Speech-S'];pause_s=$response.Headers['X-Lite-Pause-S'];rtf=$response.Headers['X-Lite-RTF'];pid=$state.pid;generation=$state.worker_generation;cold_loads=$state.cold_load_count;syntheses=$state.synthesis_count;reuse=$state.reuse_count;vram_before_mib=$before;vram_peak_mib=$peak;vram_after_mib=$after;state=$state.state})
-  } finally {if($monitor -and !$monitor.HasExited){$monitor.Kill();$monitor.WaitForExit()};foreach($private in @($temp,$vramLog,(Join-Path $dir ("private-"+$token+".err")))){if(Test-Path -LiteralPath $private){Remove-Item -LiteralPath $private -Force}}}
+  } finally {Stop-Monitor $monitor;foreach($private in @($temp,$vramLog,(Join-Path $dir ("private-"+$token+".err")))){if(Test-Path -LiteralPath $private){Remove-Item -LiteralPath $private -Force}}}
 }
 $original=Invoke-RestMethod -Uri "$base/lite/worker/settings"
 try {
