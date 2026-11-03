@@ -135,6 +135,7 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
           "-Port",str(server.server_port),"-VoiceVersion","4"]
     try:
         first=subprocess.run(base,cwd=Path(__file__).parents[2],capture_output=True,text=True,timeout=30)
+        assert first.returncode==0,first.stdout+"\\n"+first.stderr
         run=next(output.iterdir())
         first_metrics=json.loads((run/"metrics.json").read_text(encoding="utf-8-sig"))
         second=subprocess.run(base+["-RunDir",str(run)],cwd=Path(__file__).parents[2],
