@@ -153,15 +153,21 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
                      "pause_count": headers.get("X-Lite-Pause-Count"),
                      "backend": headers.get("X-TTS-Backend"),
                      "cuda_allocated_bytes": headers.get("X-TTS-CUDA-Allocated-Bytes"),
+                     "cuda_reserved_bytes": headers.get("X-TTS-CUDA-Reserved-Bytes"),
                      "cuda_peak_bytes": headers.get("X-TTS-CUDA-Peak-Bytes"),
+                     "cuda_peak_scope": headers.get("X-TTS-CUDA-Peak-Scope"),
+                     "cuda_lifetime_peak_bytes": headers.get("X-TTS-CUDA-Lifetime-Peak-Bytes"),
                      "cuda_free_bytes": headers.get("X-TTS-CUDA-Free-Bytes"),
                      "speed": s.get("speed", 1.0), "voice_version": version}
             state["sections"][identifier] = entry
             save()
             metrics.append({"id":identifier,**entry})
             mem = entry["cuda_peak_bytes"] or "NOT_MEASURED"
+            lifetime=entry["cuda_lifetime_peak_bytes"] or "NOT_MEASURED"
+            scope=entry["cuda_peak_scope"] or "NOT_MEASURED"
             print(f"PASS {identifier} wall={elapsed:.2f}s audio={info['seconds']:.2f}s rtf={entry['rtf']:.2f} "
-                  f"speed={entry['speed']} pause={entry['pause_count']} peak_vram_bytes={mem}",
+                  f"speed={entry['speed']} pause={entry['pause_count']} peak_scope={scope} "
+                  f"generation_peak_vram_bytes={mem} lifetime_peak_vram_bytes={lifetime}",
                   flush=True)
         except BaseException:
             state["sections"][identifier] = {"state": "UNCERTAIN", "key": key}

@@ -57,7 +57,8 @@ class FakeTurbo(TurboService):
         return {"wav":base64.b64encode(audio()).decode(),"syntheses":self.syntheses,
                 "cache_hits":self.hits,
                 "memory":{"allocated_bytes":1000,"reserved_bytes":1500,
-                          "peak_bytes":2000,"free_bytes":3000}}
+                          "peak_bytes":2000,"peak_scope":"generation",
+                          "lifetime_peak_bytes":2000,"free_bytes":3000}}
 
     async def invalidate(self, voice=None):
         self.cache={key for key in self.cache if voice is not None and key[0]!=voice}

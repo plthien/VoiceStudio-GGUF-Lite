@@ -34,6 +34,8 @@ def run_case(name, text, voice, base, output):
                       model_revision=headers.get("X-TTS-Model-Revision"),voice_version=headers.get("X-TTS-Voice-Version"),
                       cuda_allocated_bytes=headers.get("X-TTS-CUDA-Allocated-Bytes"),
                       cuda_peak_bytes=headers.get("X-TTS-CUDA-Peak-Bytes"),
+                      cuda_peak_scope=headers.get("X-TTS-CUDA-Peak-Scope"),
+                      cuda_lifetime_peak_bytes=headers.get("X-TTS-CUDA-Lifetime-Peak-Bytes"),
                       cuda_free_bytes=headers.get("X-TTS-CUDA-Free-Bytes"))
         if output:
             atomic(output/(name+".wav"),data)
@@ -69,7 +71,8 @@ def save_reports(folder,records,run_dir=None):
     fields=["case","run_id","run_directory","state","generation_state","h07_status","h07_reason",
             "cold_start_included","wall_s","audio_s","end_to_end_rtf","rtf",
             "voice_version","model_revision","speech_s","pause_s","backend",
-            "cuda_allocated_bytes","cuda_peak_bytes","cuda_free_bytes","error"]
+            "cuda_allocated_bytes","cuda_peak_bytes","cuda_peak_scope",
+            "cuda_lifetime_peak_bytes","cuda_free_bytes","error"]
     out=io.StringIO()
     writer=csv.DictWriter(out,fieldnames=fields,extrasaction="ignore")
     writer.writeheader();writer.writerows(records)
