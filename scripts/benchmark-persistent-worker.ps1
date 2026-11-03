@@ -21,7 +21,7 @@ $groupCases=@{
   idle=@("idle-60s","never-after-65s","manual-unload")
 }
 $lowLevel=@("cold-a","warm-a-1","warm-a-2","two-pause","ten-pause","aba-a1","aba-b","aba-a2","idle-60s","never-after-65s","never-start","manual-unload","recovery-cold","ci-http")
-$lowLevel+=@(0.85,1.0,1.15|ForEach-Object{"speed-"+$_.ToString("0.00",[cultureinfo]::InvariantCulture)})
+foreach($value in @(0.85,1.0,1.15)){$lowLevel+=("speed-"+$value.ToString("0.00",[cultureinfo]::InvariantCulture))}
 $lowLevel+=@(1..10|ForEach-Object{"warm-cycle-"+$_.ToString("00")})
 $selected=@{}
 foreach($selector in $Cases) {
@@ -109,7 +109,9 @@ function Invoke-Sample([string]$Label,[string]$Voice,[string]$Text,[double]$Spee
       throw "WARM_PRECONDITION_NOT_MET"
     }
     $stage="POST"
-    $monitor=Start-Process -FilePath "nvidia-smi.exe" -ArgumentList @('--query-gpu=memory.used','--format=csv,noheader,nounits','--loop-ms=250') -WindowStyle Hidden -RedirectStandardOutput $vramLog -RedirectStandardError (Join-Path $dir ("private-"+$token+".err")) -PassThru
+    try {
+      $monitor=Start-Process -FilePath "nvidia-smi.exe" -ArgumentList @('--query-gpu=memory.used','--format=csv,noheader,nounits','--loop-ms=250') -WindowStyle Hidden -RedirectStandardOutput $vramLog -RedirectStandardError (Join-Path $dir ("private-"+$token+".err")) -PassThru
+    } catch { $monitor=$null }
     $payload=@{model="omnivoice-gguf";voice=$Voice;input=$Text;response_format="wav";speed=$Speed;seed=$Seed}|ConvertTo-Json -Compress
     $response=Invoke-SpeechRequest "$base/v1/audio/speech" $payload $temp
     $clock.Stop();Stop-Monitor $monitor;$stage="verify";$state=Status;$after=Get-Vram
