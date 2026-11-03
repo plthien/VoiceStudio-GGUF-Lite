@@ -38,6 +38,19 @@ def stage(root: Path):
     noisy='''        fprintf(stderr, "[MaskGIT-Step] %d/%d demask=%d remaining=%d\\n", step + 1, cfg.num_step, k_demask,
                 (int) std::count(tokens.begin(), tokens.end(), mask_id));'''
     replace_one(files,mask,noisy,'        // LitePerf/v1: per-step logs intentionally suppressed; aggregate remains below.')
+    # Aggregate counters are exported privately by GET_PERF. Repeated normal
+    # MaskGIT logs are not needed and can flood the 128 KiB native stderr guard
+    # during multi-section synthesis. Preserve FATAL prints and startup attest.
+    start_log='''    fprintf(
+        stderr,
+        "[MaskGIT] Start: T=%d K=%d S=%d num_step=%d guidance=%.2f t_shift=%.3f layer_pen=%.2f cls_t=%.2f pos_t=%.2f\\n",
+        T, K, S, cfg.num_step, (double) cfg.guidance_scale, (double) cfg.t_shift, (double) cfg.layer_penalty_factor,
+        (double) cfg.class_temperature, (double) cfg.position_temperature);'''
+    replace_one(files,mask,start_log,'    // LitePerf/v1: bounded start diagnostics owned by GET_PERF.')
+    complete_log='''    fprintf(stderr, "[MaskGIT] Total LM forward: %.2f ms across %d steps (avg %.2f ms/step)\\n", fwd_total_ms,
+            cfg.num_step, fwd_total_ms / (double) cfg.num_step);'''
+    replace_one(files,mask,complete_log,'    // LitePerf/v1: numeric LM-forward timing owned by GET_PERF.')
+
     replace_one(files,mask,'    return tokens;\n}', '    lite_perf_state().maskgit_lm_forward_us += (uint64_t) (fwd_total_ms * 1000.0);\n    lite_perf_state().chunk_count++;\n    return tokens;\n}')
     target.write_bytes(header)
     for path,value in files.items(): path.write_text(value,encoding="utf-8")
