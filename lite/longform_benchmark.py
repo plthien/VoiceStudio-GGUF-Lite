@@ -133,12 +133,15 @@ def split_section(text: str, *, seed: int = 42,
 
 def create_manifest(texts: list[str], *, voice_version: int,
                     profile_binding_sha256: str, seed: int = 42,
+                    runtime_binding_sha256: str | None = None,
                     speed: float = 1.0,
                     words_per_minute: float = 150.0) -> dict:
     if voice_version < 1:
         raise ValueError("voice_version must be positive")
     if not re.fullmatch(r"[0-9a-f]{64}", profile_binding_sha256):
         raise ValueError("profile binding must be a lowercase SHA-256 digest")
+    if runtime_binding_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", runtime_binding_sha256):
+        raise ValueError("runtime binding must be a SHA-256 digest")
     sections = []
     for authoritative_index, text in enumerate(texts):
         parts = split_section(
@@ -148,13 +151,15 @@ def create_manifest(texts: list[str], *, voice_version: int,
             item = asdict(part)
             item.update(authoritative_index=authoritative_index,
                         text_sha256=part.sha256, chars=len(part.text),
-                        pauses=pause_count(part.text))
+                        pauses=pause_count(part.text),
+                        pause_ms=sum(m[2] for m in _pause_markers(part.text)))
             sections.append(item)
     for index, item in enumerate(sections):
         item["index"] = index
     core = {"schema": "lite-longform-manifest-v2",
             "voice_version": voice_version,
             "profile_binding_sha256": profile_binding_sha256,
+            "runtime_binding_sha256": runtime_binding_sha256 or "legacy-unbound",
             "seed": seed, "speed": speed,
             "words_per_minute": words_per_minute, "sections": sections}
     encoded = json.dumps(core, sort_keys=True, separators=(",", ":"),
@@ -300,6 +305,7 @@ def main(argv=None) -> int:
     prepare.add_argument("--output", type=Path, required=True)
     prepare.add_argument("--voice-version", type=int, required=True)
     prepare.add_argument("--profile-binding-sha256", required=True)
+    prepare.add_argument("--runtime-binding-sha256")
     prepare.add_argument("--seed", type=int, default=42)
     prepare.add_argument("--speed", type=float, default=1.0)
     assemble = sub.add_parser("assemble")
@@ -315,6 +321,7 @@ def main(argv=None) -> int:
         manifest = create_manifest(
             texts, voice_version=args.voice_version,
             profile_binding_sha256=args.profile_binding_sha256,
+            runtime_binding_sha256=args.runtime_binding_sha256,
             seed=args.seed, speed=args.speed)
         write_manifest_atomic(args.output, manifest)
         print(json.dumps({"status": "PASS", "sections": len(manifest["sections"]),
