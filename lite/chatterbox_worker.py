@@ -17,12 +17,14 @@ from .chatterbox_ipc import read_sync, write_sync, ProtocolError
 
 def pcm_wav(audio) -> bytes:
     # Runtime model returns a tensor at 24kHz. Convert without remote code.
-    x = audio.detach().float().cpu().reshape(-1).clamp(-1, 1)
+    # Reject non-finite model output *before* clamping; Inf must not be
+    # silently translated into an apparently valid full-scale PCM sample.
+    x = audio.detach().float().cpu().reshape(-1)
     import numpy as np
-    samples = x.numpy()
-    if not np.isfinite(samples).all():
+    raw_samples=x.numpy()
+    if not np.isfinite(raw_samples).all():
         raise RuntimeError("NONFINITE_AUDIO")
-    pcm = (samples * 32767).astype("<i2").tobytes()
+    pcm = (np.clip(raw_samples,-1,1) * 32767).astype("<i2").tobytes()
     if not pcm:
         raise RuntimeError("EMPTY_AUDIO")
     out = io.BytesIO()
@@ -127,6 +129,10 @@ class Engine:
             reset_peak = getattr(self.torch.cuda, "reset_peak_memory_stats", None)
             measured_peak = callable(reset_peak)
             if measured_peak:
+                # Capture pre-reset high water (load + reference conditioning)
+                # before defining an isolated per-synthesis peak window.
+                inherited_peak=int(self.torch.cuda.max_memory_allocated())
+                self.lifetime_peak_bytes=max(inherited_peak,self.lifetime_peak_bytes or 0)
                 reset_peak()
             with self.torch.inference_mode():
                 with open(os.devnull, "w") as output, contextlib.redirect_stdout(output):

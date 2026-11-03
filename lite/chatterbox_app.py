@@ -216,7 +216,10 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         attested=bool(status.get("resident") and status.get("state")=="READY" and
                       isinstance(status.get("cuda"),dict) and status["cuda"].get("name"))
         result["model_hash_verified"]=attested
-        result["ready"]=bool(attested and result["installation_preflight_ready"])
+        result["ready"]=bool(attested and result["installation_preflight_ready"]
+                             and app.state.cache_trusted and app.state.settings_consistent)
+        result["service_recovery_required"]=not (
+            app.state.cache_trusted and app.state.settings_consistent)
         return {**result,"worker":status}
 
     @app.get("/chatterbox/runtime/status")
