@@ -301,16 +301,21 @@ def test_generation_cuda_peak_is_reset_between_requests(tmp_path,monkeypatch):
     assert two["free_bytes"]==1000
 
 
-def test_pcm_nonfinite_tensor_fails_without_publishing():
+def test_pcm_nonfinite_tensor_fails_without_publishing(monkeypatch):
     import lite.chatterbox_worker as worker
-    import numpy as np
+    import math
+    from types import SimpleNamespace
+    # The CI-only adapter deliberately avoids Torch/NumPy installation.
+    def finite_flags(samples):
+        flags=[math.isfinite(v) for v in samples]
+        return SimpleNamespace(all=lambda:all(flags))
+    monkeypatch.setitem(sys.modules,"numpy",SimpleNamespace(isfinite=finite_flags))
     class FakeTensor:
         def detach(self):return self
         def float(self):return self
         def cpu(self):return self
         def reshape(self,*args):return self
-        def clamp(self,*args):return self
-        def numpy(self):return np.array([0.0,np.nan],dtype=np.float32)
+        def numpy(self):return [0.0,float("nan")]
     with pytest.raises(RuntimeError,match="NONFINITE_AUDIO"):
         worker.pcm_wav(FakeTensor())
 
