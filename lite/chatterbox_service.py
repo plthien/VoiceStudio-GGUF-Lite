@@ -247,6 +247,8 @@ class TurboService:
                 parts = script.parts if script is not None else (SpeechPart(text),)
                 speech_wavs = []
                 last_memory = {}
+                max_segment_peak = None
+                measured_segments = 0
                 for i, part in enumerate(parts):
                     if not isinstance(part, SpeechPart):
                         continue
@@ -279,7 +281,12 @@ class TurboService:
                             raise
                     speech_wavs.append(raw)
                     if isinstance(answer.get("memory"), dict):
-                        last_memory = answer["memory"]
+                        last_memory = answer["memory"].copy()
+                        segment_peak=last_memory.get("peak_bytes")
+                        if (last_memory.get("peak_scope")=="generation"
+                            and type(segment_peak) is int and segment_peak>=0):
+                            max_segment_peak=max(segment_peak,max_segment_peak or 0)
+                            measured_segments+=1
                     self.hits = answer.get("cache_hits", self.hits)
                     self.syntheses = answer.get("syntheses", self.syntheses)
                 left=deadline-time.monotonic()
@@ -291,6 +298,10 @@ class TurboService:
                     raise TurboError("DEADLINE_EXCEEDED") from exc
                 if time.monotonic()>=deadline:
                     raise TurboError("DEADLINE_EXCEEDED")
+                if max_segment_peak is not None:
+                    last_memory["peak_bytes"]=max_segment_peak
+                    last_memory["peak_scope"]=(
+                        "generation" if measured_segments==1 else "max_generation_in_request")
                 elapsed = time.monotonic() - started
                 speech_s = meta["speech_frames"] / 24000
                 audio_s = info["seconds"]
