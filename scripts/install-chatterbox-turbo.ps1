@@ -19,6 +19,7 @@ if ($path -ne 'D:\VoiceStudioBuild\chatterbox-turbo') {
   throw 'Root must be D:\VoiceStudioBuild\chatterbox-turbo (D:-only isolation)'
 }
 $repo=Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'internal\chatterbox-sha256.ps1')
 $model=Join-Path $path ('models\'+$ModelSha)
 $cache=Join-Path $path 'cache'
 $venv=Join-Path $path '.venv-chatterbox'
@@ -41,12 +42,21 @@ function Verify-Files {
   foreach($name in $Required) {
     $file=Join-Path $model $name
     if(!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "MODEL_FILES_MISSING: $name" }
-    $digest=(Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+    $digest=Get-ChatterboxSha256 -LiteralPath $file
     if($digest -ne $m.sha256.$name) { throw "MODEL_HASH_MISMATCH: $name" }
     if($Expected.ContainsKey($name) -and $digest -ne $Expected[$name]) { throw "MODEL_PIN_MISMATCH: $name" }
   }
 }
-if($VerifyOnly) { Verify-Files; Write-Output 'Verified pinned Turbo model files'; exit 0 }
+if($VerifyOnly) {
+  Verify-Files
+  if (!(Test-Path -LiteralPath $py -PathType Leaf)) { throw 'ENV_NOT_INSTALLED' }
+  if (!(Get-Command ffmpeg -ErrorAction SilentlyContinue)) { throw 'FFMPEG_UNAVAILABLE' }
+  $env:PYTHONPATH=$repo
+  & $py -m lite.chatterbox_config --verify
+  if ($LASTEXITCODE -ne 0) { throw 'CHATTERBOX_PREFLIGHT_FAILED' }
+  Write-Output 'Verified pinned Turbo model files and offline prerequisites'
+  exit 0
+}
 if (!(Test-Path $py)) {
   & py -3.11 -m venv $venv
   if ($LASTEXITCODE -ne 0) { throw 'PYTHON_311_REQUIRED' }
