@@ -143,7 +143,7 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
         server.shutdown();server.server_close();thread.join(timeout=5)
     assert first.returncode==0,first.stdout+first.stderr
     assert second.returncode==0,second.stdout+second.stderr
-    assert first_metrics["resumed_run"] is False and first_metrics["qualified_fresh_run"] is True
+    assert first_metrics["resumed_run"] is False and first_metrics["qualified_fresh_run"] is False  # 2s fixture is not a 600s SLA run
     assert len(posts)==2 and second.stdout.count("PASS resume section=")==2
     fresh=json.loads((run/"metrics.json").read_text(encoding="utf-8-sig"))
     assert fresh["resumed_run"] is True and fresh["qualified_fresh_run"] is False
