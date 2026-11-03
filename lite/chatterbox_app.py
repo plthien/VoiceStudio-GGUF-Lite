@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from .audio import AudioError, convert_reference, wav_info
 from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, SOURCE_REVISION, diagnostic, IDLE_CHOICES
 from .chatterbox_service import TurboService, TurboError
+from .chatterbox_assembly import atomic
 from .pause import parse_pause_script, speech_text, PauseError, DEFAULT_PAUSE_MS, MAX_EVENT_MS, MAX_MARKERS, MAX_TOTAL_MS, PAUSE_POLICY_VERSION
 from .profiles import Store, ProfileError
 
@@ -148,6 +149,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     app.state.service = service or TurboService(settings)
     app.state.admission = asyncio.Lock()
     app.state.generation_task = None
+    app.state.cache_trusted = True
+    app.state.settings_consistent = True
     app.state.settings_path = settings.data_dir / "chatterbox-settings.json"
     try:
         import json
@@ -231,20 +234,38 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     @app.put("/chatterbox/runtime/settings")
     async def put_settings(change: IdleSetting):
         import json
-        import tempfile
-        if app.state.service.lock.locked():
-            return failure(409, "WORKER_BUSY")
-        app.state.service.set_idle(change.idle_timeout_seconds)
-        obj = {"schema": "chatterbox-settings-v1", "idle_timeout_seconds": change.idle_timeout_seconds}
-        fd, temp = tempfile.mkstemp(prefix=".chatterbox-settings-", dir=settings.data_dir)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(obj, f); f.flush(); os.fsync(f.fileno())
-            os.replace(temp, app.state.settings_path)
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temp)
-        return obj
+        if not app.state.settings_consistent:
+            return failure(503,"SETTINGS_RECOVERY_REQUIRED")
+        if app.state.admission.locked() or app.state.service.lock.locked():
+            return failure(409,"WORKER_BUSY")
+        async with app.state.admission:
+            previous=app.state.service.idle_timeout
+            try:
+                old_bytes=(await asyncio.to_thread(app.state.settings_path.read_bytes)
+                           if app.state.settings_path.exists() else None)
+            except OSError:
+                return failure(500,"SETTINGS_SAVE_FAILED")
+            obj={"schema":"chatterbox-settings-v1",
+                 "idle_timeout_seconds":change.idle_timeout_seconds}
+            try:
+                await asyncio.to_thread(atomic,app.state.settings_path,json.dumps(obj).encode())
+            except (OSError,ValueError):
+                return failure(500,"SETTINGS_SAVE_FAILED")
+            try:
+                app.state.service.set_idle(change.idle_timeout_seconds)
+            except BaseException:
+                try:
+                    if old_bytes is None:
+                        await asyncio.to_thread(app.state.settings_path.unlink,missing_ok=True)
+                    else:
+                        await asyncio.to_thread(atomic,app.state.settings_path,old_bytes)
+                    app.state.service.set_idle(previous)
+                except BaseException:
+                    app.state.settings_consistent=False
+                    await app.state.service.stop()
+                    return failure(503,"SETTINGS_RECOVERY_REQUIRED")
+                return failure(500,"SETTINGS_SAVE_FAILED")
+            return obj
 
     @app.post("/chatterbox/runtime/unload")
     async def unload():
@@ -290,21 +311,32 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         except (ProfileError, OSError, AudioError):
             return failure(409, "REFERENCE_INVALID")
 
-    async def owned_mutation(fun):
+    async def owned_mutation(fun, invalidate_voice=None):
+        """Keep admission owned until cache invalidation and acknowledgment."""
         if app.state.admission.locked() or app.state.service.lock.locked():
-            return failure(409, "PROFILE_ACTIVE")
+            return failure(409,"PROFILE_ACTIVE")
         await app.state.admission.acquire()
         async def owner():
             try:
-                return await asyncio.to_thread(fun)
+                changed=await asyncio.to_thread(fun)
+                voice=invalidate_voice or (changed.get("id") if isinstance(changed,dict) else None)
+                try:
+                    await app.state.service.invalidate(voice)
+                except BaseException:
+                    try:
+                        await app.state.service.stop()
+                    except BaseException:
+                        app.state.cache_trusted=False
+                        raise TurboError("MUTATION_COMMITTED_WORKER_UNSAFE")
+                    raise TurboError("MUTATION_COMMITTED_CACHE_RESET")
+                return changed
             finally:
                 app.state.admission.release()
         try:
-            task = asyncio.create_task(owner())
+            task=asyncio.create_task(owner())
         except BaseException:
             app.state.admission.release()
             raise
-        # A disconnected caller must never expose a half-updated profile.
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         return await asyncio.shield(task)
 
@@ -347,11 +379,9 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                 name=name_local, ref_text=ref_text, language="en", source=content,
                 suffix=suffix, consent="confirmed", profile_id=voice_id)
         try:
-            changed = await owned_mutation(mutation)
-            if isinstance(changed, Response):
-                return changed
-            await app.state.service.invalidate(voice_id)
-            return changed
+            return await owned_mutation(mutation,invalidate_voice=voice_id)
+        except TurboError as exc:
+            return failure(503,exc.code)
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND")
         except ProfileError as exc:
@@ -376,11 +406,10 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         if data.get("language", "en") != "en" or data.get("consent", "confirmed") != "confirmed":
             return failure(422, "INVALID_PROFILE")
         try:
-            edited = await owned_mutation(lambda: app.state.store.update(voice_id, data))
-            if isinstance(edited, Response):
-                return edited
-            await app.state.service.invalidate(voice_id)
-            return edited
+            return await owned_mutation(lambda: app.state.store.update(voice_id,data),
+                                        invalidate_voice=voice_id)
+        except TurboError as exc:
+            return failure(503,exc.code)
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND")
         except ProfileError:
@@ -389,12 +418,14 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     @app.delete("/profiles/{voice_id}")
     async def delete_voice(voice_id: str, purge: bool = False):
         try:
-            deleted = await owned_mutation(lambda: app.state.store.delete(
-                voice_id, active_id=app.state.service.active_id, purge=purge))
-            if isinstance(deleted, Response):
+            deleted=await owned_mutation(lambda: app.state.store.delete(
+                voice_id,active_id=app.state.service.active_id,purge=purge),
+                invalidate_voice=voice_id)
+            if isinstance(deleted,Response):
                 return deleted
-            await app.state.service.invalidate(voice_id)
-            return {"deleted": True, "owned_reference_files_purged": purge}
+            return {"deleted":True,"owned_reference_files_purged":purge}
+        except TurboError as exc:
+            return failure(503,exc.code)
         except KeyError:
             return failure(404, "PROFILE_NOT_FOUND")
         except ProfileError:
@@ -406,8 +437,10 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
             script = parse_pause_script(body.input)
         except PauseError as exc:
             return failure(422, exc.code)
+        if not app.state.cache_trusted or not app.state.settings_consistent:
+            return failure(503,"SERVICE_RECOVERY_REQUIRED")
         if app.state.admission.locked() or app.state.service.lock.locked():
-            return failure(429, "NATIVE_BUSY")
+            return failure(429,"NATIVE_BUSY")
         async with app.state.admission:
             row = app.state.store.get(body.voice)
             if not row:
