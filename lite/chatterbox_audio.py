@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import wave
 from pathlib import Path
+from typing import Iterable
 
 from .audio import AudioError, wav_info
 
@@ -55,13 +56,11 @@ FINAL_MAX_SECONDS = 900
 FINAL_MAX_BYTES = FINAL_MAX_SECONDS * 24000 * 2 + 65536
 
 
-def concatenate(wavs: list[bytes], max_bytes: int = FINAL_MAX_BYTES,
+def concatenate(wavs: Iterable[bytes], max_bytes: int = FINAL_MAX_BYTES,
                 max_seconds: int = FINAL_MAX_SECONDS) -> bytes:
     """Bounded one-pass PCM copy; no repeated or list-joined audio buffers."""
     if not 0 < max_seconds <= FINAL_MAX_SECONDS or max_bytes > FINAL_MAX_BYTES:
         raise AudioError("INVALID_FINAL_AUDIO_LIMIT")
-    if not wavs:
-        raise AudioError("EMPTY_ASSEMBLY")
     total_frames = 0
     out = io.BytesIO()
     with wave.open(out, "wb") as writer:
@@ -83,6 +82,8 @@ def concatenate(wavs: list[bytes], max_bytes: int = FINAL_MAX_BYTES,
                         raise AudioError("TRUNCATED_PCM")
                     writer.writeframesraw(pcm)
                     remaining -= count
+    if total_frames == 0:
+        raise AudioError("EMPTY_ASSEMBLY")
     final = out.getvalue()
     wav_info(final, max_bytes=max_bytes, max_seconds=max_seconds)
     return final

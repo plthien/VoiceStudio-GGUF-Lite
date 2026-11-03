@@ -490,3 +490,17 @@ def test_all_benchmark_freezes_owner_manifest_before_warming(tmp_path,monkeypatc
     assert json.loads(frozen)==original
     assert rows[0]["manifest_sha256"]==hashlib.sha256(frozen).hexdigest()
     assert "Original frozen text" not in json.dumps(rows)
+
+
+def test_final_concatenate_stops_consuming_after_900s(tmp_path):
+    """An untrusted 200-section job must not prefetch later 600s files."""
+    visited=[]
+    def lazy_wavs():
+        for seconds in (600,301):
+            visited.append(seconds)
+            yield pcm(seconds,1000)
+        visited.append("UNSAFE_EXTRA_READ")
+        raise AssertionError("Final assembler fetched beyond over-limit boundary")
+    with pytest.raises(AudioError,match="FINAL_AUDIO_LIMIT_EXCEEDED"):
+        concatenate(lazy_wavs())
+    assert visited==[600,301]

@@ -179,9 +179,16 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
         finally:
             if report: atomic(report, json.dumps(metrics,indent=2).encode())
     assert_reference_unchanged()
-    wavs = [ (output / ("section-"+str(s["id"])+".wav")).read_bytes() for s in sections ]
+    # Consume section files lazily. Do not materialize all 200 potential 600s
+    # section WAVs before enforcing the 900s final frame cap.
+    def ordered_wavs():
+        for section in sections:
+            path=output/("section-"+str(section["id"])+".wav")
+            if path.is_symlink():
+                raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
+            yield path.read_bytes()
     # Final assembly is independently bounded to 15 minutes; no unverified WAV is published.
-    final = concatenate(wavs)
+    final = concatenate(ordered_wavs())
     info=wav_info(final, max_bytes=FINAL_MAX_BYTES, max_seconds=FINAL_MAX_SECONDS)
     assert_reference_unchanged()
     result = {"state":"PASS","audio_s":info["seconds"],"final_sha256":info["sha256"],"sections":len(sections),
