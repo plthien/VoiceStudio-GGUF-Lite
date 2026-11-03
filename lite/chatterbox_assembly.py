@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import io
 import json
+import re
+import contextlib
 import os
 import tempfile
 import time
@@ -45,9 +47,8 @@ def section_key(item, voice, version):
     return hashlib.sha256(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def do_job(manifest: Path, output: Path, base="http://127.0.0.1:3901",
+def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
            resume=False, allow_retry=False, report=None):
-    source = json.loads(manifest.read_text(encoding="utf-8"))
     voice = source["voice"]
     sections = source["sections"]
     if not isinstance(sections, list) or not sections:
@@ -68,15 +69,20 @@ def do_job(manifest: Path, output: Path, base="http://127.0.0.1:3901",
         raise RuntimeError("WORKER_BUSY")
     output.mkdir(parents=True, exist_ok=True)
     state_path = output / "resume-manifest.json"
+    job_key=hashlib.sha256(json.dumps({
+        "voice":voice,"voice_version":version,"model_revision":MODEL_REVISION,
+        "ordered_sections":[(v["id"],section_key(v,voice,version)) for v in sections]
+    },sort_keys=True,separators=(",",":")).encode()).hexdigest()
+    if state_path.is_symlink(): raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
     if resume and state_path.exists():
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        if state.get("voice") != voice or state.get("voice_version") != version or state.get("model_revision") != MODEL_REVISION:
+        if state.get("voice") != voice or state.get("voice_version") != version or state.get("model_revision") != MODEL_REVISION or state.get("job_key") != job_key:
             raise RuntimeError("RESUME_PROVENANCE_CHANGED")
     elif state_path.exists():
         raise RuntimeError("OUTPUT_EXISTS_USE_RESUME")
     else:
         state = {"schema": "chatterbox-job-v1", "voice": voice, "voice_version": version,
-                 "model_revision": MODEL_REVISION, "sections": {}}
+                 "model_revision": MODEL_REVISION, "job_key":job_key, "sections": {}}
     def save():
         atomic(state_path, json.dumps(state, indent=2, sort_keys=True).encode())
     save()
@@ -86,6 +92,7 @@ def do_job(manifest: Path, output: Path, base="http://127.0.0.1:3901",
         key = section_key(s, voice, version)
         record = state["sections"].get(identifier)
         target = output / ("section-" + identifier + ".wav")
+        if target.is_symlink(): raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
         if resume and record and record.get("state") == "PASS" and record.get("key") == key and target.is_file():
             raw = target.read_bytes()
             if hashlib.sha256(raw).hexdigest() == record.get("sha256"):
@@ -147,9 +154,80 @@ def do_job(manifest: Path, output: Path, base="http://127.0.0.1:3901",
     final = concatenate(wavs)
     atomic(output/"final.wav", final)
     info=wav_info(final)
-    result = {"state":"PASS","audio_s":info["seconds"],"final_sha256":info["sha256"],"sections":len(sections)}
+    result = {"state":"PASS","audio_s":info["seconds"],"final_sha256":info["sha256"],"sections":len(sections),
+              "voice_version":version,"model_revision":MODEL_REVISION}
     atomic(output/"summary.json", json.dumps(result,indent=2).encode())
     return result
+
+
+
+def load_source(manifest: Path, expected_voice: str | None = None) -> dict:
+    """Validate benchmark identity and section naming before network or output effects."""
+    source=json.loads(manifest.read_text(encoding="utf-8"))
+    if not isinstance(source,dict):
+        raise ValueError("BENCHMARK_VOICE_INVALID")
+    voice=source.get("voice")
+    if not isinstance(voice,str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}",voice):
+        raise ValueError("BENCHMARK_VOICE_INVALID")
+    if expected_voice is not None and (not isinstance(expected_voice,str) or voice!=expected_voice):
+        raise ValueError("BENCHMARK_VOICE_MISMATCH")
+    sections=source.get("sections")
+    if not isinstance(sections,list) or not 1<=len(sections)<=200:
+        raise ValueError("INVALID_SECTIONS")
+    seen=set()
+    for part in sections:
+        if not isinstance(part,dict):
+            raise ValueError("INVALID_SECTION")
+        identifier=part.get("id")
+        if not isinstance(identifier,str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}",identifier):
+            raise ValueError("INVALID_SECTION_ID")
+        if identifier in seen:
+            raise ValueError("DUPLICATE_SECTION_ID")
+        seen.add(identifier)
+        data=part.get("input")
+        if not isinstance(data,str) or not data.strip() or len(data)>4096:
+            raise ValueError("INVALID_SECTION_INPUT")
+    return source
+
+
+@contextlib.contextmanager
+def output_job_lock(output: Path):
+    """Exclusive OS-lock across processes; crash releases FD without stale-file deletion."""
+    output.mkdir(parents=True,exist_ok=True)
+    if output.is_symlink(): raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
+    lock_path=output/".chatterbox-job.lock"
+    if lock_path.is_symlink(): raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
+    with lock_path.open("a+b") as fd:
+        if fd.seek(0,2)==0:
+            fd.write(bytes([0]));fd.flush()
+        fd.seek(0)
+        acquired=False
+        try:
+            try:
+                if os.name=="nt":
+                    import msvcrt
+                    msvcrt.locking(fd.fileno(),msvcrt.LK_NBLCK,1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+                acquired=True
+            except OSError as exc:
+                raise RuntimeError("OUTPUT_JOB_BUSY") from exc
+            yield
+        finally:
+            if acquired:
+                fd.seek(0)
+                if os.name=="nt":
+                    msvcrt.locking(fd.fileno(),msvcrt.LK_UNLCK,1)
+                else:
+                    fcntl.flock(fd.fileno(),fcntl.LOCK_UN)
+
+
+def do_job(manifest: Path, output: Path, base="http://127.0.0.1:3901",
+           resume=False, allow_retry=False, report=None, expected_voice=None):
+    source=load_source(manifest,expected_voice=expected_voice)
+    with output_job_lock(output):
+        return _do_job_unlocked(source,output,base,resume,allow_retry,report)
 
 
 def main():
@@ -168,7 +246,8 @@ def main():
         print("FAIL",type(exc).__name__,str(exc) if str(exc) in (
             "RESUME_PROVENANCE_CHANGED","RESUME_WAV_INVALID","RESUME_INPUT_CHANGED",
             "UNCERTAIN_OR_CHANGED_SECTION_EXPLICIT_RETRY_REQUIRED",
-            "VOICE_VERSION_CHANGED","WORKER_BUSY","OUTPUT_EXISTS_USE_RESUME") else "JOB_FAILED")
+            "VOICE_VERSION_CHANGED","WORKER_BUSY","OUTPUT_EXISTS_USE_RESUME",
+             "OUTPUT_JOB_BUSY","BENCHMARK_VOICE_MISMATCH","BENCHMARK_VOICE_INVALID") else "JOB_FAILED")
         raise SystemExit(1)
 
 
