@@ -21,7 +21,7 @@ from lite.chatterbox_audio import concatenate, FINAL_MAX_BYTES, FINAL_MAX_SECOND
 from lite.chatterbox_assembly import do_job, reference_binding
 from lite.chatterbox_benchmark import evaluate_h07
 from lite.chatterbox_config import ChatterboxSettings, MODEL_REVISION
-from .test_contracts import audio
+from .test_contracts import audio, api
 
 
 def pcm(seconds, sample=1024):
