@@ -68,6 +68,12 @@ function Sync-File([string]$path){
   $stream=New-Object IO.FileStream($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
   try {$stream.Flush($true)} finally {$stream.Dispose()}
 }
+function Get-HeaderValue([object]$response,[string]$name){
+  foreach($key in $response.Headers.Keys){
+    if([string]$key -ieq $name){return [string]$response.Headers[$key]}
+  }
+  return ""
+}
 function Get-RuntimeBinding {
   $state=Invoke-RestMethod -Uri "$base/lite/worker/status"
   $binding=$state.runtime_binding
@@ -193,16 +199,46 @@ try {
       $payload=@{model="omnivoice-gguf";voice=$Voice;input=$section.text;response_format="wav";speed=$Speed;seed=[int]$section.seed}|ConvertTo-Json -Compress
       $response=Invoke-WebRequest -UseBasicParsing -Method Post -Uri "$base/v1/audio/speech" -ContentType "application/json" -Body $payload -OutFile $tmp -PassThru
       $timer.Stop()
-      if($response.Headers['X-Lite-Verification-Status'] -ne 'verified'){throw "Unverified native response"}
+      if((Get-HeaderValue $response "X-Lite-Verification-Status") -cne "verified" -or
+         (Get-HeaderValue $response "X-Lite-Verified-Backend") -cne "Vulkan0" -or
+         (Get-HeaderValue $response "X-Lite-Observed-Device") -notmatch "NVIDIA.*GTX 1650"){
+        throw "NATIVE_GPU_PROOF_INVALID"
+      }
+      if((Get-HeaderValue $response "Content-Type") -notmatch "^audio/wav"){
+        throw "AUDIO_CONTENT_TYPE_INVALID"
+      }
+      $effectiveSpeed=Get-HeaderValue $response "X-Lite-Effective-Speed"
+      $speedValue=0.0
+      if(![double]::TryParse($effectiveSpeed,[Globalization.NumberStyles]::Float,
+        [cultureinfo]::InvariantCulture,[ref]$speedValue) -or
+         [math]::Abs($speedValue-$Speed) -gt 0.001){
+        throw "EFFECTIVE_SPEED_MISMATCH"
+      }
       $wavInfoJson=python -m lite.longform_benchmark inspect --wav $tmp
       if($LASTEXITCODE -ne 0){throw "Section WAV integrity validation failed"}
       $wavInfo=$wavInfoJson|ConvertFrom-Json
       $audioSeconds=[double]$wavInfo.audio_s
-      $headerAudio=[string]$response.Headers['X-Lite-Audio-S']
+      $headerAudio=Get-HeaderValue $response "X-Lite-Audio-S"
       if([string]::IsNullOrWhiteSpace($headerAudio) -or [Math]::Abs([double]$headerAudio-$audioSeconds) -gt 0.001){throw "Audio duration header does not match verified WAV"}
-      $speechHeader=[string]$response.Headers['X-Lite-Speech-S']
+      $speechHeader=Get-HeaderValue $response "X-Lite-Speech-S"
       $speechSeconds=$(if([string]::IsNullOrWhiteSpace($speechHeader)){$audioSeconds}else{[double]$speechHeader})
       if($speechSeconds -le 0 -or $speechSeconds -gt ($audioSeconds+(1.0/24000.0))){throw "Invalid speech duration header"}
+      $expectedPause=[double]$section.pause_ms/1000.0
+      $pauseSeconds=0.0
+      $pauseHeader=Get-HeaderValue $response "X-Lite-Pause-S"
+      $pauseCountHeader=Get-HeaderValue $response "X-Lite-Pause-Count"
+      if([int]$section.pauses -gt 0){
+        if([string]::IsNullOrWhiteSpace($pauseHeader) -or
+           [string]::IsNullOrWhiteSpace($pauseCountHeader)){throw "PAUSE_PROOF_MISSING"}
+        $pauseSeconds=[double]::Parse($pauseHeader,[cultureinfo]::InvariantCulture)
+        if([int]$pauseCountHeader -ne [int]$section.pauses){throw "PAUSE_COUNT_MISMATCH"}
+      } elseif($pauseHeader -or $pauseCountHeader){
+        if([double]$pauseHeader -ne 0 -or [int]$pauseCountHeader -ne 0){throw "UNEXPECTED_PAUSE_METADATA"}
+      }
+      if([math]::Abs($pauseSeconds-$expectedPause) -gt (1.0/24000.0) -or
+         [math]::Abs(($speechSeconds+$pauseSeconds)-$audioSeconds) -gt 0.001){
+        throw "PAUSE_DURATION_MISMATCH"
+      }
       Assert-ProfileUnchanged $profile
       $observed=Assert-RuntimeUnchanged $runtimeBinding
       if($observed.candidate_kind -eq "verified_candidate" -and $observed.settings_verification -ne "observed"){
