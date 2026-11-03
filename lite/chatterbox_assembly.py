@@ -40,10 +40,27 @@ def http_json(base: str, path: str, payload=None, timeout=10):
         return json.load(reply)
 
 
-def section_key(item, voice, version):
+def section_key(item, voice, version, reference_binding=None):
     frozen = {"text": item["input"], "voice": voice, "voice_version": version,
+              "reference_binding": reference_binding,
               "model_revision": MODEL_REVISION, "speed": item.get("speed", 1.0),
               "seed": item.get("seed", 42)}
+    return hashlib.sha256(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def reference_binding(profile: dict, voice: str) -> str:
+    """Private opaque identity spanning DB provenance; never log source checksums."""
+    if not isinstance(profile, dict) or profile.get("id") != voice:
+        raise RuntimeError("REFERENCE_PROVENANCE_UNAVAILABLE")
+    version = profile.get("version")
+    ref_sha = profile.get("ref_sha256")
+    source_sha = profile.get("source_sha256")
+    if (type(version) is not int or version < 1 or
+        not isinstance(ref_sha, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", ref_sha) or
+        not isinstance(source_sha, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", source_sha)):
+        raise RuntimeError("REFERENCE_PROVENANCE_UNAVAILABLE")
+    frozen = {"voice": voice, "version": version, "ref_sha256": ref_sha.lower(),
+              "source_sha256": source_sha.lower(), "model_revision": MODEL_REVISION}
     return hashlib.sha256(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -64,6 +81,11 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
             raise ValueError("Unsafe section ID")
     profile = http_json(base, "/profiles/" + urllib.parse.quote(voice, safe=""))
     version = profile["version"]
+    binding = reference_binding(profile, voice)
+    def assert_reference_unchanged():
+        latest = http_json(base, "/profiles/" + urllib.parse.quote(voice, safe=""))
+        if reference_binding(latest, voice) != binding:
+            raise RuntimeError("RESUME_PROVENANCE_CHANGED")
     status = http_json(base, "/chatterbox/runtime/status")
     if status.get("busy"):
         raise RuntimeError("WORKER_BUSY")
@@ -71,25 +93,28 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
     state_path = output / "resume-manifest.json"
     job_key=hashlib.sha256(json.dumps({
         "voice":voice,"voice_version":version,"model_revision":MODEL_REVISION,
-        "ordered_sections":[(v["id"],section_key(v,voice,version)) for v in sections]
+        "reference_binding": binding,
+        "ordered_sections":[(v["id"],section_key(v,voice,version,binding)) for v in sections]
     },sort_keys=True,separators=(",",":")).encode()).hexdigest()
     if state_path.is_symlink(): raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
     if resume and state_path.exists():
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        if state.get("voice") != voice or state.get("voice_version") != version or state.get("model_revision") != MODEL_REVISION or state.get("job_key") != job_key:
+        if state.get("voice") != voice or state.get("voice_version") != version or state.get("model_revision") != MODEL_REVISION or state.get("job_key") != job_key or state.get("reference_binding") != binding:
             raise RuntimeError("RESUME_PROVENANCE_CHANGED")
     elif state_path.exists():
         raise RuntimeError("OUTPUT_EXISTS_USE_RESUME")
     else:
         state = {"schema": "chatterbox-job-v1", "voice": voice, "voice_version": version,
-                 "model_revision": MODEL_REVISION, "job_key":job_key, "sections": {}}
+                 "model_revision": MODEL_REVISION, "job_key":job_key,
+                 "reference_binding":binding,"sections": {}}
     def save():
         atomic(state_path, json.dumps(state, indent=2, sort_keys=True).encode())
     save()
     metrics = []
     for order, s in enumerate(sections):
         identifier = str(s["id"])
-        key = section_key(s, voice, version)
+        key = section_key(s, voice, version, binding)
+        assert_reference_unchanged()
         record = state["sections"].get(identifier)
         target = output / ("section-" + identifier + ".wav")
         if target.is_symlink(): raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
@@ -119,9 +144,7 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
                 data = reply.read(100*1024*1024+1)
                 headers = reply.headers  # Case-insensitive HTTPMessage; dict conversion loses header lookups.
             info = wav_info(data)
-            current = http_json(base, "/profiles/" + urllib.parse.quote(voice, safe=""))
-            if current["version"] != version:
-                raise RuntimeError("VOICE_VERSION_CHANGED")
+            assert_reference_unchanged()
             atomic(target, data)
             elapsed = time.monotonic() - started
             entry = {"state": "PASS", "key": key, "sha256": hashlib.sha256(data).hexdigest(),
@@ -149,14 +172,26 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
             raise
         finally:
             if report: atomic(report, json.dumps(metrics,indent=2).encode())
+    assert_reference_unchanged()
     wavs = [ (output / ("section-"+str(s["id"])+".wav")).read_bytes() for s in sections ]
     # Final assembly is independently bounded to 15 minutes; no unverified WAV is published.
     final = concatenate(wavs)
-    atomic(output/"final.wav", final)
     info=wav_info(final, max_bytes=FINAL_MAX_BYTES, max_seconds=FINAL_MAX_SECONDS)
+    assert_reference_unchanged()
     result = {"state":"PASS","audio_s":info["seconds"],"final_sha256":info["sha256"],"sections":len(sections),
               "voice_version":version,"model_revision":MODEL_REVISION}
-    atomic(output/"summary.json", json.dumps(result,indent=2).encode())
+    target_final=output/"final.wav"
+    target_summary=output/"summary.json"
+    if target_final.is_symlink() or target_summary.is_symlink():
+        raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
+    try:
+        atomic(target_final, final)
+        atomic(target_summary, json.dumps(result, indent=2).encode())
+    except BaseException:
+        # Incomplete publish is never advertised as a successful final result.
+        target_final.unlink(missing_ok=True)
+        target_summary.unlink(missing_ok=True)
+        raise
     return result
 
 
@@ -247,7 +282,8 @@ def main():
             "RESUME_PROVENANCE_CHANGED","RESUME_WAV_INVALID","RESUME_INPUT_CHANGED",
             "UNCERTAIN_OR_CHANGED_SECTION_EXPLICIT_RETRY_REQUIRED",
             "VOICE_VERSION_CHANGED","WORKER_BUSY","OUTPUT_EXISTS_USE_RESUME",
-             "OUTPUT_JOB_BUSY","BENCHMARK_VOICE_MISMATCH","BENCHMARK_VOICE_INVALID") else "JOB_FAILED")
+             "OUTPUT_JOB_BUSY","BENCHMARK_VOICE_MISMATCH","BENCHMARK_VOICE_INVALID",
+             "REFERENCE_PROVENANCE_UNAVAILABLE") else "JOB_FAILED")
         raise SystemExit(1)
 
 
