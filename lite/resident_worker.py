@@ -21,7 +21,7 @@ from .pause import SpeechPart
 from .pause_audio import assemble_pause_wav
 from .runtime import model_pair, native_env, native_files, preflight, RuntimeErrorLite
 from .speed import speed_to_native
-from .performance_metrics import parse_performance
+from .performance_metrics import parse_performance, aggregate_performance
 
 MAGIC = 0x3150544C  # LTP1, little endian
 VERSION = 1
@@ -147,6 +147,7 @@ class ResidentWorkerSupervisor:
         self._perf_enabled = os.environ.get("GGUF_LITE_PERF", "0") == "1"
         self._perf_supported = False
         self.last_performance: dict | None = None
+        self._last_native_perf: dict | None = None
 
     async def _await_deadline(self, awaitable, deadline: float):
         try:
@@ -286,6 +287,8 @@ class ResidentWorkerSupervisor:
             if loaded_models != models or loaded_identity != model_identity:
                 raise NativeFailure("Pinned model changed during worker load")
             self.context_identity = context
+            self._last_native_perf = None
+            self.last_performance = None
             self._native_synthesis_count = 0
             self._verified_models = loaded_models
             self._model_file_identity = loaded_identity
@@ -306,6 +309,7 @@ class ResidentWorkerSupervisor:
         self._verified_models = None
         self._model_file_identity = None
         self.last_performance = None
+        self._last_native_perf = None
         self._cancel_idle()
         if proc:
             await self._terminate(proc)
@@ -428,6 +432,7 @@ class ResidentWorkerSupervisor:
                 raise NativeFailure("Persistent worker performance reply invalid")
             try:
                 self.last_performance = parse_performance(perf_body)
+                self._last_native_perf = dict(self.last_performance)
             except ValueError as exc:
                 raise NativeFailure("Persistent worker performance payload invalid") from exc
         out = io.BytesIO()
@@ -471,16 +476,27 @@ class ResidentWorkerSupervisor:
             deadline = started + self.settings.timeout
             try:
                 integrity = await self._prepare_operation(reference, deadline)
+                perf_prior = dict(self._last_native_perf) if self._last_native_perf else None
+                perf_spans = []
                 for index, part in enumerate(p for p in script.parts if isinstance(p, SpeechPart)):
                     span_seed = None if seed is None else (seed + index) % 2147483648
                     data, _ = await self._synth(profile=profile, reference=reference, text=part.text,
                                                 language=language, seed=span_seed, speed=speed,
                                                 deadline=deadline)
                     segments.append(data)
+                    if self._perf_enabled and self._perf_supported:
+                        if self._last_native_perf is None:
+                            raise NativeFailure("Native performance snapshot missing")
+                        perf_spans.append(dict(self._last_native_perf))
                 remaining(deadline)
                 data, counts = assemble_pause_wav(script, segments, max_bytes=self.settings.max_output_bytes)
                 await self._finish_operation(reference, integrity, deadline)
                 remaining(deadline)
+                if self._perf_enabled and self._perf_supported:
+                    try:
+                        self.last_performance = aggregate_performance(perf_spans, perf_prior)
+                    except ValueError as exc:
+                        raise NativeFailure("Native multi-span performance invalid") from exc
                 elapsed = time.monotonic() - started
                 speech_s = counts["speech_frames"] / 24000
                 total_s = counts["audio_frames"] / 24000
@@ -500,7 +516,8 @@ class ResidentWorkerSupervisor:
         proc = self.process
         if not proc:
             self.state = "UNLOADED"; self.context_identity = None
-            self._verified_models = None; self._model_file_identity = None; return
+            self._verified_models = None; self._model_file_identity = None
+            self._last_native_perf = None; self.last_performance = None; return
         self.state = "UNLOADING"
         cleanup_deadline = time.monotonic() + 10
         try:
@@ -521,6 +538,7 @@ class ResidentWorkerSupervisor:
                     await stderr_task
             self.process = None; self.context_identity = None; self.state = "UNLOADED"
             self._verified_models = None; self._model_file_identity = None
+            self._last_native_perf = None; self.last_performance = None
 
     async def unload_now(self):
         if self.lock.locked(): raise NativeBusy("Worker is busy")

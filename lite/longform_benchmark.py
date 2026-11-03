@@ -19,6 +19,7 @@ from .pause import (COMPLETE, MARKER_START, MAX_MARKERS, MAX_TOTAL_MS,
 MAX_CHARS = 4096
 MAX_PAUSES = MAX_MARKERS
 MAX_ESTIMATED_SECONDS = 60.0
+MAX_WAV_FRAMES = 900 * 24000  # Explicit validation bound; owner 900-s stability fixture.
 PLAIN_UNIT_RE = re.compile(r"\s+|\S+")
 
 
@@ -181,12 +182,26 @@ def write_manifest_atomic(path: Path, manifest: dict) -> None:
 
 
 def inspect_wav(path: Path) -> dict:
+    """Validate frames in bounded chunks, never materializing full long-form PCM."""
+    if path.stat().st_size > MAX_WAV_FRAMES * 2 + 65536:
+        raise ValueError("section WAV exceeds validation byte bound")
     with wave.open(str(path), "rb") as src:
         if (src.getnchannels(), src.getsampwidth(), src.getframerate()) != (1, 2, 24000):
             raise ValueError("section WAV must be 24 kHz mono PCM16")
+        if src.getcomptype() != "NONE":
+            raise ValueError("section WAV must be uncompressed PCM")
         frames = src.getnframes()
-        if frames <= 0 or len(src.readframes(frames)) != frames * 2:
-            raise ValueError("section WAV is truncated")
+        if frames <= 0 or frames > MAX_WAV_FRAMES:
+            raise ValueError("section WAV exceeds frame bound")
+        count = 0
+        while count < frames:
+            requested = min(65536, frames - count)
+            block = src.readframes(requested)
+            if len(block) != requested * 2:
+                raise ValueError("section WAV is truncated")
+            count += requested
+        if src.readframes(1):
+            raise ValueError("section WAV has unexpected audio frames")
     return {"frames": frames, "audio_s": frames / 24000.0}
 
 
@@ -253,12 +268,26 @@ def write_metrics(directory: Path, rows: list[dict], started: float) -> dict:
               "speech_rtf": total_wall / speech if speech else None,
               "privacy": "text, voice ids, reference bytes and audio paths omitted"}
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "metrics.json").write_text(json.dumps(report, indent=2),
-                                              encoding="utf-8")
-    with (directory / "metrics.csv").open("w", encoding="utf-8", newline="") as out:
-        writer = csv.DictWriter(out, fieldnames=list(rows[0]) if rows else ["index"])
+    # Both report files are durable independently after each completed outcome.
+    def publish(path: Path, render):
+        fd, name = tempfile.mkstemp(prefix=path.name + ".", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as out:
+                render(out)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(name, path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+    publish(directory / "metrics.json", lambda out: json.dump(report, out, indent=2))
+    fieldnames = list(dict.fromkeys(k for row in rows for k in row)) or ["index"]
+    def render_csv(out):
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+    publish(directory / "metrics.csv", render_csv)
     return report
 
 

@@ -23,3 +23,49 @@ def parse_performance(payload:bytes)->dict:
     if stages>result["native_total_us"]+1000:
         raise ValueError("LitePerf phase totals exceed native total")
     return {"schema":"LitePerf/v1",**result}
+
+# LitePerf/v1 mixes per-SYNTH durations with a retained load value and
+# worker-cumulative reference-cache counters. Never sum all fields blindly.
+PER_SYNTH_FIELDS = (
+    "ref_preprocess_us", "ref_codec_encode_us", "prompt_and_duration_us",
+    "maskgit_lm_forward_us", "maskgit_sampling_us", "codec_decode_us",
+    "postprocess_us", "native_total_us", "unaccounted_us",
+    "reference_codec_encode_calls", "encoded_ref_samples",
+    "encoded_ref_bytes", "chunk_count",
+)
+
+
+def aggregate_performance(spans: list[dict], prior: dict | None = None) -> dict:
+    """Aggregate a single multi-span request; `prior` is the last raw PERF frame.
+
+    Cache hit/miss counters are cumulative within the current native context.
+    A new resident context must pass prior=None, never a previous generation.
+    """
+    if not spans:
+        raise ValueError("cannot aggregate an empty native performance request")
+    for item in spans:
+        if item.get("schema") != "LitePerf/v1":
+            raise ValueError("native performance snapshot is unverified")
+        if (item["maskgit_steps"] != spans[0]["maskgit_steps"] or
+                item["flash_attention"] != spans[0]["flash_attention"]):
+            raise ValueError("effective native settings changed across request spans")
+    previous = prior or {"reference_cache_hits": 0, "reference_cache_misses": 0}
+    for item in spans:
+        if any(item[field] < previous[field] for field in
+               ("reference_cache_hits", "reference_cache_misses")):
+            raise ValueError("native cumulative cache counters regressed")
+        previous = item
+    first = spans[0]
+    end = spans[-1]
+    beginning = prior or {"reference_cache_hits": 0, "reference_cache_misses": 0}
+    result = {"schema": "LitePerf/v1", "span_count": len(spans),
+              "maskgit_steps": first["maskgit_steps"],
+              "flash_attention": first["flash_attention"],
+              "model_load_us": first["model_load_us"],
+              "ref_cache_hit": int(any(item["ref_cache_hit"] for item in spans)),
+              "ref_cache_hit_count": sum(item["ref_cache_hit"] for item in spans),
+              "reference_cache_hits": end["reference_cache_hits"] - beginning["reference_cache_hits"],
+              "reference_cache_misses": end["reference_cache_misses"] - beginning["reference_cache_misses"]}
+    for field in PER_SYNTH_FIELDS:
+        result[field] = sum(item[field] for item in spans)
+    return result

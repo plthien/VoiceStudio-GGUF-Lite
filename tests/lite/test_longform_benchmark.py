@@ -139,3 +139,36 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
     fresh=json.loads((run/"metrics.json").read_text(encoding="utf-8-sig"))
     assert fresh["resumed_run"] is True and fresh["qualified_fresh_run"] is False
     assert [row["speech_s"] for row in fresh["sections"]]==[1.0,0.5]
+
+def test_inspect_wav_is_bounded_and_rejects_corruption(tmp_path):
+    import tracemalloc
+    from lite.longform_benchmark import inspect_wav
+    wav = tmp_path / "section.wav"
+    with wave.open(str(wav), "wb") as out:
+        out.setnchannels(1); out.setsampwidth(2); out.setframerate(24000)
+        for _ in range(60):
+            out.writeframesraw(b"\\0\\0" * 24000)
+    tracemalloc.start()
+    result = inspect_wav(wav)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert result["frames"] == 60 * 24000
+    assert peak < 1024 * 1024  # Not a complete 2.88 MB PCM allocation.
+    with wav.open("r+b") as fh:
+        fh.truncate(fh.seek(0, 2) - 100)
+    with pytest.raises(ValueError, match="truncated"):
+        inspect_wav(wav)
+
+
+def test_metrics_rows_are_durable_and_sparse_failures_supported(tmp_path):
+    from lite.longform_benchmark import write_metrics
+    started = time.monotonic()
+    write_metrics(tmp_path, [{"index": 0, "audio_s": 2, "speech_s": 2,
+                              "status": "PASS"}], started)
+    report = write_metrics(tmp_path, [{"index": 0, "audio_s": 2, "speech_s": 2,
+                                        "status": "PASS"},
+                                       {"index": 1, "status": "FAIL",
+                                        "error": "NATIVE_TIMEOUT"}], started)
+    assert len(report["sections"]) == 2
+    assert json.loads((tmp_path / "metrics.json").read_text())["sections"][1]["status"] == "FAIL"
+    assert not list(tmp_path.glob("*.partial"))

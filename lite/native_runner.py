@@ -49,6 +49,12 @@ def native_attestation(stderr: bytes, detected: dict) -> dict:
             "verification_evidence":"native-stderr:LiteAttest/v1",
             "verification_status":"verified"}
 
+async def _communicate_before_deadline(proc, payload: bytes, remaining):
+    """Evaluate the deadline before creating any coroutine (no leaked awaitables)."""
+    budget = remaining()
+    return await asyncio.wait_for(_bounded_communicate(proc, payload), timeout=budget)
+
+
 async def _bounded_communicate(proc: asyncio.subprocess.Process, payload: bytes) -> bytes:
     """Pipe is drained incrementally; never buffer arbitrary native stderr."""
     async def read_stderr():
@@ -326,9 +332,8 @@ class Runner:
             proc=self.process
             try:
                 try:
-                    stderr=await asyncio.wait_for(
-                        _bounded_communicate(proc,text.encode("utf-8")),
-                        timeout=remaining())
+                    stderr=await _communicate_before_deadline(
+                        proc, text.encode("utf-8"), remaining)
                 except asyncio.TimeoutError as exc:
                     raise NativeTimeout("Whole paused script timed out") from exc
                 if proc.returncode!=0:
