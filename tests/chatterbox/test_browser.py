@@ -12,6 +12,7 @@ import uvicorn
 from playwright.sync_api import sync_playwright, expect
 
 from lite.chatterbox_app import create_app
+from lite.audio import wav_info
 from lite.chatterbox_config import ChatterboxSettings
 from .test_contracts import FakeTurbo, audio
 

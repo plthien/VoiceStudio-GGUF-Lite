@@ -248,3 +248,24 @@ def test_cpu_diagnostic_does_not_import_torch():
     import lite.chatterbox_cpu_diagnostic as diagnostic
     assert callable(diagnostic.cpu_diagnostic)
     assert "torch" not in sys.modules
+
+
+
+def test_atempo_preserves_approximate_pitch():
+    import math
+    import struct
+    out = io.BytesIO()
+    count = 24000
+    pcm = b"".join(struct.pack("<h",int(9000*math.sin(2*math.pi*440*i/24000)))
+                   for i in range(count))
+    with wave.open(out,"wb") as w:
+        w.setnchannels(1);w.setsampwidth(2);w.setframerate(24000)
+        w.writeframes(pcm)
+    for speed in (0.75,1.25):
+        stretched=stretch_speech(out.getvalue(),speed,10,300000)
+        frames=wav_info(stretched)["frames"]
+        with wave.open(io.BytesIO(stretched),"rb") as w:
+            samples=struct.unpack("<"+"h"*frames,w.readframes(frames))
+        crossings=sum(a<=0<b for a,b in zip(samples,samples[1:]))
+        pitch=crossings/(frames/24000)
+        assert abs(pitch-440)<20,(speed,pitch)

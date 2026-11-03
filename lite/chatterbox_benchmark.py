@@ -80,7 +80,11 @@ def main():
             started=time.monotonic()
             try:
                 result=do_job(a.manifest,folder/"longform",a.base,resume=False,report=folder/"sections.json")
-                records.append({"case":"longform","state":"PASS","wall_s":time.monotonic()-started,**result})
+                elapsed=time.monotonic()-started
+                records.append({"case":"longform","state":"PASS","wall_s":elapsed,
+                                "rtf":elapsed/result["audio_s"], "sla_checked":result["audio_s"]>=600,
+                                "sla_under_1800s": elapsed<=1800 if result["audio_s"]>=600 else None,
+                                **result})
             except Exception as exc:
                 records.append({"case":"longform","state":"FAIL","wall_s":time.monotonic()-started,
                                 "error":type(exc).__name__})

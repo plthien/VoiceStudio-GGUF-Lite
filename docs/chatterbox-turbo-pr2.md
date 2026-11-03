@@ -59,3 +59,18 @@ python -m pytest tests/lite -vv -ra --timeout=35
 ```
 
 Both Windows and Ubuntu exercise fake workers, FastAPI and browser workflows without downloading the CUDA runtime. These results do **not** substantiate real acoustics, RTF, torch CUDA installation, or 4 GiB compatibility. Revert PR #2 branch to roll back this PoC; no files or API on GGUF Lite port 3900 need changing.
+
+## Explicit CPU-only fallback diagnosis (not a backend switch)
+
+If and only if owner CUDA tests fail (including CUDA_OOM), an optional CLI can compare this **same pinned Turbo** model on CPU. It does not automatically run, cannot satisfy H01/H07, does not expose an HTTP CPU fallback, and requires adequate system RAM.
+
+```powershell
+# With original :3901 service stopped, explicit user opt-in:
+$env:CHATTERBOX_ROOT='D:\VoiceStudioBuild\chatterbox-turbo'
+$env:PYTHONPATH=(Get-Location).Path
+& 'D:\VoiceStudioBuild\chatterbox-turbo\.venv-chatterbox\Scripts\python.exe' -m lite.chatterbox_cpu_diagnostic --voice-id '<OWNED_VOICE_ID>' --text-file 'D:\private\short-english-input.txt' --output 'D:\VoiceStudioBuild\chatterbox-turbo\benchmarks\cpu-diagnostic.wav'
+```
+
+Output metrics explicitly label `CPU_DIAGNOSTIC_ONLY`, never `CUDA0`. GPU inference requires owner verification; a future optimized Turbo runtime (such as ONNX/native) needs its own evidence and approved follow-up, and is not shipped here. CUDA/no-CUDA mode must not silently change model identity, voice profile or speed/pause contract.
+
+Installer notes: Resemble Perth is installed from pinned commit `ff1c8ac55a976971245cdd53c18d6131ca00d993` with `--no-deps`, and its runtime dependencies (PyYAML, pydub, soundfile, torch/torchaudio, librosa, numpy) are provided explicitly in the isolated environment. Inspect `private-dependency-lock.txt` generated on D:; a successful CI mock run does not verify every Windows CUDA binary wheel.

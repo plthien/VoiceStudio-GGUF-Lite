@@ -16,6 +16,8 @@ from .profiles import Store
 
 def cpu_diagnostic(voice: str, text_file: Path, output: Path):
     settings = ChatterboxSettings.load()
+    if os.name == "nt" and output.resolve().drive.upper() != "D:":
+        raise ValueError("D_DRIVE_ONLY")
     raw = text_file.read_text(encoding="utf-8")
     if not 1 <= len(raw) <= 4096 or not raw.strip():
         raise ValueError("INVALID_INPUT")

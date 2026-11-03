@@ -16,3 +16,6 @@ pyloudnorm==0.1.1
 huggingface_hub==1.4.0
 s3tokenizer==0.3.0
 spacy-pkuseg==1.0.2
+PyYAML==6.0.3
+pydub==0.25.1
+soundfile==0.13.1
