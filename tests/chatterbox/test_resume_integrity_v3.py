@@ -498,7 +498,10 @@ def test_v3_n02_unavailable_attestation_and_malformed_binding_fail_closed(api,tm
     with pytest.raises(RuntimeError,match="REFERENCE_CHANGED"):
         do_job(manifest,output)
     assert not requests
-    assert not output.exists()
+    # The OS output lock may create an empty directory before verification.
+    assert not (output/"resume-manifest.json").exists()
+    assert not (output/"final-commit.json").exists()
+    assert not (output/"final.wav").exists()
 
 
 def test_v3_n02_real_reference_changed_during_synthesis_is_uncertain(api,tmp_path,monkeypatch):
