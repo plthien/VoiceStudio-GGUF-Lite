@@ -1,0 +1,326 @@
+"""ASGI -> real fake-native processes -> attested atomic pause WAV orchestration."""
+import asyncio
+import io
+import os
+import sys
+import time
+import wave
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from lite.app import create_app
+from lite.config import Settings
+from lite.native_runner import Runner
+from lite.audio import wav_info
+
+NATIVE = r'''
+import argparse
+import sys
+import time
+import wave
+import os
+from pathlib import Path
+p=argparse.ArgumentParser()
+for flag in ("--model","--codec","--ref-wav","--ref-text","--lang","--seed","--speed"):
+    p.add_argument(flag,default=None)
+p.add_argument("-o")
+args=p.parse_args()
+text=sys.stdin.buffer.read().decode("utf-8")
+if os.environ.get("PAUSE_AUDIT"):
+    with open(os.environ["PAUSE_AUDIT"],"a",encoding="utf8") as f:
+        f.write(str(args.seed)+"|"+str(args.speed)+"|"+text+"|"+Path(args.ref_text).read_text(encoding="utf8")+"\n")
+if "slow" in text:
+    time.sleep(4)
+if "bad-second" in text:
+    sys.exit(17)
+device="AMD" if "bad-proof" in text else "NVIDIA GeForce GTX 1650"
+print("[LiteAttest/v1] backend=Vulkan0; device=Vulkan0; description="+device,file=sys.stderr)
+with wave.open(args.o,"wb") as w:
+    w.setnchannels(1);w.setsampwidth(2);w.setframerate(24000)
+    w.writeframes(b"\x01\x02"*2400)
+'''
+@pytest.fixture
+def system(tmp_path,monkeypatch):
+    bin=tmp_path/"bin";bin.mkdir()
+    native=bin/"synthetic.py";native.write_text(NATIVE)
+    settings=Settings(data_dir=tmp_path,cache_dir=tmp_path,bin_dir=bin,timeout=20)
+    import lite.native_runner as nr
+    monkeypatch.setattr(nr,"preflight",lambda _:{"ready":True,"gpu":{"name":"NVIDIA GTX 1650","vendor_id":"0x10de"}})
+    monkeypatch.setattr(nr,"native_files",lambda _: (native,bin/"ggml-vulkan.dll"))
+    pairs=[]
+    def modelpair(_):
+        pairs.append(1)
+        return tmp_path/"base.gguf",tmp_path/"tokenizer.gguf"
+    monkeypatch.setattr(nr,"model_pair",modelpair)
+    monkeypatch.setattr(nr,"native_command",lambda exe:[sys.executable,str(exe)])
+    env=os.environ.copy();env["PAUSE_AUDIT"]=str(tmp_path/"audit.txt")
+    monkeypatch.setattr(nr,"native_env",lambda _:env)
+    monkeypatch.setattr(nr,"native_speed_capability",lambda _:{"supported":True})
+    import lite.app as appmod
+    monkeypatch.setattr(appmod,"native_speed_capability",lambda _:{"supported":True})
+    runner=Runner(settings)
+    app=create_app(settings,runner=runner)
+    row={"id":"owned-voice","ref_text":"EXACT OWNED REFERENCE","language":"en","version":1}
+    ref=tmp_path/"owned-ref.wav";ref.write_bytes(b"synthetic")
+    app.state.store.get=lambda _:row
+    app.state.store.reference=lambda _:ref
+    app.state.licence.is_ready=lambda:True
+    return app,runner,settings,pairs,tmp_path
+
+def body(text,speed=1.0,seed=42):
+    return {"model":"omnivoice-gguf","voice":"owned-voice","input":text,
+            "speed":speed,"seed":seed,"response_format":"wav"}
+
+def test_api_exact_pause_timing_seed_and_preflight_once(system,monkeypatch):
+    app,runner,settings,pairs,root=system
+    import lite.native_runner as nr
+    preflights=[]
+    original=nr.preflight
+    monkeypatch.setattr(nr,"preflight",lambda s:(preflights.append(1),original(s))[1])
+    data=body("Alpha. [pause 800ms] Bravo! [pause 1.5s] Charlie.",1.15)
+    with TestClient(app) as c:
+        first=c.post("/v1/audio/speech",json=data)
+        assert first.status_code==200,first.text
+        second=c.post("/v1/audio/speech",json=data)
+        assert second.status_code==200
+    assert first.content==second.content
+    assert int(first.headers["x-lite-pause-count"])==2
+    assert first.headers["x-lite-pause-s"]=="2.3"
+    assert first.headers["x-lite-speech-segments"]=="3"
+    assert first.headers["x-lite-verification-status"]=="verified"
+    assert first.headers["x-lite-verified-backend"]=="Vulkan0"
+    assert wav_info(first.content)["frames"]==3*2400+2300*24
+    assert float(first.headers["x-lite-audio-s"])==pytest.approx(float(first.headers["x-lite-speech-s"])+2.3,abs=1/24000)
+    assert len(preflights)==2,preflights  # one per whole request, not per span
+    assert len(pairs)==4 # one initial, one final model hash per request
+    audit=(root/"audit.txt").read_text().splitlines()
+    assert len(audit)==6
+    assert [x.split("|")[0] for x in audit[:3]]==["42","43","44"]
+    assert [x.split("|")[2] for x in audit[:3]]==["Alpha.","Bravo!","Charlie."]
+    assert all(x.split("|")[3]=="EXACT OWNED REFERENCE" for x in audit)
+    assert all(x.split("|")[1]!="None" for x in audit)
+
+@pytest.mark.parametrize("tag,code",[
+    ("[pause -1s]","INVALID_PAUSE_MARKER"),
+    ("[pause 1minute]","INVALID_PAUSE_MARKER"),
+    ("[pause 1s","INVALID_PAUSE_MARKER"),
+    ("[pause]"*17,"PAUSE_LIMIT_EXCEEDED"),
+    ("[pause 10s]"*7,"PAUSE_LIMIT_EXCEEDED"),
+    ("[pause]","INVALID_REQUEST"),
+])
+def test_bad_marker_typed_422_before_native(system,tag,code):
+    app,runner,settings,pairs,root=system
+    input=tag if code=="INVALID_REQUEST" else "A "+tag+" B"
+    with TestClient(app) as c:
+        r=c.post("/v1/audio/speech",json=body(input))
+    assert r.status_code==422 and r.json()["error"]["code"]==code
+    assert not (root/"audit.txt").exists()
+
+def test_no_marker_unchanged_one_native_path_and_headers(system,monkeypatch):
+    app,runner,settings,pairs,root=system
+    original=runner.generate
+    calls=[]
+    async def spy(**kw):
+        calls.append(kw.copy())
+        return await original(**kw)
+    runner.generate=spy
+    with TestClient(app) as c:
+        response=c.post("/v1/audio/speech",json=body("Untagged normal words"))
+    assert response.status_code==200
+    assert len(calls)==1 and calls[0]["text"]=="Untagged normal words"
+    assert "speed" not in calls[0]
+    assert "x-lite-pause-count" not in response.headers
+    assert wav_info(response.content)["frames"]==2400
+    assert len((root/"audit.txt").read_text().splitlines())==1
+
+@pytest.mark.parametrize("text,status",[
+    ("A[pause]bad-second",500),
+    ("A[pause]bad-proof",500),
+    ("A[pause]slow",504)
+])
+def test_second_span_failure_never_publishes_partial_wav(system,text,status):
+    app,runner,settings,pairs,root=system
+    if "slow" in text:
+        runner.settings=Settings(data_dir=root,cache_dir=root,bin_dir=settings.bin_dir,timeout=.5)
+    with TestClient(app) as c:
+        r=c.post("/v1/audio/speech",json=body(text))
+    assert r.status_code==status
+    assert r.headers.get("content-type","").startswith("application/json")
+    assert not runner.lock.locked() and runner.process is None
+    assert not list(root.glob("lite-pause-*"))
+
+def test_busy_admission_covers_between_spans(system,monkeypatch):
+    app,runner,settings,pairs,root=system
+    orig=runner._paused_span
+    entered=asyncio.Event()
+    release=asyncio.Event()
+    call=[0]
+    async def fenced(**kwargs):
+        call[0]+=1
+        if call[0]==2:
+            entered.set()
+            await release.wait()
+        return await orig(**kwargs)
+    runner._paused_span=fenced
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://127.0.0.1:3900") as client:
+            first=asyncio.create_task(client.post("/v1/audio/speech",json=body("A[pause]B")))
+            await asyncio.wait_for(entered.wait(),timeout=8)
+            assert runner.lock.locked() and app.state.admission.locked()
+            assert (await client.post("/v1/audio/speech",json=body("Second request"))).status_code==429
+            assert (await client.delete("/profiles/owned-voice")).status_code==409
+            assert (await client.get("/lite/status")).json()["busy"] is True
+            release.set()
+            result=await first
+            assert result.status_code==200,result.text
+            assert not runner.lock.locked()
+    asyncio.run(exercise())
+
+def test_cancel_in_second_native_span_reaps_process_and_workspace(system):
+    from lite.pause import parse_pause_script
+    app,runner,settings,pairs,root=system
+    script=parse_pause_script("First[pause 200ms]slow")
+    async def exercise():
+        job=asyncio.create_task(runner.generate_paused(
+            script=script,profile={"id":"owned-voice","ref_text":"EXACT OWNED REFERENCE","language":"en"},
+            reference=root/"owned-ref.wav",language="en",seed=42,request_id="pause-cancel"))
+        for _ in range(250):
+            audit=root/"audit.txt"
+            count=len(audit.read_text().splitlines()) if audit.exists() else 0
+            if count>=2 and runner.process is not None and runner.process.returncode is None:
+                break
+            await asyncio.sleep(.02)
+        assert count>=2 and runner.process is not None,"Expected second native child to be running"
+        proc=runner.process
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await job
+        assert proc.returncode is not None and runner.process is None
+        assert not runner.lock.locked()
+        assert not list(root.glob("lite-pause-*"))
+    asyncio.run(exercise())
+
+def test_single_deadline_not_n_times_timeout(system):
+    from lite.pause import parse_pause_script
+    app,runner,settings,pairs,root=system
+    runner.settings=Settings(data_dir=root,cache_dir=root,bin_dir=settings.bin_dir,timeout=.22)
+    orig=runner._paused_span
+    async def delayed(**kw):
+        await asyncio.sleep(.15)
+        return await orig(**kw)
+    runner._paused_span=delayed
+    async def run():
+        with pytest.raises(Exception) as err:
+            await runner.generate_paused(
+                script=parse_pause_script("First[pause 200ms]Second"),
+                profile={"id":"owned-voice","ref_text":"EXACT OWNED REFERENCE","language":"en"},
+                reference=root/"owned-ref.wav",language="en",seed=42,request_id="deadline")
+        from lite.native_runner import NativeTimeout
+        assert isinstance(err.value,NativeTimeout),type(err.value)
+        assert runner.process is None and not runner.lock.locked()
+        assert not list(root.glob("lite-pause-*"))
+    asyncio.run(run())
+
+def test_explicit_pause_duration_unchanged_at_two_native_speeds(system):
+    app,runner,settings,pairs,root=system
+    import lite.app as appmodule
+    with TestClient(app) as c:
+        base=c.post("/v1/audio/speech",json=body("Alpha[pause 1500ms]Beta",speed=1.0))
+        fast=c.post("/v1/audio/speech",json=body("Alpha[pause 1500ms]Beta",speed=1.15))
+    assert base.status_code==fast.status_code==200
+    assert base.headers["x-lite-pause-s"]==fast.headers["x-lite-pause-s"]=="1.5"
+    assert int(base.headers["x-lite-pause-count"])==int(fast.headers["x-lite-pause-count"])==1
+    assert wav_info(base.content)["frames"]==wav_info(fast.content)["frames"]
+    assert "x-lite-speech-segments" in fast.headers
+    observed=(root/"audit.txt").read_text().splitlines()
+    assert observed[0].split("|")[1]=="None"
+    assert observed[-1].split("|")[1]!="None"
+
+def test_same_native_untagged_wav_bytes_at_seed_42(system):
+    app,runner,settings,pairs,root=system
+    with TestClient(app) as c:
+        first=c.post("/v1/audio/speech",json=body("Same narration exactly",seed=42))
+        second=c.post("/v1/audio/speech",json=body("Same narration exactly",seed=42))
+    assert first.status_code==second.status_code==200
+    assert first.content==second.content
+    assert "x-lite-pause-count" not in first.headers
+
+def test_shutdown_between_native_spans_cancels_entire_request(system):
+    from lite.pause import parse_pause_script
+    app,runner,settings,pairs,root=system
+    entered=asyncio.Event()
+    original=runner._paused_span
+    calls=[0]
+    async def waiting(**kwargs):
+        calls[0]+=1
+        if calls[0]==2:
+            entered.set()
+            await asyncio.Event().wait()
+        return await original(**kwargs)
+    runner._paused_span=waiting
+    async def run():
+        task=asyncio.create_task(runner.generate_paused(
+            script=parse_pause_script("Alpha[pause 200ms]Beta"),
+            profile={"id":"owned-voice","ref_text":"EXACT OWNED REFERENCE","language":"en"},
+            reference=root/"owned-ref.wav",language="en",seed=42,request_id="shutdown"))
+        await asyncio.wait_for(entered.wait(),timeout=8)
+        assert runner.lock.locked() and runner.active_id=="owned-voice"
+        await asyncio.wait_for(runner.stop(),timeout=8)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert runner.process is None and runner.active_id is None
+        assert runner._paused_task is None and not runner.lock.locked()
+        assert not list(root.glob("lite-pause-*"))
+    asyncio.run(run())
+
+def test_reference_integrity_rechecked_before_final_wav(system):
+    from lite.profiles import ProfileError
+    app,runner,settings,pairs,root=system
+    original=app.state.store.reference
+    calls=[0]
+    def changed(row):
+        calls[0]+=1
+        if calls[0]>1:
+            raise ProfileError("External reference was modified mid-script")
+        return original(row)
+    app.state.store.reference=changed
+    with TestClient(app) as client:
+        response=client.post("/v1/audio/speech",json=body("A[pause 200ms]B"))
+    assert response.status_code==409
+    assert response.json()["error"]["code"]=="REFERENCE_INVALID"
+    assert response.headers["content-type"].startswith("application/json")
+    assert calls[0]==2
+    assert runner.process is None and not runner.lock.locked()
+
+
+def test_pause_capability_is_cheap_versioned_and_matches_parser(system, monkeypatch):
+    from lite.pause import parse_pause_script, PausePart
+    app, runner, settings, pairs, root = system
+    def no_gpu_or_model(_):
+        raise AssertionError("Pause capability must never load weights or probe GPU")
+    import lite.app as app_module
+    monkeypatch.setattr(app_module, "preflight", no_gpu_or_model)
+    with TestClient(app) as client:
+        response = client.get("/lite/pause-capability")
+        openapi = client.get("/openapi.json")
+    assert response.status_code == 200
+    assert response.json() == {
+        "policy_version": "lite_inline_pause_pcm16_v1",
+        "supports_tagged_input": True,
+        "tagged_audio_mode": "atomic_pcm16_wav",
+        "default_pause_ms": 350,
+        "max_event_ms": 10_000,
+        "max_markers": 16,
+        "max_total_ms": 60_000,
+        "sample_rate_hz": 24_000,
+    }
+    assert "/lite/pause-capability" in openapi.json()["paths"]
+    assert parse_pause_script("A[pause]B").pause_frames == 350 * 24
+    assert parse_pause_script("A[pause 10s]B").pause_frames == 10_000 * 24
+    assert len([p for p in parse_pause_script("A[pause]B").parts if isinstance(p, PausePart)]) == 1
+    assert not pairs
+    assert not (root / "audit.txt").exists()

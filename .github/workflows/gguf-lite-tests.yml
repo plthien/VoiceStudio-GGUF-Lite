@@ -1,0 +1,89 @@
+name: GGUF Lite deterministic tests
+on:
+  pull_request:
+  push:
+    branches: [feat/gguf-lite-tts-service]
+  workflow_dispatch:
+jobs:
+  lite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Lite-only dependencies
+        run: python -m pip install -r requirements-lite-dev.txt
+      - name: Playwright browser test dependencies
+        run: python -m pip install -r requirements-lite-ui-test.txt
+      - name: Playwright Chromium
+        run: python -m playwright install chromium
+      - name: FFmpeg Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: FFmpeg Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
+      - name: Compile and FFmpeg
+        run: |
+          python -m compileall -q lite
+          ffmpeg -version
+      - name: Compile and verify pinned native patch contracts (Windows, no GPU)
+        if: runner.os == 'Windows'
+        run: python scripts/internal/verify-native-speed.py
+      - name: Link real pinned native worker and run handshake (Linux CPU, no model/GPU)
+        if: runner.os == 'Linux'
+        run: python scripts/internal/verify-native-speed.py --link-worker
+      - name: NS04 Windows PowerShell 5.1 real process cleanup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+            throw 'NOT VERIFIED: Windows PowerShell 5.1 is not installed'
+          }
+          & powershell.exe -NoProfile -Command 'if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) { exit 2 }'
+          if ($LASTEXITCODE -ne 0) { throw 'NOT VERIFIED: powershell.exe is not Windows PowerShell 5.1' }
+          python -m pytest tests/lite/test_speed_candidate_switch.py -vv -ra --timeout=35 -k WindowsPowerShell5_1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell 5.1 NS04 behavioral tests failed' }
+      - name: NS04 PowerShell 7 real process cleanup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Get-Command pwsh.exe -ErrorAction SilentlyContinue)) {
+            throw 'NOT VERIFIED: PowerShell 7 is not installed'
+          }
+          & pwsh.exe -NoProfile -Command 'if ($PSVersionTable.PSVersion.Major -lt 7) { exit 2 }'
+          if ($LASTEXITCODE -ne 0) { throw 'NOT VERIFIED: pwsh.exe is not PowerShell 7' }
+          python -m pytest tests/lite/test_speed_candidate_switch.py -vv -ra --timeout=35 -k PowerShell7
+          if ($LASTEXITCODE -ne 0) { throw 'PowerShell 7 NS04 behavioral tests failed' }
+      - name: Behavioral tests
+        run: python -m pytest tests/lite -vv -ra --timeout=30
+      - name: Synthetic streaming SHA overhead (not user-host benchmark)
+        run: python -m lite.hash_benchmark
+      - name: Repo structural gate
+        run: python tests/lite/check_repo_layout.py
+      - name: Upload non-private UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-ui-${{ matrix.os }}
+          path: ui-test-artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Windows PowerShell parser (no host execution)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bad = @()
+          Get-ChildItem scripts -Filter '*.ps1' -File -Recurse | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors) { $bad += $errors }
+          }
+          if ($bad.Count) { $bad | Out-String | Write-Error; exit 1 }

@@ -1,7 +1,0 @@
-{
-  "mobile": {
-    "export": {
-      "failed": "Couldn't export audio. Check free storage and try again."
-    }
-  }
-}

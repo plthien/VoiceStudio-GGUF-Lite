@@ -1,0 +1,179 @@
+# GGUF Lite development-only service
+
+Isolated local API: lite.app:app, 127.0.0.1:3900. No Electron,
+Bun, Torch, ASR or cloud inference. Model Q8_0 revision
+361609388ae572a820d085185bbbe2a2aac4b30e and pinned native
+886fc079838ca7400cb2b42b36e2a65aa1daabe8.
+
+Install with scripts/install-gguf-lite.ps1 and run
+scripts/run-gguf-lite.ps1 -Preflight before service launch.
+Native runtime build: scripts/build-gguf-lite-vulkan.ps1 using Lite-only
+scripts/internal/build-gguf-lite.sh. Install Lite first: the builder requires
+`D:\VoiceStudioBuild\lite\.venv-lite\Scripts\python.exe` (Python 3.11) and
+Git Bash (not WSL bash). If using a custom installer `-Root`, use the same
+`-Root` when building. The PowerShell script verifies Python and Git Bash
+before cloning, passes the explicit executable to Bash, and restores the
+previous environment variable. When necessary, pass
+`-GitBash 'C:\Program Files\Git\bin\bash.exe'`. CPU fallback is forbidden.
+Confirm ggml-vulkan.dll, EXE and checksum manifest on Windows.
+Preinstall exactly Q8_0 base/tokenizer at the pinned HF revision under
+D:\VoiceStudioBuild\models; no Generate-time downloads.
+NVIDIA Vulkan0 (GTX 1650) must be independently verified.
+On a Windows host with both NVIDIA GTX 1650 (GPU0) and AMD integrated
+graphics (GPU1), vulkaninfo may fail with
+`vkEnumeratePhysicalDevices failed with INCOMPLETE` because of
+`VK_LAYER_AMD_switchable_graphics`. Verify this first using
+`$env:VK_LOADER_LAYERS_DISABLE="VK_LAYER_AMD_switchable_graphics*"`
+in the same PowerShell session, then run `vulkaninfo --summary` and
+`scripts/run-gguf-lite.ps1 -Preflight`. Only proceed if GPU0 is the
+NVIDIA GTX 1650 and the probe exits successfully. Do not disable all
+implicit layers as a default, alter system-wide Vulkan configuration,
+or bypass the existing NVIDIA/VRAM/backend attestation checks.
+
+Known legal blocker: lite/resources/model_notice.json cites revision 0170941...
+but weights use 3616093.... Manual acknowledgement cannot resolve this
+unreviewed provenance mismatch. Terms include CC-BY-NC/Higgs/Meta.
+No commercial inference or output rights are warranted, and AGPL-3.0
+source obligations remain separate.
+
+Native WAV is 24 kHz mono PCM16. The standalone Vulkan build instruments the exact pinned upstream backend source; every successful generation must include native-selected GGML device evidence. Lite does not apply the legacy
+trim/master/normalization/watermark chain. Previously recorded OWNER-HOST
+Windows GTX1650 Q8_0 Ink-Explainer-306 validation: 3/3 native-verified WAVs,
+mean Lite RTF 3.344524, median Lite RTF 3.324411 and 15.28 seconds audio;
+the owner reported live listening PASS. The historical original VoiceStudio
+Q8_0 mean RTF 3.291 is NOT a Lite result, and comparability remains false
+because reference preprocessing/DSP identity was not established. Neither
+host evidence nor subjective listening establishes model/output commercial rights.
+These are preserved owner observations, not CI tests or a new-clone UI acceptance.
+The optional experimental native `--speed` changes estimator frame budgets (not output DSP), and requires a patched candidate validated by the speed capability receipt. Speed is NOT measured/guaranteed WPM; see [native speed owner guide](gguf-lite-native-speed.md). No automatic sentence segmentation is claimed.
+
+Use scripts/migrate-gguf-voices.ps1 with explicit LegacyDb,
+LegacyVoices and TargetData paths. Default is dry-run; -Apply backs up
+the target, never writes legacy files, and requires a nonempty transcript.
+Stop on invalid rows.
+
+Rollback: shut down Lite, switch to feat/gguf-q8-lite, launch original
+VoiceStudio; D: Lite store is separate from original AppData voice DB.
+Do not publish voices, recordings, model weights or compiled binaries.
+
+Deterministic tests: python -m compileall -q lite;
+python -m pytest tests/lite -q.
+Live gate: scripts/benchmark-gguf-lite.ps1 -VoiceId <actual-ID>
+-Repetitions 3 (Windows host only).
+
+Native build isolation: use scripts/build-gguf-lite-vulkan.ps1. It stages pinned source
+and native compilation under D:, fails if the Vulkan DLL is missing, and refuses
+to overwrite an existing Lite runtime. It never modifies original repo bin/.
+The Lite launcher resolves D:\VoiceStudioBuild\lite\runtime\bin.
+
+## Manually reviewed model provenance receipt (no auto-clearance)
+
+Do **not** invent evidence or simply change the legacy registry revision.
+The relocated GGUF-only notice preserves original evidence and mismatch. A human who has inspected the *exact*
+pinned revision and the component terms can place the fetched full model-card
+bytes into D:\VoiceStudioBuild\lite\data\provenance\README.md and a
+D:\VoiceStudioBuild\lite\data\provenance\review.json record:
+
+    {
+      "repo_id": "Serveurperso/OmniVoice-GGUF",
+      "model_revision": "361609388ae572a820d085185bbbe2a2aac4b30e",
+      "evidence_url": "https://huggingface.co/Serveurperso/OmniVoice-GGUF/blob/361609388ae572a820d085185bbbe2a2aac4b30e/README.md",
+      "model_licence": "CC-BY-NC-4.0",
+      "commercial_inference": "restricted",
+      "document_sha256": "<SHA-256 of downloaded exact README bytes>",
+      "reviewed_by": "<actual reviewer>",
+      "reviewed_at": "<actual review date>"
+    }
+
+Review the full linked components/attribution obligations before writing
+the receipt. The service verifies file SHA-256, model revision, exact
+evidence URL and explicit fields; it does not fetch from HF or independently
+verify that a human review was sound. The receipt changes the acceptance
+fingerprint: retrieve GET /models/licenses/acceptance/Serveurperso/OmniVoice-GGUF,
+inspect GET /models/licenses/details/Serveurperso/OmniVoice-GGUF,
+then POST /models/licenses/accept with repo_id, fingerprint and accepted:true.
+Any later local receipt or document change invalidates the old acceptance.
+Commercial rights remain restricted/uncleared regardless of acknowledgement.
+
+## V3 user-only Windows host validation
+
+These commands are **owner-run examples**, not CI evidence. Start from the final PR #1
+commit in a clean checkout. All native binaries, model weights, logs, WAVs and voice data
+remain private under `D:\VoiceStudioBuild\lite`. Do not upload reference recordings,
+model files, generated audio or secrets into the public PR.
+
+```powershell
+.\scripts\install-gguf-lite.ps1
+.\scripts\build-gguf-lite-vulkan.ps1 # writes a fresh candidates\persistent-* directory; never active runtime
+.\scripts\run-gguf-lite.ps1 -Preflight
+
+# Inspect pinned model/component rights before explicit manual acceptance.
+# Then, in another terminal, run:
+.\scripts\run-gguf-lite.ps1
+.\scripts\migrate-gguf-voices.ps1 -LegacyDb "<old-db>" -LegacyVoices "<old-voices>" -TargetData "D:\VoiceStudioBuild\lite\data" -VoiceId "<Ink-ID>"
+.\scripts\migrate-gguf-voices.ps1 -LegacyDb "<old-db>" -LegacyVoices "<old-voices>" -TargetData "D:\VoiceStudioBuild\lite\data" -VoiceId "<Ink-ID>" -Apply
+.\scripts\benchmark-gguf-lite.ps1 -VoiceId "<Ink-ID>" -Repetitions 3 -Policy warm
+```
+
+The benchmark writes `benchmark.json` and `run-01.wav` through `run-03.wav`.
+It verifies the per-request response header that carries the native-selected
+NVIDIA Vulkan0 evidence; 3/3 valid WAVs are mandatory. The frozen narration
+is 306 characters and seed 42. The report records the source/reference SHA-256,
+revision, executable/DLL hashes, 24k mono PCM16 metrics, RTF mean/median,
+source host context and DSP/comparability caveats. If the original reference
+bytes, text and preprocessing are not demonstrably identical, the old mean
+RTF 3.291 is **historical only**, not a direct performance parity result.
+
+Record H01-H06 in a private review note. Human A/B rubric:
+- H01: pinned Windows Vulkan build, EXE/DLL checksums and dependency manifest
+- H02: actual GGML selected NVIDIA GTX1650 Vulkan0 for all successful runs
+- H03: stable ID/transcript/audio hash; old database unchanged after migration
+- H04: three complete audio files and mean/median RTF
+- H05: narration coverage; pronunciation; timbre; pacing/expression;
+  silence/clipping; differences in trim/mastering/normalisation/watermark
+- H06: actual model/codec/voice-reference rights and attribution reviewed
+
+Use PASS, FAIL or NOT VERIFIED for each H gate. The licence review fingerprint
+is not independent legal approval, and no commercial clearance is implied.
+
+SHA-256 verification is intentionally full-file at readiness and immediately
+before/after native inference. This can add substantial I/O overhead.
+CI runs `python -m lite.hash_benchmark` against a disposable 8 MiB fixture and
+prints measured time for each OS; **that is not a substitute** for measuring
+the real pinned ~945 MB pair and real native RTF on the owner's host. Do not
+replace trusted SHA verification with filename-only or mtime-only caching.
+
+## New local Web UI
+
+Use `http://127.0.0.1:3900/ui` after launching the same localhost FastAPI service. See [UI, cloning, migration and rights guide](gguf-lite-ui.md). Existing YouTube HTTP callers remain unchanged; see the [future integration contract](integrations/youtube-ai-studio-tts-contract.md).
+
+## Full Lite readiness semantics (CLI and HTTP)
+
+The raw engine `runtime.preflight()` and `GET /engines/omnivoice-gguf/quants` keep **engine-only** readiness: pinned native files, Q8_0 base/tokenizer pair and observed NVIDIA GTX1650 Vulkan0. Both `python -m lite.preflight` and `GET /lite/readiness` now use the same `complete_readiness` evaluation: `runtime_ready` (engine), `tts_ready` (engine + accepted/reconciled terms + owned data directory), `cloning_ready` (TTS + FFmpeg available). The existing top-level `ready` is conservatively `cloning_ready` on both; `ffmpeg` and `ffmpeg_installed` are the same boolean. FFmpeg absence **does not** downgrade verified GPU engine or TTS prerequisites; external TTS clients must explicitly read `tts_ready` if they do not need cloning. `/health` remains liveness, `/lite/status` remains cheap without GPU/model scanning, and full readiness does not mean live inference succeeded.
+
+## Optional persistent native worker
+
+The saved default remains `legacy_oneshot` with a 600-second idle policy. A verified
+`LitePersistent/v1` candidate may be selected explicitly in **Runtime & Settings** or
+with `PUT /lite/worker/settings`. Persistent mode keeps one native child and one
+`ov_context` across speech spans and HTTP requests. Idle/manual unload and service
+shutdown free the context and reap the child. It never silently falls back to one-shot.
+
+Build an isolated candidate with `scripts/build-gguf-lite-vulkan.ps1 -OutputRuntime
+<fresh-directory>`. The build performs a model-free framed HELLO/SHUTDOWN check and
+writes a digest-bound `persistent-capability.json`; it does not activate the candidate.
+Activation and rollback remain owner-controlled through
+`scripts/switch-gguf-lite-runtime.ps1 -OwnerApproves`.
+
+Owner GTX 1650 acceptance (R25-R27) is deliberately separate from CI. After activation,
+start Lite in legacy mode, select persistent explicitly, then run:
+
+```powershell
+.\scripts\benchmark-persistent-worker.ps1 -VoiceA "<owned-A>" -VoiceB "<owned-B>"
+```
+
+The script exercises cold/warm requests, two/ten pauses, all three speeds, A/B/A,
+ten warm cycles, one-minute/Never idle, manual unload and recovery. It retains only
+privacy-filtered CSV/JSON metrics. Human listening, shutdown/cancellation, peak VRAM,
+memory growth and OOM behavior remain `OWNER TEST PENDING`; on failure select
+`legacy_oneshot` or rollback without deleting model or voice data.
