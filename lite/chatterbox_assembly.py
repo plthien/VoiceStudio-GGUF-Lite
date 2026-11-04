@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 import urllib.parse
 import wave
+import uuid
 from pathlib import Path
 
 from .audio import wav_info
@@ -63,6 +64,210 @@ def reference_binding(profile: dict, voice: str) -> str:
     frozen = {"voice": voice, "version": version, "ref_sha256": ref_sha.lower(),
               "source_sha256": source_sha.lower(), "model_revision": MODEL_REVISION}
     return hashlib.sha256(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+
+# A single atomic receipt is the publication authority. The owner-visible
+# final.wav/summary.json are projections, rebuilt from immutable verified
+# version blobs after a crash between their two replacements.
+FINAL_RECEIPT = "final-commit.json"
+FINAL_VERSIONS = ".chatterbox-final-versions"
+FINAL_SCHEMA = "chatterbox-final-commit-v1"
+
+
+def _final_version(output: Path, artifact_id: str) -> Path:
+    if not isinstance(artifact_id, str) or not re.fullmatch(r"[a-f0-9]{32}",artifact_id):
+        raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED")
+    root=output/FINAL_VERSIONS
+    folder=root/artifact_id
+    if root.is_symlink() or folder.is_symlink():
+        raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED")
+    return folder
+
+
+def _verify_final_bytes(wav: bytes, summary: bytes) -> dict:
+    try:
+        result=json.loads(summary)
+        info=wav_info(wav,max_bytes=FINAL_MAX_BYTES,max_seconds=FINAL_MAX_SECONDS)
+        if (not isinstance(result,dict) or result.get("state")!="PASS"
+            or result.get("final_sha256")!=info["sha256"]
+            or result.get("audio_s")!=info["seconds"]
+            or type(result.get("sections")) is not int
+            or result["sections"]<1):
+            raise ValueError("invalid final-summary agreement")
+        return result
+    except (ValueError,TypeError,KeyError,OSError):
+        raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED") from None
+
+
+def _read_commit(output: Path, job_key: str | None = None):
+    receipt=output/FINAL_RECEIPT
+    if receipt.is_symlink():
+        raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED")
+    if not receipt.exists():
+        return None
+    try:
+        data=json.loads(receipt.read_bytes())
+        if (not isinstance(data,dict) or data.get("schema")!=FINAL_SCHEMA
+            or not isinstance(data.get("job_key"),str)
+            or (job_key is not None and data["job_key"]!=job_key)):
+            raise ValueError("receipt identity mismatch")
+        folder=_final_version(output,data["artifact_id"])
+        wave_path=folder/"final.wav"
+        summary_path=folder/"summary.json"
+        if wave_path.is_symlink() or summary_path.is_symlink():
+            raise ValueError("untrusted version")
+        wav=wave_path.read_bytes()
+        summary=summary_path.read_bytes()
+        if (hashlib.sha256(wav).hexdigest()!=data.get("wav_sha256")
+            or hashlib.sha256(summary).hexdigest()!=data.get("summary_sha256")):
+            raise ValueError("receipt checksum mismatch")
+        result=_verify_final_bytes(wav,summary)
+        return data,wav,summary,result
+    except (OSError,ValueError,KeyError,TypeError,RuntimeError):
+        raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED") from None
+
+
+def _public_paths(output: Path):
+    wav=output/"final.wav"
+    summary=output/"summary.json"
+    if wav.is_symlink() or summary.is_symlink():
+        raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
+    return wav,summary
+
+
+def _restore_public(output: Path, old):
+    """Reconcile a partially overwritten public pair from the old immutable commit."""
+    target_wav,target_summary=_public_paths(output)
+    try:
+        if old is None:
+            # A first-ever failed publish has no committed pair.
+            target_wav.unlink(missing_ok=True)
+            target_summary.unlink(missing_ok=True)
+        else:
+            _,wav,summary,_=old
+            if not target_wav.is_file() or target_wav.read_bytes()!=wav:
+                atomic(target_wav,wav)
+            if not target_summary.is_file() or target_summary.read_bytes()!=summary:
+                atomic(target_summary,summary)
+    except BaseException as exc:
+        # Keep version blobs and old receipt for an explicit recovery on restart.
+        raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED") from exc
+
+
+def _ensure_public_commit(output: Path, receipt):
+    if receipt is not None:
+        _restore_public(output,receipt)
+
+
+def _trusted_legacy_pair(output: Path, job_key: str, state: dict, seconds: float):
+    """Read pre-V3 job outputs without forcing an owner migration."""
+    wav_path,summary_path=_public_paths(output)
+    if not wav_path.exists() and not summary_path.exists():
+        return None
+    if not wav_path.is_file() or not summary_path.is_file():
+        return None
+    try:
+        wav=wav_path.read_bytes()
+        summary=summary_path.read_bytes()
+        result=_verify_final_bytes(wav,summary)
+        if (result.get("model_revision")!=MODEL_REVISION
+            or result.get("voice_version")!=state["voice_version"]
+            or result.get("sections")!=len(state["sections"])
+            or result.get("audio_s")!=seconds):
+            return None
+        return result
+    except (OSError,RuntimeError,KeyError):
+        return None
+
+
+def _existing_final_result(output: Path, state: dict, job_key: str,
+                           total_frames: int, section_count: int):
+    old=_read_commit(output,job_key)
+    if old is not None:
+        receipt,wav,summary,result=old
+        if (result.get("model_revision") != MODEL_REVISION
+            or result.get("voice_version") != state["voice_version"]
+            or result["sections"] != section_count
+            or result["audio_s"] != total_frames/24000):
+            raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED")
+        _ensure_public_commit(output,old)
+        return result
+    # Old V1 jobs have no authoritative receipt. Only their independently
+    # verified *complete pair* can be accepted, with matching job/section state.
+    if state.get("schema")=="chatterbox-job-v1":
+        return _trusted_legacy_pair(output,job_key,state,total_frames/24000)
+    return None
+
+
+def publish_final_pair(output: Path, final: bytes, result: dict, *, job_key: str):
+    """Stage verified immutable blobs, then project views, receipt LAST.
+
+    A single receipt decides whether a new version committed. A crash after the
+    first projection leaves an older receipt whose immutable blobs permit repair.
+    Failed rollback raises a typed recovery-required state; originals survive
+    as immutable blobs rather than being deleted.
+    """
+    _verify_final_bytes(final,json.dumps(result,indent=2).encode())
+    old=_read_commit(output,job_key)
+    if old is not None:
+        _ensure_public_commit(output,old)
+    target_wav,target_summary=_public_paths(output)
+    receipt_path=output/FINAL_RECEIPT
+    versions=output/FINAL_VERSIONS
+    if versions.is_symlink() or receipt_path.is_symlink():
+        raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
+    versions.mkdir(exist_ok=True)
+    # If a legacy pair exists and is fully valid, preserve its older committed
+    # bytes before any replacement; do not treat a mismatched legacy pair as PASS.
+    if old is None and target_wav.is_file() and target_summary.is_file():
+        try:
+            previous_wav=target_wav.read_bytes()
+            previous_summary=target_summary.read_bytes()
+            _verify_final_bytes(previous_wav,previous_summary)
+        except (OSError,RuntimeError):
+            previous_wav=previous_summary=None
+        if previous_wav is not None:
+            legacy_id=uuid.uuid4().hex
+            legacy_dir=_final_version(output,legacy_id)
+            legacy_dir.mkdir(exist_ok=False)
+            atomic(legacy_dir/"final.wav",previous_wav)
+            atomic(legacy_dir/"summary.json",previous_summary)
+            legacy_receipt={
+                "schema":FINAL_SCHEMA,"artifact_id":legacy_id,"job_key":job_key,
+                "wav_sha256":hashlib.sha256(previous_wav).hexdigest(),
+                "summary_sha256":hashlib.sha256(previous_summary).hexdigest()}
+            atomic(receipt_path,json.dumps(legacy_receipt,sort_keys=True).encode())
+            old=_read_commit(output,job_key)
+    new_id=uuid.uuid4().hex
+    new_dir=_final_version(output,new_id)
+    new_dir.mkdir(exist_ok=False)
+    summary_bytes=json.dumps(result,indent=2).encode()
+    # All stage I/O and fsync must succeed before touching owner-visible files.
+    atomic(new_dir/"final.wav",final)
+    atomic(new_dir/"summary.json",summary_bytes)
+    candidate={"schema":FINAL_SCHEMA,"artifact_id":new_id,"job_key":job_key,
+               "wav_sha256":hashlib.sha256(final).hexdigest(),
+               "summary_sha256":hashlib.sha256(summary_bytes).hexdigest()}
+    receipt_bytes=json.dumps(candidate,sort_keys=True).encode()
+    try:
+        atomic(target_wav,final)
+        atomic(target_summary,summary_bytes)
+        # Verify the projection before committing its authoritative receipt.
+        if target_wav.read_bytes()!=final or target_summary.read_bytes()!=summary_bytes:
+            raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED")
+        atomic(receipt_path,receipt_bytes)
+    except BaseException as exc:
+        try:
+            # If replacement of receipt succeeded but cleanup failed, do not
+            # roll back its now-committed version. Report recovery-required.
+            if receipt_path.is_file() and receipt_path.read_bytes()==receipt_bytes:
+                raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED") from exc
+            _restore_public(output,old)
+        except BaseException as rollback:
+            raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED") from rollback
+        raise
+    return result
 
 
 def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
@@ -117,13 +322,20 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
     elif state_path.exists():
         raise RuntimeError("OUTPUT_EXISTS_USE_RESUME")
     else:
-        state = {"schema": "chatterbox-job-v1", "voice": voice, "voice_version": version,
+        state = {"schema": "chatterbox-job-v2", "voice": voice, "voice_version": version,
                  "model_revision": MODEL_REVISION, "job_key":job_key,
                  "reference_binding":binding,"sections": {}}
     def save():
         atomic(state_path, json.dumps(state, indent=2, sort_keys=True).encode())
-    save()
+    if not (resume and state_path.exists()):
+        save()
+    # Validate a previous commit before accepting ANY resume SKIP.
+    existing_commit=_read_commit(output,job_key)
+    if existing_commit is not None:
+        _ensure_public_commit(output,existing_commit)
     metrics = []
+    verified_frames=0
+    skipped_all=True
     for order, s in enumerate(sections):
         identifier = str(s["id"])
         key = section_key(s, voice, version, binding)
@@ -134,11 +346,15 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
         if resume and record and record.get("state") == "PASS" and record.get("key") == key and target.is_file():
             raw = target.read_bytes()
             if hashlib.sha256(raw).hexdigest() == record.get("sha256"):
-                wav_info(raw)
+                frame_info=wav_info(raw)
+                if record.get("seconds")!=frame_info["seconds"]:
+                    raise RuntimeError("RESUME_WAV_INVALID")
+                verified_frames+=frame_info["frames"]
                 print(f"SKIP {order+1}/{len(sections)} {identifier} verified", flush=True)
                 metrics.append({"id": identifier, "state": "SKIP", "seconds": record["seconds"]})
                 continue
             raise RuntimeError("RESUME_WAV_INVALID")
+        skipped_all=False
         if record and not allow_retry:
             raise RuntimeError("UNCERTAIN_OR_CHANGED_SECTION_EXPLICIT_RETRY_REQUIRED")
         if record and record.get("key") != key:
@@ -173,6 +389,7 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
                      "cuda_free_bytes": headers.get("X-TTS-CUDA-Free-Bytes"),
                      "speed": s.get("speed", 1.0), "voice_version": version}
             state["sections"][identifier] = entry
+            verified_frames+=info["frames"]
             save()
             metrics.append({"id":identifier,**entry})
             mem = entry["cuda_peak_bytes"] or "NOT_MEASURED"
@@ -192,6 +409,11 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
         finally:
             if report: atomic(report, json.dumps(metrics,indent=2).encode())
     assert_reference_unchanged()
+    if resume and skipped_all:
+        prior=_existing_final_result(output,state,job_key,verified_frames,len(sections))
+        if prior is not None:
+            assert_reference_unchanged()
+            return prior
     # Consume section files lazily. Do not materialize all 200 potential 600s
     # section WAVs before enforcing the 900s final frame cap.
     def ordered_wavs():
@@ -206,19 +428,7 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
     assert_reference_unchanged()
     result = {"state":"PASS","audio_s":info["seconds"],"final_sha256":info["sha256"],"sections":len(sections),
               "voice_version":version,"model_revision":MODEL_REVISION}
-    target_final=output/"final.wav"
-    target_summary=output/"summary.json"
-    if target_final.is_symlink() or target_summary.is_symlink():
-        raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
-    try:
-        atomic(target_final, final)
-        atomic(target_summary, json.dumps(result, indent=2).encode())
-    except BaseException:
-        # Incomplete publish is never advertised as a successful final result.
-        target_final.unlink(missing_ok=True)
-        target_summary.unlink(missing_ok=True)
-        raise
-    return result
+    return publish_final_pair(output,final,result,job_key=job_key)
 
 
 
