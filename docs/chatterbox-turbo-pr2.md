@@ -101,3 +101,57 @@ LongForm output and the benchmark folder are protected by separate kernel-owned 
 ## Offline verification semantics
 
 `python -m lite.chatterbox_config --verify` exits **nonzero** if the model manifest, pinned hash, isolated Python environment or required FFmpeg preflight fails. A valid offline hash check returns exit 0 but does not imply that a CUDA worker has loaded: `installation_preflight_ready` and live `ready` are separate states. `--cuda-probe` is an explicit owner-side action and returns a failing exit code if unavailable. Windows `-VerifyOnly` requires both pinned files and offline prerequisites; it does not download/install weights. The PowerShell SHA256 implementation is in `scripts/internal/chatterbox-sha256.ps1` and uses .NET SHA256 without relying on module autoload. Never interpret synthetic CI manifest hash tests as verification of the two immutable official model weight pins.
+
+
+## V3 — Resume integrity and committed final publication
+
+**Read-only local reference attestation.** The endpoint
+`POST http://127.0.0.1:3901/profiles/{voice_id}/integrity/verify`
+requires an owned, consented English profile and checks the **actual normalized
+reference WAV bytes** through the existing SQLite-backed `Store.reference`
+path-containment and SHA256 validation. It returns
+`{"verified":true,"binding":"<opaque private digest>"}` only when the
+current profile snapshot remains unchanged under profile admission. Missing
+profile: 404 `PROFILE_NOT_FOUND`; missing, modified, symlink-escaped or
+invalid reference: 409 `REFERENCE_CHANGED`; concurrent mutation or worker
+busy: 503 `REFERENCE_VERIFICATION_BUSY`; unsafe recovery state: 503
+`SERVICE_RECOVERY_REQUIRED`. Errors reveal neither reference paths, content,
+transcripts nor raw hashes. This endpoint neither downloads the reference to
+the CLI nor imports/loads Torch or CUDA.
+
+The LongForm CLI requires this server attestation *as well as* the version,
+original-source checksum, normalized-reference checksum and model revision
+binding, before accepting an existing section SKIP, beginning a new section,
+after synthesis and before reusing or publishing any final WAV. A fully PASS
+`--resume` still verifies real reference bytes. An unavailable attestation
+fails closed (`REFERENCE_CHANGED`), with zero automatic synthesis replay.
+
+**Final output authority.** The private `final-commit.json` is a single
+atomically replaced receipt containing the frozen job key and SHA256s for
+immutable per-version files in `.chatterbox-final-versions/<id>/`. The
+owner-facing `final.wav` and `summary.json` are two **projections**, not a
+jointly atomic pair. New version WAV and summary are written and fsynced
+before changing projections; only after both projections agree is the new
+receipt published. If an intermediate write fails, restore the old projections
+from the previous committed version; if restoration itself fails, return typed
+`FINAL_PUBLICATION_RECOVERY_REQUIRED` and keep the immutable old snapshot
+and receipt for recovery. A process killed between two projection replacements
+must be recovered from the last committed receipt on restart. A finished clean
+`--resume` returns the same summary without rewriting a correct final pair
+or resynthesizing a section.
+
+Older `chatterbox-job-v1` resumes remain readable **without migration**.
+They lack a receipt and may be treated as previously complete only when
+all section checksums/order and the independently reassembled final PCM
+exactly agree with the old final WAV and summary; a pair of editable files
+whose SHA fields happen to agree is never independently authoritative.
+Interrupted new `chatterbox-job-v2` jobs require a proper committed receipt
+before claiming completion. The output job OS-lock still serializes writers.
+The file-storage transaction is crash-recoverable at receipt boundaries, not
+a claim that two `os.replace` operations are a single atomic OS operation.
+An uncoordinated out-of-band filesystem mutation can race any HTTP check,
+so the CLI reattests at each trustworthy boundary and stops on mismatch.
+
+No protocol or changes to the GGUF port 3900 are required. Real owner
+GTX 1650 CUDA, acoustic quality and 600s/1800s throughput H01–H08 remain
+`OWNER TEST PENDING`.
