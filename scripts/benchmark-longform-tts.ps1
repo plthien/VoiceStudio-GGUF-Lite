@@ -287,7 +287,7 @@ try {
         throw "Resume integrity mismatch for section $($section.index)"
       }
       $wavs.Add($wav)
-      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=[double]$saved.wall_s;audio_s=[double]$saved.audio_s;speech_s=[double]$saved.speech_s;rtf=[double]$saved.rtf;native_total_us=$saved.native_total_us;ref_codec_encode_us=$saved.ref_codec_encode_us;cache_hit=$saved.cache_hit;maskgit_steps=$saved.maskgit_steps;status="PASS";resumed=$true})
+      $rows.Add([pscustomobject]@{index=[int]$section.index;wall_s=[double]$saved.wall_s;audio_s=[double]$saved.audio_s;speech_s=[double]$saved.speech_s;rtf=[double]$saved.rtf;native_total_us=$saved.native_total_us;ref_codec_encode_us=$saved.ref_codec_encode_us;cache_hit=$saved.cache_hit;maskgit_steps=$saved.maskgit_steps;status="PASS";resumed=$true;gpu=[pscustomobject]@{status="GPU_STATS_UNAVAILABLE";metric_kind="WDDM total board usage, sampled; not process VRAM"}})
       Flush-LongformMetrics
       Write-Output ("PASS resume section="+$section.index)
       continue
@@ -416,17 +416,24 @@ try {
   $success=(-not $restoreFailed -and !$runError -and $wavs.Count -eq $spec.sections.Count -and (Test-Path -LiteralPath (Join-Path $run "final.wav")))
   $qualified=(-not $resuming -and $success -and $audioTotal -ge 600 -and $elapsed -le 1800 -and
               @($rows|Where-Object{$_.status -ne 'PASS' -or $_.resumed -eq $true}).Count -eq 0)
-  $gpuStates=@($rows|ForEach-Object{$_.gpu.status}|Where-Object{$_})
+  $gpuStates=@($rows|ForEach-Object{
+    if($_.gpu -and $_.gpu.status){[string]$_.gpu.status}else{"GPU_STATS_UNAVAILABLE"}
+  })
   $gpuSummaryJson=python -m lite.longform_benchmark gpu-summary @gpuStates
   if($LASTEXITCODE -ne 0){$gpuSummary="GPU_STATS_UNAVAILABLE"}
   else{$gpuSummary=($gpuSummaryJson|ConvertFrom-Json).gpu_stats_status}
+  $gpuSampledSections=@($gpuStates|Where-Object{$_ -eq "GPU_STATS_SAMPLED"}).Count
+  $gpuUnsampledSections=$gpuStates.Count-$gpuSampledSections
+  $gpuResumedWithoutSampleSections=@($rows|Where-Object{
+    $_.resumed -eq $true -and (!$_.gpu -or $_.gpu.status -ne "GPU_STATS_SAMPLED")
+  }).Count
   $reportErrors=New-Object System.Collections.Generic.List[string]
   if($runError){$reportErrors.Add($runError)}
   if($restoreFailed){$reportErrors.Add("SETTINGS_RESTORE_FAILED")}
   $rowSnapshot=@($rows|ForEach-Object{$_})
   @{schema="lite-longform-owner-run-v2";utc=$started.ToString("o");elapsed_s=$elapsed;audio_s=$audioTotal;speech_s=$speechTotal;final_rtf=$(if($audioTotal){$elapsed/$audioTotal}else{$null});speech_rtf=$(if($speechTotal){$elapsed/$speechTotal}else{$null});qualified_fresh_run=$qualified;resumed_run=$resuming;job_wall_sla_max=1800;job_audio_sla_min=600;
     client_http_timeout_s=$ClientTimeoutSeconds;server_section_timeout_s=$runtimeBinding.server_timeout_s;
-    gpu_stats_status=$gpuSummary;gpu_metric_kind="WDDM total board usage, sampled; not process VRAM";overall_status=$(if($success){"PASS"}else{"FAIL"});restore_status=$(if($restoreFailed){"FAIL"}else{"PASS"});errors=@($reportErrors|ForEach-Object{$_});sections=$rowSnapshot;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ForEach-Object{ Write-AtomicJson (Join-Path $run "metrics.json") $_ }
+    gpu_stats_status=$gpuSummary;gpu_sampled_sections=$gpuSampledSections;gpu_unsampled_sections=$gpuUnsampledSections;gpu_resumed_without_sample_sections=$gpuResumedWithoutSampleSections;gpu_metric_kind="WDDM total board usage, sampled; not process VRAM";overall_status=$(if($success){"PASS"}else{"FAIL"});restore_status=$(if($restoreFailed){"FAIL"}else{"PASS"});errors=@($reportErrors|ForEach-Object{$_});sections=$rowSnapshot;privacy="voice id, text, profile fingerprints, reference bytes and audio paths omitted";owner_gates="OWNER TEST PENDING"}|ForEach-Object{ Write-AtomicJson (Join-Path $run "metrics.json") $_ }
 }
 $clock.Stop()
 if($restoreFailed -or $runError){

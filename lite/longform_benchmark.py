@@ -264,10 +264,11 @@ def speech_seconds(headers: dict, audio_s: float) -> float:
 
 def gpu_summary_status(statuses: list[str]) -> str:
     """Summarize section samplers without inventing process-level VRAM."""
-    normalized = [value for value in statuses
-                  if value in {"GPU_STATS_SAMPLED", "GPU_STATS_UNAVAILABLE"}]
-    sampled = normalized.count("GPU_STATS_SAMPLED")
-    if normalized and sampled == len(normalized):
+    # Every supplied entry represents one section. Missing or unknown evidence
+    # is unsampled; it must not be discarded and turn a partial run into an
+    # apparently complete one.
+    sampled = statuses.count("GPU_STATS_SAMPLED")
+    if statuses and sampled == len(statuses):
         return "GPU_STATS_SAMPLED"
     if sampled:
         return "GPU_STATS_PARTIAL"

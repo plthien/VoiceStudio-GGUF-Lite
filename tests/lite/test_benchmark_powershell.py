@@ -94,7 +94,8 @@ def test_idle_group_executes_never_start_before_measurement(tmp_path):
             self.end_headers();self.wfile.write(body)
         def do_GET(self):
             if self.path=="/lite/worker/settings":self._json({"mode":state["mode"],"idle_timeout_seconds":state["idle"]})
-            elif self.path=="/lite/worker/status":self._json({"state":"READY" if state["resident"] else "UNLOADED","resident":state["resident"],"pid":state["pid"],"worker_generation":state["generation"],"cold_load_count":state["generation"],"synthesis_count":len(state["posts"]),"reuse_count":max(0,len(state["posts"])-1),"performance":None})
+            elif self.path=="/profiles/a":self._json({"id":"a","version":1,"ref_sha256":"a"*64,"source_sha256":"b"*64})
+            elif self.path=="/lite/worker/status":self._json({"state":"READY" if state["resident"] else "UNLOADED","resident":state["resident"],"pid":state["pid"],"worker_generation":state["generation"],"cold_load_count":state["generation"],"synthesis_count":len(state["posts"]),"reuse_count":max(0,len(state["posts"])-1),"performance":None,"performance_status":"NOT_AVAILABLE"})
             else:self.send_error(404)
         def do_PUT(self):
             value=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))))

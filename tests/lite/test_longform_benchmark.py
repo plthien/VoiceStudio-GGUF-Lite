@@ -49,6 +49,11 @@ def test_longform_gpu_summary_is_computed_not_hardcoded():
     assert gpu_summary_status(["GPU_STATS_SAMPLED","GPU_STATS_UNAVAILABLE"])=="GPU_STATS_PARTIAL"
     assert gpu_summary_status(["GPU_STATS_UNAVAILABLE"])=="GPU_STATS_UNAVAILABLE"
     assert gpu_summary_status([])=="GPU_STATS_UNAVAILABLE"
+    assert gpu_summary_status(["GPU_STATS_SAMPLED",""])=="GPU_STATS_PARTIAL"
+    assert gpu_summary_status(["GPU_STATS_SAMPLED","UNKNOWN"])=="GPU_STATS_PARTIAL"
+    assert gpu_summary_status(["GPU_STATS_UNAVAILABLE","GPU_STATS_UNAVAILABLE",
+                               "GPU_STATS_SAMPLED"])=="GPU_STATS_PARTIAL"
+    assert gpu_summary_status(["UNKNOWN"])=="GPU_STATS_UNAVAILABLE"
 
 def test_canonical_default_and_spaced_pause_markers_split_safely():
     text=("speech [pause] "*17)+"tail [ pause 800 ms ] end"
@@ -161,6 +166,9 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
     assert fresh["resumed_run"] is True and fresh["qualified_fresh_run"] is False
     assert [row["speech_s"] for row in fresh["sections"]]==[1.0,0.5]
     assert fresh["gpu_stats_status"]=="GPU_STATS_UNAVAILABLE"
+    assert fresh["gpu_sampled_sections"]==0
+    assert fresh["gpu_unsampled_sections"]==2
+    assert fresh["gpu_resumed_without_sample_sections"]==2
     assert fresh["gpu_metric_kind"]=="WDDM total board usage, sampled; not process VRAM"
 
 def test_inspect_wav_is_bounded_and_rejects_corruption(tmp_path):
