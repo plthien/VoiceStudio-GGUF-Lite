@@ -135,3 +135,198 @@ def test_v3_n02_file_replace_symlink_missing_fail_closed(api,tmp_path):
     assert attack.status_code==409
     assert str(outside) not in attack.text
     assert svc.loads==0
+
+
+@pytest.mark.parametrize("fault",[
+    "stage_wav","stage_summary","final_replace","summary_replace",
+    "receipt_replace","fsync","cleanup"])
+def test_v3_n01_fault_matrix_preserves_committed_pair(api,tmp_path,monkeypatch,fault):
+    import lite.chatterbox_assembly as asm
+    client,_,_=api
+    voice=profile(client)["id"]
+    wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    output=tmp_path/"private"
+    do_job(manifest,output)
+    public=[output/"final.wav",output/"summary.json",output/"final-commit.json"]
+    old=[p.read_bytes() for p in public]
+    state=json.loads((output/"resume-manifest.json").read_text())
+    original=asm.atomic
+    calls=[0]
+    def injected(path,data):
+        calls[0]+=1
+        stage=asm.FINAL_VERSIONS in str(path)
+        label=("stage_wav" if stage and path.name=="final.wav"
+               else "stage_summary" if stage and path.name=="summary.json"
+               else "final_replace" if path==public[0]
+               else "summary_replace" if path==public[1]
+               else "receipt_replace" if path==public[2]
+               else "")
+        if fault==label:
+            raise OSError("INJECTED_"+fault)
+        return original(path,data)
+    monkeypatch.setattr(asm,"atomic",injected)
+    if fault=="fsync":
+        old_fsync=asm.os.fsync
+        fail=[False]
+        def raise_once(fd):
+            if not fail[0]:
+                fail[0]=True
+                raise OSError("INJECTED_fsync")
+            return old_fsync(fd)
+        monkeypatch.setattr(asm.os,"fsync",raise_once)
+    elif fault=="cleanup":
+        old_unlink=asm.os.unlink
+        fail=[False]
+        def unlink_once(file,*args,**kwargs):
+            if ".chatterbox-" in str(file) and not fail[0]:
+                fail[0]=True
+                raise PermissionError("INJECTED_cleanup")
+            return old_unlink(file,*args,**kwargs)
+        monkeypatch.setattr(asm.os,"unlink",unlink_once)
+    with pytest.raises((OSError,RuntimeError)):
+        asm.publish_final_pair(output,old[0],json.loads(old[1]),job_key=state["job_key"])
+    # If the newly staged receipt was not committed, old owner-visible files
+    # must remain byte-identical and the old immutable receipt authoritative.
+    assert [p.read_bytes() for p in public] == old
+    assert json.loads(public[2].read_text())["schema"]==asm.FINAL_SCHEMA
+
+
+def test_v3_n01_crash_between_views_restarts_from_old_receipt(api,tmp_path,monkeypatch):
+    import lite.chatterbox_assembly as asm
+    client,_,_=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    do_job(manifest,out)
+    tracked=[out/"final.wav",out/"summary.json",out/"final-commit.json"]
+    old=[p.read_bytes() for p in tracked]
+    # Simulate process death directly after final.wav was replaced, before
+    # summary.json/commit receipt. No cleanup handler executes.
+    asm.atomic(out/"final.wav",audio(.5))
+    assert tracked[0].read_bytes()!=old[0]
+    recovered=do_job(manifest,out,resume=True)
+    assert recovered["state"]=="PASS"
+    assert [p.read_bytes() for p in tracked]==old
+    assert len(posts)==2
+
+
+def test_v3_n01_missing_receipt_first_publish_resume_no_replay(api,tmp_path,monkeypatch):
+    import lite.chatterbox_assembly as asm
+    client,_,_=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    original=asm.atomic
+    failed=[False]
+    def inject(path,data):
+        if path.name=="summary.json" and not failed[0]:
+            failed[0]=True
+            raise OSError("INJECTED_FIRST_SUMMARY")
+        return original(path,data)
+    monkeypatch.setattr(asm,"atomic",inject)
+    with pytest.raises(OSError,match="INJECTED_FIRST_SUMMARY"):
+        do_job(manifest,out)
+    assert len(posts)==2
+    assert not (out/"final-commit.json").exists()
+    assert not (out/"final.wav").exists()
+    assert not (out/"summary.json").exists()
+    monkeypatch.setattr(asm,"atomic",original)
+    result=do_job(manifest,out,resume=True)
+    assert result["state"]=="PASS"
+    assert len(posts)==2
+    assert (out/"final-commit.json").exists()
+
+
+@pytest.mark.parametrize("artifact",["receipt","final","summary","section"])
+def test_v3_n01_corrupted_committed_artifact_never_false_pass(api,tmp_path,monkeypatch,artifact):
+    client,_,_=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    do_job(manifest,out)
+    mapping={"receipt":out/"final-commit.json","final":out/"final.wav",
+             "summary":out/"summary.json","section":out/"section-a.wav"}
+    path=mapping[artifact]
+    path.write_bytes(b"corrupt"+path.read_bytes()[:10])
+    if artifact in ("receipt","section"):
+        with pytest.raises(RuntimeError,match="FINAL_PUBLICATION_RECOVERY_REQUIRED|RESUME_WAV_INVALID"):
+            do_job(manifest,out,resume=True)
+    else:
+        # Receipt points at the previous immutable verified pair; a corrupted
+        # projection can be restored safely without regeneration.
+        assert do_job(manifest,out,resume=True)["state"]=="PASS"
+    assert len(posts)==2
+
+
+@pytest.mark.parametrize("mutation",["replace","truncate","delete","symlink"])
+def test_v3_n02_out_of_band_reference_mutations(api,tmp_path,monkeypatch,mutation):
+    client,_,settings=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    do_job(manifest,out)
+    row=client.get("/profiles/"+voice).json()
+    target=settings.data_dir/"voices"/row["ref_path"]
+    if mutation=="replace":
+        staged=tmp_path/"changed.wav";staged.write_bytes(audio(6.2))
+        os.replace(staged,target)
+    elif mutation=="truncate":
+        target.write_bytes(target.read_bytes()[:200])
+    elif mutation=="delete":
+        target.unlink()
+    else:
+        target.unlink()
+        external=tmp_path/"not-owned.wav"
+        external.write_bytes(audio(6))
+        try:target.symlink_to(external)
+        except (OSError,NotImplementedError):
+            pytest.skip("Insufficient symlink privileges")
+    status=client.post("/profiles/"+voice+"/integrity/verify")
+    assert status.status_code==409
+    assert status.json()["error"]["code"]=="REFERENCE_CHANGED"
+    with pytest.raises(RuntimeError,match="REFERENCE_CHANGED"):
+        do_job(manifest,out,resume=True)
+    assert len(posts)==2
+    assert (out/"final-commit.json").is_file()
+
+
+@pytest.mark.parametrize("field",["version","ref_sha256","source_sha256"])
+def test_v3_n02_single_db_provenance_change_blocks_resume(api,tmp_path,monkeypatch,field):
+    import sqlite3
+    client,_,settings=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    do_job(manifest,out)
+    with sqlite3.connect(settings.data_dir/"lite.sqlite3") as db:
+        if field=="version":
+            db.execute("UPDATE profiles SET version=version+1 WHERE id=?",(voice,))
+        else:
+            db.execute(f"UPDATE profiles SET {field}=? WHERE id=?",("f"*64,voice))
+    with pytest.raises(RuntimeError,match="RESUME_PROVENANCE_CHANGED|REFERENCE_CHANGED"):
+        do_job(manifest,out,resume=True)
+    assert len(posts)==2
+
+
+def test_v3_n02_attestation_busy_and_recovery_fail_closed(api):
+    client,svc,_=api
+    voice=profile(client)["id"]
+    class Locked:
+        def locked(self):return True
+    previous=client.app.state.admission
+    client.app.state.admission=Locked()
+    response=client.post("/profiles/"+voice+"/integrity/verify")
+    assert response.status_code==503
+    assert response.json()["error"]["code"]=="REFERENCE_VERIFICATION_BUSY"
+    client.app.state.admission=previous
+    client.app.state.cache_trusted=False
+    response=client.post("/profiles/"+voice+"/integrity/verify")
+    assert response.status_code==503
+    assert response.json()["error"]["code"]=="SERVICE_RECOVERY_REQUIRED"
+    assert svc.loads==0
