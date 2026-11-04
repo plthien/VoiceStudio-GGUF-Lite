@@ -34,7 +34,8 @@ def _wav():
 @pytest.fixture
 def fake_server():
     state = {"posts": 0, "mode": "ok", "restore_failure": False,
-             "binary": "a" * 64, "profile_version": 3}
+             "binary": "a" * 64, "profile_version": 3, "request_id": None,
+             "candidate_kind": "verified_baseline"}
     audio = _wav()
 
     class Handler(BaseHTTPRequestHandler):
@@ -54,7 +55,15 @@ def fake_server():
                 self._json({"mode": "legacy_oneshot", "idle_timeout_seconds": 600})
             elif self.path == "/lite/worker/status":
                 self._json({
-                    "performance": None,
+                    "performance": ({"native_total_us": 10, "ref_codec_encode_us": 2,
+                                     "ref_cache_hit": 0, "maskgit_steps": 32,
+                                     "maskgit_non_lm_overhead_us": 1}
+                                    if state["candidate_kind"] == "verified_candidate" else None),
+                    "performance_status": ("VERIFIED" if state["candidate_kind"] == "verified_candidate" else
+                                           "NOT_AVAILABLE") if state["request_id"] else "NOT_ATTRIBUTABLE",
+                    "last_completed_request_id": ("raced-request" if state["mode"] == "race" and state["request_id"] else state["request_id"]),
+                    "last_completed_worker_generation": 1,
+                    "worker_generation": 1,
                     "runtime_binding": {
                         "schema": "lite-longform-runtime-binding-v1",
                         "status": "verified_capability",
@@ -62,8 +71,8 @@ def fake_server():
                         "exe_sha256": state["binary"],
                         "candidate_receipt_sha256": None,
                         "declared_backend": "Vulkan0",
-                        "candidate_kind": "verified_baseline",
-                        "settings_verification": "not_yet_verified",
+                        "candidate_kind": state["candidate_kind"],
+                        "settings_verification": ("observed" if state["candidate_kind"] == "verified_candidate" else "not_yet_verified"),
                         "server_timeout_s": 900,
                     },
                 })
@@ -84,6 +93,7 @@ def fake_server():
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             assert payload["model"] == "omnivoice-gguf"
             state["posts"] += 1
+            state["request_id"] = f"request-{state['posts']}"
             if state["mode"] == "drop" and state["posts"] == 1:
                 try:
                     self.connection.shutdown(socket.SHUT_RDWR)
@@ -101,6 +111,7 @@ def fake_server():
             self.send_header("X-Lite-Effective-Speed", "1.0")
             self.send_header("X-Lite-Audio-S", "1.0")
             self.send_header("X-Lite-RTF", "1.0")
+            self.send_header("X-Lite-Request-Id", state["request_id"])
             self.end_headers()
             self.wfile.write(audio)
 
@@ -139,6 +150,13 @@ def test_uncertain_post_requires_explicit_section_retry(host, fake_server, tmp_p
     state["mode"] = "drop"
     first = _run(host, port, sections, output)
     assert first.returncode != 0
+    assert state["posts"] == 1
+    run = next(output.iterdir())
+    assert not list(run.glob("section-*.wav.json"))
+    assert not (run / "final.wav").exists()
+    state["mode"] = "ok"
+    resumed = _run(host, port, sections, output, "-RunDir", run)
+    assert resumed.returncode != 0
     assert state["posts"] == 1
     run = next(output.iterdir())
     journal = run / "section-0000.wav.attempt.json"
@@ -213,3 +231,31 @@ def test_forged_backend_prevents_commit_and_default_replay(host, fake_server, tm
     resumed = _run(host, port, sections, output, "-RunDir", run)
     assert resumed.returncode != 0
     assert state["posts"] == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell only")
+@pytest.mark.parametrize("host", HOSTS)
+def test_request_correlated_perf_rejects_raced_status(host, fake_server, tmp_path):
+    state,port=fake_server
+    state["mode"]="race";state["candidate_kind"]="verified_candidate"
+    sections=tmp_path/"sections.json";sections.write_text(json.dumps(["one sentence."]),encoding="utf-8")
+    output=tmp_path/"output"
+    result=_run(host,port,sections,output)
+    assert result.returncode!=0
+    assert state["posts"]==1
+    run=next(output.iterdir())
+    assert not (run/"section-0000.wav").exists()
+    assert not (run/"section-0000.wav.json").exists()
+    assert not (run/"final.wav").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell only")
+@pytest.mark.parametrize("host", HOSTS)
+def test_request_correlated_perf_commits_matching_snapshot(host, fake_server, tmp_path):
+    state,port=fake_server;state["candidate_kind"]="verified_candidate"
+    sections=tmp_path/"sections.json";sections.write_text(json.dumps(["one sentence."]),encoding="utf-8")
+    output=tmp_path/"output";result=_run(host,port,sections,output)
+    assert result.returncode==0,result.stdout+result.stderr
+    receipt=json.loads((next(output.iterdir())/"section-0000.wav.json").read_text(encoding="utf-8-sig"))
+    assert receipt["performance_status"]=="VERIFIED"
+    assert receipt["native_total_us"]==10 and receipt["maskgit_non_lm_overhead_us"]==1

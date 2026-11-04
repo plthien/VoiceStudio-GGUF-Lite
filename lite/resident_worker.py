@@ -38,7 +38,10 @@ TRUSTED_BASELINE_WORKER_SOURCES = {
     "9985f49c8650661e70e6e5ce4057b50e0ed63fc03a7c39cce21a958fe7f18e70",
 }
 _CAPABILITY_CACHE: dict[tuple, dict] = {}
-_CONTROLS = re.compile(rb"^\[LiteControls/v1\] maskgit_steps=(32|24|16|12|8) flash_attention=([01]) ref_cache_enabled=([01])$",re.M)
+_CONTROLS = re.compile(
+    rb"^\[LiteControls/v1\] maskgit_steps=(32|24|16|12|8) "
+    rb"flash_attention=([01]) ref_cache_enabled=([01])"
+    rb"(?:(?=\n)|\r(?=\n)|(?=\Z))", re.M)
 
 
 def native_control_attestation(stderr: bytes) -> dict:
@@ -163,6 +166,9 @@ class ResidentWorkerSupervisor:
         self._native_controls: dict | None = None
         self.last_performance: dict | None = None
         self._last_native_perf: dict | None = None
+        self.last_completed_request_id: str | None = None
+        self.last_completed_worker_generation: int | None = None
+        self.last_completed_performance_status = "NOT_AVAILABLE"
 
     async def _await_deadline(self, awaitable, deadline: float):
         try:
@@ -183,6 +189,9 @@ class ResidentWorkerSupervisor:
         remaining = None
         if not busy and self._idle_deadline is not None and self.state == "READY":
             remaining = max(0, int(self._idle_deadline - time.monotonic() + .999))
+        attributable = (not busy and self.state == "READY" and
+                        self.last_completed_request_id is not None and
+                        self.last_completed_worker_generation == self.generation)
         return {"state": self.state, "resident": self.state in {"READY", "GENERATING"},
                 "pid": self.process.pid if self.process and self.process.returncode is None else None,
                 "worker_generation": self.generation,
@@ -191,9 +200,29 @@ class ResidentWorkerSupervisor:
                 "reuse_count": self.reuse_count, "idle_remaining_seconds": remaining,
                 "busy": busy, "last_error": self.last_error,
                 "vram_status": "OWNER TEST PENDING",
-                "performance": self.last_performance if self._perf_enabled else None,
+                "performance": (self.last_performance if
+                                self._perf_enabled and attributable and
+                                self.last_completed_performance_status == "VERIFIED" else None),
+                "performance_status": (self.last_completed_performance_status
+                                       if attributable else "NOT_ATTRIBUTABLE"),
+                "last_completed_request_id": (self.last_completed_request_id
+                                              if attributable else None),
+                "last_completed_worker_generation": (
+                    self.last_completed_worker_generation if attributable else None),
                  "native_proof": getattr(self, "_proof", None) if self.state in {"READY", "GENERATING"} else None,
                  "native_controls": self._native_controls if self.state in {"READY", "GENERATING"} else None}
+
+    def _invalidate_completed_request(self) -> None:
+        self.last_completed_request_id = None
+        self.last_completed_worker_generation = None
+        self.last_completed_performance_status = "NOT_AVAILABLE"
+
+    def _complete_request(self, request_id: str) -> None:
+        self.last_completed_request_id = request_id
+        self.last_completed_worker_generation = self.generation
+        self.last_completed_performance_status = (
+            "VERIFIED" if self._perf_enabled and self._perf_supported and
+            self.last_performance is not None else "NOT_AVAILABLE")
 
     async def _drain_stderr(self, proc):
         try:
@@ -338,6 +367,7 @@ class ResidentWorkerSupervisor:
         self._model_file_identity = None
         self.last_performance = None
         self._last_native_perf = None
+        self._invalidate_completed_request()
         self._native_controls = None
         self._cancel_idle()
         if proc:
@@ -477,6 +507,7 @@ class ResidentWorkerSupervisor:
             raise NativeBusy("GPU is busy with another request")
         async with self.lock:
             self._cancel_idle(); self.active_id = profile["id"]; started = time.monotonic()
+            self._invalidate_completed_request()
             deadline = started + self.settings.timeout
             try:
                 integrity = await self._prepare_operation(reference, deadline)
@@ -485,6 +516,7 @@ class ResidentWorkerSupervisor:
                                                  deadline=deadline)
                 await self._finish_operation(reference, integrity, deadline)
                 remaining(deadline)
+                self._complete_request(request_id)
                 elapsed = time.monotonic() - started
                 return data, {"request_id": request_id, "profile_id": profile["id"], "quant": "Q8_0",
                               **self._proof, "elapsed_s": round(elapsed, 3), "audio_s": frames / 24000,
@@ -499,9 +531,12 @@ class ResidentWorkerSupervisor:
 
     async def generate_paused(self, *, script, profile, reference: Path, language, seed,
                               request_id: str, speed: float = 1.0):
+        if script is None:
+            raise NativeFailure("Paused generation requires a parsed pause script")
         if self.lock.locked(): raise NativeBusy("GPU is busy with another request")
         async with self.lock:
             self._cancel_idle(); self.active_id = profile["id"]; started = time.monotonic(); segments = []
+            self._invalidate_completed_request()
             deadline = started + self.settings.timeout
             try:
                 integrity = await self._prepare_operation(reference, deadline)
@@ -526,6 +561,7 @@ class ResidentWorkerSupervisor:
                         self.last_performance = aggregate_performance(perf_spans, perf_prior)
                     except ValueError as exc:
                         raise NativeFailure("Native multi-span performance invalid") from exc
+                self._complete_request(request_id)
                 elapsed = time.monotonic() - started
                 speech_s = counts["speech_frames"] / 24000
                 total_s = counts["audio_frames"] / 24000
@@ -547,6 +583,7 @@ class ResidentWorkerSupervisor:
             self.state = "UNLOADED"; self.context_identity = None
             self._verified_models = None; self._model_file_identity = None
             self._last_native_perf = None; self.last_performance = None
+            self._invalidate_completed_request()
             self._native_controls = None; return
         self.state = "UNLOADING"
         cleanup_deadline = time.monotonic() + 10
@@ -569,6 +606,7 @@ class ResidentWorkerSupervisor:
             self.process = None; self.context_identity = None; self.state = "UNLOADED"
             self._verified_models = None; self._model_file_identity = None
             self._last_native_perf = None; self.last_performance = None
+            self._invalidate_completed_request()
             self._native_controls = None
 
     async def unload_now(self):

@@ -10,6 +10,8 @@ def test_fixed_little_endian_versioned_perf_payload():
     accounted=sum(result[name] for name in ("ref_preprocess_us","ref_codec_encode_us","prompt_and_duration_us",
         "maskgit_lm_forward_us","maskgit_sampling_us","codec_decode_us","postprocess_us","unaccounted_us"))
     assert accounted==result["native_total_us"]
+    assert result["maskgit_non_lm_overhead_us"]==result["maskgit_sampling_us"]
+    assert result["maskgit_sampling_semantics"]=="derived_non_lm_overhead"
 
 @pytest.mark.parametrize("steps",[32,24,16,12,8])
 def test_effective_steps_allowed(steps):assert parse_performance(payload(steps))["maskgit_steps"]==steps

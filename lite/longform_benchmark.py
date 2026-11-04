@@ -196,11 +196,14 @@ def inspect_wav(path: Path) -> dict:
     # truncated or appended chunks before validating frame data.
     with path.open("rb") as source:
         header = source.read(12)
-        if (len(header) != 12 or header[:4] != b"RIFF" or
-                header[8:] != b"WAVE" or
-                struct.unpack("<I", header[4:8])[0] + 8 != size):
-            raise ValueError("section WAV RIFF length/header mismatch")
-        at, data_size = 12, None
+        if len(header) != 12 or header[:4] != b"RIFF" or header[8:] != b"WAVE":
+            raise ValueError("section WAV malformed RIFF header")
+        declared_size = struct.unpack("<I", header[4:8])[0] + 8
+        if declared_size > size:
+            raise ValueError("section WAV truncated before declared RIFF length")
+        if declared_size < size:
+            raise ValueError("section WAV has appended bytes beyond RIFF length")
+        at, data_size, seen_fmt = 12, None, False
         while at < size:
             source.seek(at)
             chunk = source.read(8)
@@ -210,6 +213,12 @@ def inspect_wav(path: Path) -> dict:
             next_at = at + 8 + length + (length & 1)
             if next_at > size:
                 raise ValueError("section WAV truncated chunk")
+            if kind == b"fmt ":
+                if seen_fmt or data_size is not None:
+                    raise ValueError("section WAV malformed fmt chunk order")
+                seen_fmt = True
+            elif kind != b"data":
+                raise ValueError("section WAV contains unexpected chunk")
             if data_size is not None:
                 raise ValueError("section WAV has unexpected trailing chunk")
             if kind == b"data":
@@ -217,7 +226,7 @@ def inspect_wav(path: Path) -> dict:
                 if next_at != size:
                     raise ValueError("section WAV has trailing data")
             at = next_at
-        if data_size is None:
+        if not seen_fmt or data_size is None:
             raise ValueError("section WAV data chunk missing")
     with wave.open(str(path), "rb") as src:
         if (src.getnchannels(), src.getsampwidth(), src.getframerate()) != (1, 2, 24000):
@@ -251,6 +260,18 @@ def speech_seconds(headers: dict, audio_s: float) -> float:
     if value <= 0 or value > audio_s + (1 / 24000):
         raise ValueError("invalid speech duration")
     return value
+
+
+def gpu_summary_status(statuses: list[str]) -> str:
+    """Summarize section samplers without inventing process-level VRAM."""
+    normalized = [value for value in statuses
+                  if value in {"GPU_STATS_SAMPLED", "GPU_STATS_UNAVAILABLE"}]
+    sampled = normalized.count("GPU_STATS_SAMPLED")
+    if normalized and sampled == len(normalized):
+        return "GPU_STATS_SAMPLED"
+    if sampled:
+        return "GPU_STATS_PARTIAL"
+    return "GPU_STATS_UNAVAILABLE"
 
 
 def assemble_wavs(paths: list[Path], output: Path) -> dict:
@@ -344,6 +365,8 @@ def main(argv=None) -> int:
     assemble.add_argument("wav", type=Path, nargs="+")
     inspect = sub.add_parser("inspect")
     inspect.add_argument("--wav", type=Path, required=True)
+    gpu_summary = sub.add_parser("gpu-summary")
+    gpu_summary.add_argument("status", nargs="*")
     args = parser.parse_args(argv)
     if args.command == "prepare":
         texts = json.loads(args.sections_file.read_text(encoding="utf-8-sig"))
@@ -359,8 +382,11 @@ def main(argv=None) -> int:
                           "manifest_sha256": manifest["manifest_sha256"]}))
     elif args.command == "assemble":
         print(json.dumps({"status": "PASS", **assemble_wavs(args.wav, args.output)}))
-    else:
+    elif args.command == "inspect":
         print(json.dumps({"status": "PASS", **inspect_wav(args.wav)}))
+    else:
+        print(json.dumps({"status": "PASS",
+                          "gpu_stats_status": gpu_summary_status(args.status)}))
     return 0
 
 

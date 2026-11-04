@@ -7,6 +7,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+import wave
+from io import BytesIO
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -74,3 +76,46 @@ def test_benchmark_http_helper_is_noninteractive_and_private(host):
     assert skipped.returncode!=0 and "UNKNOWN_CASE_SELECTOR: different" in (skipped.stdout+skipped.stderr)
     assert failed.returncode==2 and "START case=ci-http" in failed.stdout and "FAIL case=ci-http" in failed.stdout
     assert "PASS settings-restore unchanged" in failed.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="actual Windows PowerShell hosts only")
+def test_idle_group_executes_never_start_before_measurement(tmp_path):
+    executable=shutil.which("powershell.exe");assert executable
+    audio=BytesIO()
+    with wave.open(audio,"wb") as out:
+        out.setnchannels(1);out.setsampwidth(2);out.setframerate(24000)
+        out.writeframes(b"\0\0"*240)
+    wav=audio.getvalue();state={"resident":False,"pid":None,"generation":0,
+                                "idle":600,"mode":"legacy_oneshot","posts":[]}
+    class Handler(BaseHTTPRequestHandler):
+        def _json(self,value):
+            body=json.dumps(value).encode();self.send_response(200)
+            self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(body)))
+            self.end_headers();self.wfile.write(body)
+        def do_GET(self):
+            if self.path=="/lite/worker/settings":self._json({"mode":state["mode"],"idle_timeout_seconds":state["idle"]})
+            elif self.path=="/lite/worker/status":self._json({"state":"READY" if state["resident"] else "UNLOADED","resident":state["resident"],"pid":state["pid"],"worker_generation":state["generation"],"cold_load_count":state["generation"],"synthesis_count":len(state["posts"]),"reuse_count":max(0,len(state["posts"])-1),"performance":None})
+            else:self.send_error(404)
+        def do_PUT(self):
+            value=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))))
+            state["mode"]=value["mode"];state["idle"]=value.get("idle_timeout_seconds");self._json(value)
+        def do_POST(self):
+            if self.path=="/lite/worker/unload":
+                state["resident"]=False;state["pid"]=None;self._json({"status":"ok"});return
+            payload=json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state["posts"].append(payload["input"])
+            if not state["resident"]:state["generation"]+=1;state["pid"]=4321
+            state["resident"]=True;self.send_response(200)
+            self.send_header("Content-Length",str(len(wav)));self.send_header("X-Lite-Verification-Status","verified")
+            self.send_header("X-Lite-Audio-S","0.01");self.send_header("X-Lite-RTF","1")
+            self.end_headers();self.wfile.write(wav)
+        def log_message(self,*_):pass
+    server=ThreadingHTTPServer(("127.0.0.1",0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    env={**__import__('os').environ,"CI":"true"}
+    try:
+        result=subprocess.run([executable,"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",str(ROOT/"scripts"/"benchmark-persistent-worker.ps1"),"-VoiceA","a","-VoiceB","b","-Output",str(tmp_path/"out"),"-Port",str(server.server_port),"-Cases","idle","-IdleObservationSeconds","1"],cwd=ROOT,env=env,capture_output=True,text=True,timeout=25)
+    finally:
+        server.shutdown();server.server_close();thread.join(timeout=5)
+    assert result.returncode==0,result.stdout+result.stderr
+    assert state["posts"]==["Idle unload precondition request.","Never idle policy request."]
+    assert "PASS case=idle-start" in result.stdout and "PASS case=never-start" in result.stdout

@@ -22,7 +22,12 @@ def parse_performance(payload:bytes)->dict:
                "maskgit_lm_forward_us","maskgit_sampling_us","codec_decode_us","postprocess_us","unaccounted_us"))
     if stages>result["native_total_us"]+1000:
         raise ValueError("LitePerf phase totals exceed native total")
-    return {"schema":"LitePerf/v1",**result}
+    # The fixed ABI field is historical. It is derived as total MaskGIT time
+    # minus measured LM-forward scopes, so it includes any other MaskGIT
+    # orchestration overhead and must not be presented as exclusive sampling.
+    return {"schema":"LitePerf/v1", **result,
+            "maskgit_non_lm_overhead_us": result["maskgit_sampling_us"],
+            "maskgit_sampling_semantics": "derived_non_lm_overhead"}
 
 # LitePerf/v1 mixes per-SYNTH durations with a retained load value and
 # worker-cumulative reference-cache counters. Never sum all fields blindly.
@@ -68,4 +73,6 @@ def aggregate_performance(spans: list[dict], prior: dict | None = None) -> dict:
               "reference_cache_misses": end["reference_cache_misses"] - beginning["reference_cache_misses"]}
     for field in PER_SYNTH_FIELDS:
         result[field] = sum(item[field] for item in spans)
+    result["maskgit_non_lm_overhead_us"] = result["maskgit_sampling_us"]
+    result["maskgit_sampling_semantics"] = "derived_non_lm_overhead"
     return result

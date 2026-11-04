@@ -5,6 +5,7 @@ param(
   [int]$Port=3900,
   [string]$CiMockSpeechUrl="",
   [string[]]$Cases=@(),
+  [int]$IdleObservationSeconds=65,
   [switch]$ContinueOnFailure
 )
 # OWNER LIVE ONLY: real Q8_0/GTX1650 metrics. Never run in CI or export voice IDs/text/audio.
@@ -18,17 +19,24 @@ $groupCases=@{
   twopause=@("two-pause")
   tenpause=@("ten-pause")
   aba=@("aba-a1","aba-b","aba-a2")
-  idle=@("idle-60s","never-after-65s","manual-unload")
+  idle=@("idle-start","idle-60s","never-start","never-after-65s","manual-unload")
 }
-$lowLevel=@("cold-a","warm-a-1","warm-a-2","two-pause","ten-pause","aba-a1","aba-b","aba-a2","idle-60s","never-after-65s","never-start","manual-unload","recovery-cold","ci-http")
+$lowLevel=@("cold-a","warm-a-1","warm-a-2","two-pause","ten-pause","aba-a1","aba-b","aba-a2","idle-start","idle-60s","never-after-65s","never-start","manual-unload","recovery-cold","ci-http")
 foreach($value in @(0.85,1.0,1.15)){$lowLevel+=("speed-"+$value.ToString("0.00",[cultureinfo]::InvariantCulture))}
 $lowLevel+=@(1..10|ForEach-Object{"warm-cycle-"+$_.ToString("00")})
 $selected=@{}
 foreach($selector in $Cases) {
   $name=$selector.Trim().ToLowerInvariant()
   if($groupCases.ContainsKey($name)){foreach($member in $groupCases[$name]){$selected[$member]=$true}}
-  elseif($lowLevel -contains $name){$selected[$name]=$true}
+  elseif($lowLevel -contains $name){
+    $selected[$name]=$true
+    if($name -eq "idle-60s"){$selected["idle-start"]=$true}
+    if($name -eq "never-after-65s"){$selected["never-start"]=$true}
+  }
   else{throw "UNKNOWN_CASE_SELECTOR: $name"}
+}
+if($IdleObservationSeconds -ne 65 -and $env:CI -ne "true"){
+  throw "IdleObservationSeconds is CI-only unless it is the owner value 65"
 }
 function Test-Selected([string]$Label){return $Cases.Count -eq 0 -or $selected.ContainsKey($Label)}
 function Invoke-SpeechRequest([string]$Uri,[string]$Payload,[string]$OutFile) {
@@ -68,16 +76,18 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $rows=New-Object System.Collections.Generic.List[object]
 function Publish-TextAtomic([string]$Destination,[string]$Content) {
   $temp=$Destination+"."+[guid]::NewGuid().ToString("N")+".partial"
+  $backup=$Destination+"."+[guid]::NewGuid().ToString("N")+".backup"
   $bytes=[Text.Encoding]::UTF8.GetBytes($Content)
   $stream=New-Object IO.FileStream($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
   try {$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)} finally {$stream.Dispose()}
   try {
-    if([IO.File]::Exists($Destination)){[IO.File]::Replace($temp,$Destination,$null)}
+    if([IO.File]::Exists($Destination)){[IO.File]::Replace($temp,$Destination,$backup);[IO.File]::Delete($backup)}
     else{[IO.File]::Move($temp,$Destination)}
-  } finally {if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
+  } finally {if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)};if([IO.File]::Exists($backup)){[IO.File]::Delete($backup)}}
 }
 function Flush-Results {
-  $json=@{schema="lite-persistent-owner-benchmark-v1";created_utc=[DateTime]::UtcNow.ToString("o");privacy="No voice IDs, input text, reference bytes, or generated audio retained";rows=@($rows)}|ConvertTo-Json -Depth 8
+  $rowSnapshot=@($rows|ForEach-Object{$_})
+  $json=@{schema="lite-persistent-owner-benchmark-v1";created_utc=[DateTime]::UtcNow.ToString("o");privacy="No voice IDs, input text, reference bytes, or generated audio retained";rows=$rowSnapshot}|ConvertTo-Json -Depth 8
   Publish-TextAtomic (Join-Path $dir "owner-metrics.json") $json
   $names=@($rows|ForEach-Object{$_.PSObject.Properties.Name}|Select-Object -Unique)
   if(!$names.Count){$names=@("case","state")}
@@ -118,7 +128,7 @@ function Invoke-Sample([string]$Label,[string]$Voice,[string]$Text,[double]$Spee
     if($Label -like "warm-a-*" -and [int]$state.cold_load_count -ne [int]$beforeState.cold_load_count){throw "WARM_PRECONDITION_NOT_MET"}
     $peak=$after;if(Test-Path -LiteralPath $vramLog){foreach($line in (Get-Content -LiteralPath $vramLog)){if($line -match '^\s*(\d+)\s*$' -and [int]$Matches[1] -gt $peak){$peak=[int]$Matches[1]}}}
     if((Get-Item $temp).Length -lt 46 -or $response.Headers['X-Lite-Verification-Status'] -ne 'verified'){throw "Unverified or truncated WAV"}
-    $rows.Add([pscustomobject]@{case=$Label;utc=[DateTime]::UtcNow.ToString("o");speed=$Speed;seed=$Seed;http_ms=[math]::Round($clock.Elapsed.TotalMilliseconds,1);server_elapsed_s=$response.Headers['X-Lite-Elapsed-S'];audio_s=$response.Headers['X-Lite-Audio-S'];speech_s=$response.Headers['X-Lite-Speech-S'];pause_s=$response.Headers['X-Lite-Pause-S'];rtf=$response.Headers['X-Lite-RTF'];pid=$state.pid;generation=$state.worker_generation;cold_loads=$state.cold_load_count;syntheses=$state.synthesis_count;reuse=$state.reuse_count;perf_native_total_us=$state.performance.native_total_us;perf_ref_preprocess_us=$state.performance.ref_preprocess_us;perf_ref_codec_encode_us=$state.performance.ref_codec_encode_us;perf_maskgit_lm_forward_us=$state.performance.maskgit_lm_forward_us;perf_maskgit_sampling_us=$state.performance.maskgit_sampling_us;perf_codec_decode_us=$state.performance.codec_decode_us;perf_postprocess_us=$state.performance.postprocess_us;perf_cache_hit=$state.performance.ref_cache_hit;perf_steps=$state.performance.maskgit_steps;vram_before_mib=$before;vram_peak_mib=$peak;vram_after_mib=$after;state=$state.state})
+    $rows.Add([pscustomobject]@{case=$Label;utc=[DateTime]::UtcNow.ToString("o");speed=$Speed;seed=$Seed;http_ms=[math]::Round($clock.Elapsed.TotalMilliseconds,1);server_elapsed_s=$response.Headers['X-Lite-Elapsed-S'];audio_s=$response.Headers['X-Lite-Audio-S'];speech_s=$response.Headers['X-Lite-Speech-S'];pause_s=$response.Headers['X-Lite-Pause-S'];rtf=$response.Headers['X-Lite-RTF'];pid=$state.pid;generation=$state.worker_generation;cold_loads=$state.cold_load_count;syntheses=$state.synthesis_count;reuse=$state.reuse_count;perf_native_total_us=$state.performance.native_total_us;perf_ref_preprocess_us=$state.performance.ref_preprocess_us;perf_ref_codec_encode_us=$state.performance.ref_codec_encode_us;perf_maskgit_lm_forward_us=$state.performance.maskgit_lm_forward_us;perf_maskgit_non_lm_overhead_us=$state.performance.maskgit_non_lm_overhead_us;perf_sampling_semantics="derived_non_lm_overhead";perf_codec_decode_us=$state.performance.codec_decode_us;perf_postprocess_us=$state.performance.postprocess_us;perf_cache_hit=$state.performance.ref_cache_hit;perf_steps=$state.performance.maskgit_steps;vram_before_mib=$before;vram_peak_mib=$peak;vram_after_mib=$after;state=$state.state})
     Flush-Results
     Write-Output ("PASS case="+$Label+" elapsed_s="+$caseClock.Elapsed.TotalSeconds.ToString("0.000",[cultureinfo]::InvariantCulture))
   } catch {
@@ -157,9 +167,33 @@ try {
   foreach($speed in @(0.85,1.0,1.15)){Invoke-Sample ("speed-"+$speed.ToString("0.00",[cultureinfo]::InvariantCulture)) $VoiceA "A fixed sentence measures native speed." $speed}
   Invoke-Sample "aba-a1" $VoiceA "A B A isolation sentence." 1.0 42;Invoke-Sample "aba-b" $VoiceB "A B A isolation sentence." 1.0 43;Invoke-Sample "aba-a2" $VoiceA "A B A isolation sentence." 1.0 42
   1..10|ForEach-Object{Invoke-Sample ("warm-cycle-"+$_.ToString("00")) $VoiceA "Warm repeated stability cycle." 1.0 (100+$_)}
-  if(Test-Selected "idle-60s"){Start-Sleep -Seconds 65;$idle=Status;$rows.Add([pscustomobject]@{case="idle-60s";utc=[DateTime]::UtcNow.ToString("o");state=$idle.state;pid=$idle.pid;generation=$idle.worker_generation;vram_after_mib=(Get-Vram)})}
-  if(Test-Selected "never-after-65s"){Set-Worker "persistent" $null;Invoke-Sample "never-start" $VoiceA "Never idle policy request.";Start-Sleep -Seconds 65;$never=Status;$rows.Add([pscustomobject]@{case="never-after-65s";utc=[DateTime]::UtcNow.ToString("o");state=$never.state;pid=$never.pid;generation=$never.worker_generation;vram_after_mib=(Get-Vram)})}
-  if(Test-Selected "manual-unload"){Unload;$manual=Status;$rows.Add([pscustomobject]@{case="manual-unload";utc=[DateTime]::UtcNow.ToString("o");state=$manual.state;pid=$manual.pid;generation=$manual.worker_generation;vram_after_mib=(Get-Vram)})}
+  if(Test-Selected "idle-60s"){
+    Set-Worker "persistent" 60;Invoke-Sample "idle-start" $VoiceA "Idle unload precondition request."
+    $beforeIdle=Status;if(!$beforeIdle.resident -or $beforeIdle.state -ne "READY"){throw "IDLE_PRECONDITION_NOT_MET"}
+    Start-Sleep -Seconds $IdleObservationSeconds;$idle=Status
+    if($IdleObservationSeconds -ge 65 -and ($idle.resident -or $idle.pid)){throw "IDLE_UNLOAD_NOT_OBSERVED"}
+    $rows.Add([pscustomobject]@{case="idle-60s";utc=[DateTime]::UtcNow.ToString("o");state=$idle.state;pid=$idle.pid;generation=$idle.worker_generation;vram_after_mib=(Get-Vram)})
+  }
+  if(Test-Selected "never-after-65s"){
+    Set-Worker "persistent" $null;Invoke-Sample "never-start" $VoiceA "Never idle policy request."
+    $beforeNever=Status;if(!$beforeNever.resident -or $beforeNever.state -ne "READY"){throw "NEVER_IDLE_PRECONDITION_NOT_MET"}
+    Start-Sleep -Seconds $IdleObservationSeconds;$never=Status
+    if(!$never.resident -or $never.pid -ne $beforeNever.pid){throw "NEVER_IDLE_RESIDENCY_LOST"}
+    $rows.Add([pscustomobject]@{case="never-after-65s";utc=[DateTime]::UtcNow.ToString("o");state=$never.state;pid=$never.pid;generation=$never.worker_generation;vram_after_mib=(Get-Vram)})
+  }
+  if(Test-Selected "manual-unload"){
+    $beforeManual=Status
+    if(!$beforeManual.resident){
+      Set-Worker "persistent" $null
+      $selected["never-start"]=$true
+      Invoke-Sample "never-start" $VoiceA "Manual unload precondition request."
+      $beforeManual=Status
+    }
+    if(!$beforeManual.resident){throw "MANUAL_UNLOAD_PRECONDITION_NOT_MET"}
+    Unload;$manual=Status
+    if($manual.resident -or $manual.pid){throw "MANUAL_UNLOAD_FAILED"}
+    $rows.Add([pscustomobject]@{case="manual-unload";utc=[DateTime]::UtcNow.ToString("o");state=$manual.state;pid=$manual.pid;generation=$manual.worker_generation;vram_after_mib=(Get-Vram)})
+  }
   Invoke-Sample "recovery-cold" $VoiceA "Explicit request after unload recovers."
 } catch {
   $failures.Add("benchmark:"+$_.Exception.GetType().Name)

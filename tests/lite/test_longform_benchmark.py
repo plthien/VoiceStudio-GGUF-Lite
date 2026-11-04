@@ -1,9 +1,9 @@
-import io,json,shutil,subprocess,sys,threading,time,wave
+import io,json,shutil,struct,subprocess,sys,threading,time,wave
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 import pytest
 from lite.longform_benchmark import (MAX_CHARS,MAX_PAUSES,MAX_ESTIMATED_SECONDS,
-    assemble_wavs,create_manifest,estimated_seconds,metrics_row,pause_count,
+    assemble_wavs,create_manifest,estimated_seconds,gpu_summary_status,metrics_row,pause_count,
     speech_seconds,split_section,write_manifest_atomic)
 
 BINDING="a"*64
@@ -43,6 +43,12 @@ def test_speech_seconds_uses_verified_audio_for_non_pause_response():
 
 def test_speech_seconds_uses_pause_response_header_case_insensitively():
     assert speech_seconds({"x-lite-speech-s":"9.25"},12.5)==9.25
+
+def test_longform_gpu_summary_is_computed_not_hardcoded():
+    assert gpu_summary_status(["GPU_STATS_SAMPLED","GPU_STATS_SAMPLED"])=="GPU_STATS_SAMPLED"
+    assert gpu_summary_status(["GPU_STATS_SAMPLED","GPU_STATS_UNAVAILABLE"])=="GPU_STATS_PARTIAL"
+    assert gpu_summary_status(["GPU_STATS_UNAVAILABLE"])=="GPU_STATS_UNAVAILABLE"
+    assert gpu_summary_status([])=="GPU_STATS_UNAVAILABLE"
 
 def test_canonical_default_and_spaced_pause_markers_split_safely():
     text=("speech [pause] "*17)+"tail [ pause 800 ms ] end"
@@ -85,7 +91,7 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
     with wave.open(buffer,"wb") as out:
         out.setnchannels(1);out.setsampwidth(2);out.setframerate(24000)
         out.writeframes(b"\0\0"*24000)
-    wav_bytes=buffer.getvalue();posts=[]
+    wav_bytes=buffer.getvalue();posts=[];server_state={"request_id":None}
     profile={"id":"private-voice","version":4,"ref_sha256":"a"*64,
              "source_sha256":"b"*64}
 
@@ -98,7 +104,9 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
         def do_GET(self):
             if self.path=="/profiles/private-voice":self._json(profile)
             elif self.path=="/lite/worker/settings":self._json({"mode":"legacy","idle_timeout_seconds":600})
-            elif self.path=="/lite/worker/status":self._json({"performance":{"native_total_us":1,"ref_codec_encode_us":2,"ref_cache_hit":False,"maskgit_steps":32},
+            elif self.path=="/lite/worker/status":self._json({"performance":{"native_total_us":1,"ref_codec_encode_us":2,"ref_cache_hit":False,"maskgit_steps":32,"maskgit_non_lm_overhead_us":3},
+                "performance_status":"VERIFIED" if server_state["request_id"] else "NOT_ATTRIBUTABLE",
+                "last_completed_request_id":server_state["request_id"],"last_completed_worker_generation":1,"worker_generation":1,
                 "runtime_binding":{"schema":"lite-longform-runtime-binding-v1","status":"verified_capability",
                   "identity_sha256":"c"*64,"exe_sha256":"d"*64,"candidate_receipt_sha256":None,
                   "declared_backend":"Vulkan0","candidate_kind":"verified_baseline",
@@ -109,7 +117,7 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
             self._json({"status":"ok"})
         def do_POST(self):
             payload=json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            posts.append(payload);self.send_response(200)
+            posts.append(payload);server_state["request_id"]=f"request-{len(posts)}";self.send_response(200)
             self.send_header("Content-Type","audio/wav")
             self.send_header("Content-Length",str(len(wav_bytes)))
             self.send_header("X-Lite-Verification-Status","verified")
@@ -118,6 +126,7 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
             self.send_header("X-Lite-Effective-Speed","1.0")
             self.send_header("X-Lite-Audio-S","1.0")
             self.send_header("X-Lite-RTF","0.1")
+            self.send_header("X-Lite-Request-Id",server_state["request_id"])
             if "[pause" in payload["input"]:
                 self.send_header("X-Lite-Speech-S","0.5")
                 self.send_header("X-Lite-Pause-Count","1")
@@ -138,6 +147,7 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
         assert first.returncode==0,first.stdout+"\\n"+first.stderr
         run=next(output.iterdir())
         first_metrics=json.loads((run/"metrics.json").read_text(encoding="utf-8-sig"))
+        first_receipt=json.loads((run/"section-0000.wav.json").read_text(encoding="utf-8-sig"))
         second=subprocess.run(base+["-RunDir",str(run)],cwd=Path(__file__).parents[2],
                               capture_output=True,text=True,timeout=30)
     finally:
@@ -145,10 +155,13 @@ def test_powershell_resume_and_speech_headers_end_to_end(tmp_path):
     assert first.returncode==0,first.stdout+first.stderr
     assert second.returncode==0,second.stdout+second.stderr
     assert first_metrics["resumed_run"] is False and first_metrics["qualified_fresh_run"] is False  # 2s fixture is not a 600s SLA run
+    assert first_receipt["performance_status"]=="NOT_AVAILABLE" and first_receipt["native_total_us"] is None
     assert len(posts)==2 and second.stdout.count("PASS resume section=")==2
     fresh=json.loads((run/"metrics.json").read_text(encoding="utf-8-sig"))
     assert fresh["resumed_run"] is True and fresh["qualified_fresh_run"] is False
     assert [row["speech_s"] for row in fresh["sections"]]==[1.0,0.5]
+    assert fresh["gpu_stats_status"]=="GPU_STATS_UNAVAILABLE"
+    assert fresh["gpu_metric_kind"]=="WDDM total board usage, sampled; not process VRAM"
 
 def test_inspect_wav_is_bounded_and_rejects_corruption(tmp_path):
     import tracemalloc
@@ -168,6 +181,35 @@ def test_inspect_wav_is_bounded_and_rejects_corruption(tmp_path):
         fh.truncate(fh.seek(0, 2) - 100)
     with pytest.raises(ValueError, match="truncated"):
         inspect_wav(wav)
+
+
+def test_wav_truncated_appended_and_malformed_are_bounded(tmp_path):
+    from lite.longform_benchmark import MAX_WAV_FRAMES,inspect_wav
+    def valid(name):
+        path=tmp_path/name
+        with wave.open(str(path),"wb") as out:
+            out.setnchannels(1);out.setsampwidth(2);out.setframerate(24000)
+            out.writeframes(b"\0\0"*240)
+        return path
+    truncated=valid("truncated.wav")
+    with truncated.open("r+b") as stream:stream.truncate(truncated.stat().st_size-2)
+    with pytest.raises(ValueError,match="truncated"):inspect_wav(truncated)
+    appended=valid("appended.wav");appended.write_bytes(appended.read_bytes()+b"junk")
+    with pytest.raises(ValueError,match="appended"):inspect_wav(appended)
+    malformed=valid("malformed.wav");body=bytearray(malformed.read_bytes());body[:4]=b"NOPE";malformed.write_bytes(body)
+    with pytest.raises(ValueError,match="malformed"):inspect_wav(malformed)
+    chunked=valid("chunked.wav");body=bytearray(chunked.read_bytes());body[36:36]=b"JUNK\x00\x00\x00\x00";body[4:8]=struct.pack("<I",len(body)-8);chunked.write_bytes(body)
+    with pytest.raises(ValueError,match="unexpected chunk"):inspect_wav(chunked)
+    wrong=valid("wrong.wav");body=bytearray(wrong.read_bytes());body[22:24]=struct.pack("<H",2);wrong.write_bytes(body)
+    with pytest.raises(ValueError,match="24 kHz mono PCM16"):inspect_wav(wrong)
+    declared=valid("declared.wav");body=bytearray(declared.read_bytes());body[40:44]=struct.pack("<I",999999);declared.write_bytes(body)
+    with pytest.raises(ValueError,match="truncated chunk"):inspect_wav(declared)
+    oversized=valid("oversized.wav");frames=MAX_WAV_FRAMES+1
+    with oversized.open("r+b") as stream:
+        stream.seek(4);stream.write(struct.pack("<I",36+frames*2))
+        stream.seek(40);stream.write(struct.pack("<I",frames*2))
+        stream.truncate(44+frames*2)
+    with pytest.raises(ValueError,match="frame bound"):inspect_wav(oversized)
 
 
 def test_metrics_rows_are_durable_and_sparse_failures_supported(tmp_path):

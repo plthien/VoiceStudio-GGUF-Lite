@@ -45,6 +45,7 @@ while True:
   seed,speed=struct.unpack_from('<If',p);a=8
   text,a=field(p,a);lang,a=field(p,a);reftext,a=field(p,a);pcm,a=field(p,a)
   if text==b'CRASH': os._exit(19)
+  if text==b'FLOOD': os.write(2,b'x'*(128*1024+4096));time.sleep(1)
   if text==b'SLOW': time.sleep(3)
   if text.startswith(b'DELAY250'): time.sleep(.25)
   if text.startswith(b'DELAY400'): time.sleep(.4)
@@ -125,8 +126,11 @@ def test_optional_performance_query_and_150_warm_requests(persistent,monkeypatch
         assert worker.last_performance["native_total_us"]==200
         assert worker.last_performance["reference_cache_hits"]==1
         assert worker.last_performance["maskgit_steps"]==32
-        assert len(b'[MaskGIT-Step] 32/32 demask=100 remaining=0\n')*32*150>131072
-        assert len(worker._stderr)<131072
+        assert 1000 < len(worker._stderr) < 131072
+        status=worker.status()
+        assert status["last_completed_request_id"]=="149"
+        assert status["last_completed_worker_generation"]==worker.generation
+        assert status["performance"]["native_total_us"]==200
         await worker.stop()
     asyncio.run(run())
 
@@ -386,6 +390,8 @@ def test_cancellation_while_transmitting_reaps_before_unlock(persistent,monkeypa
         task.cancel()
         with pytest.raises(asyncio.CancelledError): await task
         assert worker.process is None and worker.state=="ERROR" and not worker.lock.locked()
+        assert worker.status()["last_completed_request_id"] is None
+        assert worker.status()["performance"] is None
     asyncio.run(run())
 
 def test_final_assembly_is_inside_deadline_and_faults_resident_context(persistent,monkeypatch):
@@ -463,6 +469,8 @@ def test_cancellation_and_worker_death_between_spans_publish_nothing(persistent)
         slow.cancel()
         with pytest.raises(asyncio.CancelledError): await slow
         assert worker.process is None and worker.state=="ERROR"
+        assert worker.status()["last_completed_request_id"] is None
+        assert worker.status()["performance"] is None
         script=parse_pause_script("first [pause] CRASH [pause] never")
         with pytest.raises(NativeFailure):
             await worker.generate_paused(script=script,**{k:v for k,v in p.items() if k!="request_id"},request_id="dead")
@@ -571,34 +579,100 @@ def test_fake_native_zero_two_ten_pause_spans_aggregate_all_syntheses(persistent
             script = parse_pause_script(script_text)
             previous = worker._last_native_perf
             prior_hits = previous["reference_cache_hits"] if previous else 0
-            result, info = await worker.generate_paused(
-                script=script, **{k: v for k, v in p.items() if k != "request_id"},
-                request_id=f"pauses-{pauses}"
-            )
+            request_id=f"pauses-{pauses}"
+            if script is None:
+                result, info = await worker.generate(
+                    text=script_text, **{k: v for k, v in p.items() if k != "request_id"},
+                    request_id=request_id)
+            else:
+                result, info = await worker.generate_paused(
+                    script=script, **{k: v for k, v in p.items() if k != "request_id"},
+                    request_id=request_id)
             assert result.startswith(b"RIFF")
             perf = worker.last_performance
-            assert perf["span_count"] == pauses + 1
+            assert perf.get("span_count", 1) == pauses + 1
             assert perf["native_total_us"] == 200 * (pauses + 1)
             assert perf["ref_codec_encode_us"] == 10 * (pauses + 1)
             assert perf["codec_decode_us"] == 30 * (pauses + 1)
             assert perf["model_load_us"] == 5000
             assert perf["reference_cache_hits"] == worker._last_native_perf["reference_cache_hits"] - prior_hits
             assert perf["reference_cache_misses"] in (0, 1)
-            assert perf["ref_cache_hit_count"] == (0 if pauses == 0 else pauses + 1)
-            assert info["pause_count"] == pauses
+            assert perf.get("ref_cache_hit_count", perf["ref_cache_hit"]) == (0 if pauses == 0 else pauses + 1)
+            assert info.get("pause_count", 0) == pauses
         await worker.stop()
     asyncio.run(run())
 
 
-def test_native_controls_proof_requires_one_valid_numeric_attestation():
+def test_controls_attestation_lf_crlf_unique_proof():
     from lite.resident_worker import native_control_attestation
     proof=b"[LiteControls/v1] maskgit_steps=16 flash_attention=0 ref_cache_enabled=1"
-    assert native_control_attestation(proof)=={
-        "maskgit_steps":16,"flash_attention":0,"ref_cache_enabled":True}
-    with pytest.raises(NativeFailure):
-        native_control_attestation(b"[LiteControls/v1] invalid")
-    with pytest.raises(NativeFailure):
-        native_control_attestation(proof+b"\n"+proof)
+    expected={"maskgit_steps":16,"flash_attention":0,"ref_cache_enabled":True}
+    for record in (proof, proof+b"\n", proof+b"\r\n"):
+        assert native_control_attestation(record)==expected
+    rejected=(b"[LiteControls/v1] invalid", proof+b"\n"+proof,
+              proof+b"\r", proof+b" injected\n", proof+b"\rX\n",
+              b"prefix "+proof+b"\n", proof.replace(b"16",b"7"))
+    for record in rejected:
+        with pytest.raises(NativeFailure):
+            native_control_attestation(record)
+
+
+def test_generate_paused_none_rejected_before_admission(persistent):
+    worker,p=persistent
+    async def run():
+        with pytest.raises(NativeFailure,match="parsed pause script"):
+            await worker.generate_paused(script=None,**p)
+        assert not worker.lock.locked() and worker.process is None
+    asyncio.run(run())
+
+
+def test_disabled_perf_no_pause_keeps_legacy_exchange_shape(persistent):
+    worker,p=persistent
+    async def run():
+        data,info=await worker.generate(text="legacy no pause",**p)
+        assert data.startswith(b"RIFF") and info["request_id"]=="r1"
+        assert worker._sequence==3  # HELLO, LOAD, SYNTH; no GET_PERF.
+        status=worker.status()
+        assert status["performance"] is None
+        assert status["performance_status"]=="NOT_AVAILABLE"
+        await worker.stop()
+    asyncio.run(run())
+
+
+def test_native_stderr_150_warm_and_excessive_flood_fail_closed(persistent):
+    worker,p=persistent
+    async def run():
+        with pytest.raises(Exception):
+            await worker.generate(text="FLOOD",**p)
+        assert worker.process is None and worker.state=="ERROR"
+        assert not worker.lock.locked()
+        assert worker.status()["last_completed_request_id"] is None
+        failed_generation=worker.generation
+        data,_=await worker.generate(text="recovered",**{**p,"request_id":"recovery"})
+        assert data.startswith(b"RIFF")
+        assert worker.generation==failed_generation+1
+        assert worker.status()["last_completed_request_id"]=="recovery"
+        await worker.stop()
+    asyncio.run(run())
+
+
+def test_request_correlated_perf_rejects_raced_status(persistent):
+    worker,p=persistent;worker._perf_enabled=True
+    async def run():
+        await worker.generate(text="first",**p)
+        first=worker.status()
+        assert first["last_completed_request_id"]=="r1" and first["performance_status"]=="VERIFIED"
+        in_flight=asyncio.create_task(worker.generate(
+            text="DELAY400 next",**{**p,"request_id":"r2"}))
+        await asyncio.sleep(.05)
+        raced=worker.status()
+        assert raced["last_completed_request_id"] is None and raced["performance"] is None
+        await in_flight
+        second=worker.status()
+        assert second["last_completed_request_id"]=="r2"
+        await worker.unload_now()
+        assert worker.status()["last_completed_request_id"] is None
+    asyncio.run(run())
 
 
 def test_fake_persistent_worker_reports_effective_controls(persistent):
