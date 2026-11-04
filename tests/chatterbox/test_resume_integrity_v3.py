@@ -523,3 +523,67 @@ def test_v3_n02_real_reference_changed_during_synthesis_is_uncertain(api,tmp_pat
     assert state["sections"]["a"]["state"]=="UNCERTAIN"
     assert not (output/"final-commit.json").exists()
     assert not (output/"final.wav").exists()
+
+
+def test_v3_n01_failed_rollback_keeps_old_immutable_receipt(api,tmp_path,monkeypatch):
+    import lite.chatterbox_assembly as asm
+    client,_,_=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    do_job(manifest,out)
+    receipt=json.loads((out/"final-commit.json").read_text())
+    old_blob=(out/asm.FINAL_VERSIONS/receipt["artifact_id"]/"final.wav").read_bytes()
+    new_wav=bytearray(old_blob);new_wav[48]^=0x08
+    new_summary=json.loads((out/"summary.json").read_text())
+    new_summary["final_sha256"]=hashlib.sha256(new_wav).hexdigest()
+    original=asm.atomic
+    final_count=[0]
+    def injected(path,data):
+        if path==out/"final.wav":
+            final_count[0]+=1
+            if final_count[0]==2:
+                raise OSError("INJECTED_ROLLBACK_FAILURE")
+        if path==out/"summary.json":
+            raise OSError("INJECTED_SUMMARY_FAILURE")
+        return original(path,data)
+    monkeypatch.setattr(asm,"atomic",injected)
+    with pytest.raises(RuntimeError,match="FINAL_PUBLICATION_RECOVERY_REQUIRED"):
+        asm.publish_final_pair(out,bytes(new_wav),new_summary,
+            job_key=json.loads((out/"resume-manifest.json").read_text())["job_key"])
+    assert json.loads((out/"final-commit.json").read_text())==receipt
+    assert (out/asm.FINAL_VERSIONS/receipt["artifact_id"]/"final.wav").read_bytes()==old_blob
+    monkeypatch.setattr(asm,"atomic",original)
+    assert do_job(manifest,out,resume=True)["state"]=="PASS"
+    assert (out/"final.wav").read_bytes()==old_blob
+    assert len(posts)==2
+
+
+def test_v3_n01_receipt_after_replace_cleanup_error_is_explicit(api,tmp_path,monkeypatch):
+    import lite.chatterbox_assembly as asm
+    client,_,_=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    do_job(manifest,out)
+    old_receipt=json.loads((out/"final-commit.json").read_text())
+    original=asm.atomic
+    receipt_path=out/"final-commit.json"
+    def injected(path,data):
+        original(path,data)  # Commit actually succeeds.
+        if path==receipt_path:
+            raise OSError("INJECTED_RECEIPT_CLEANUP_FAILURE")
+    monkeypatch.setattr(asm,"atomic",injected)
+    wav=(out/"final.wav").read_bytes()
+    summary=json.loads((out/"summary.json").read_text())
+    with pytest.raises(RuntimeError,match="FINAL_PUBLICATION_RECOVERY_REQUIRED"):
+        asm.publish_final_pair(out,wav,summary,
+             job_key=json.loads((out/"resume-manifest.json").read_text())["job_key"])
+    new_receipt=json.loads(receipt_path.read_text())
+    assert new_receipt["artifact_id"]!=old_receipt["artifact_id"]
+    assert (out/asm.FINAL_VERSIONS/old_receipt["artifact_id"]/"final.wav").read_bytes()==wav
+    monkeypatch.setattr(asm,"atomic",original)
+    assert do_job(manifest,out,resume=True)["state"]=="PASS"
+    assert len(posts)==2
