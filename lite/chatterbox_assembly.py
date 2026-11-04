@@ -182,7 +182,7 @@ def _trusted_legacy_pair(output: Path, job_key: str, state: dict, seconds: float
 
 
 def _existing_final_result(output: Path, state: dict, job_key: str,
-                           total_frames: int, section_count: int):
+                           total_frames: int, section_count: int, ordered_ids: list[str]):
     old=_read_commit(output,job_key)
     if old is not None:
         receipt,wav,summary,result=old
@@ -196,7 +196,22 @@ def _existing_final_result(output: Path, state: dict, job_key: str,
     # Old V1 jobs have no authoritative receipt. Only their independently
     # verified *complete pair* can be accepted, with matching job/section state.
     if state.get("schema")=="chatterbox-job-v1":
-        return _trusted_legacy_pair(output,job_key,state,total_frames/24000)
+        legacy=_trusted_legacy_pair(output,job_key,state,total_frames/24000)
+        if legacy is None:
+            return None
+        # Older V2 jobs have no receipt: only accept when bytes also agree with
+        # the independently checksum-verified ordered section PCM, not merely
+        # a potentially edited final WAV + edited summary.
+        def ordered_legacy():
+            for identifier in ordered_ids:
+                target=output/("section-"+identifier+".wav")
+                if target.is_symlink():
+                    raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
+                yield target.read_bytes()
+        rebuilt=concatenate(ordered_legacy())
+        if hashlib.sha256(rebuilt).hexdigest()!=legacy["final_sha256"]:
+            return None
+        return legacy
     return None
 
 
@@ -410,7 +425,7 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
             if report: atomic(report, json.dumps(metrics,indent=2).encode())
     assert_reference_unchanged()
     if resume and skipped_all:
-        prior=_existing_final_result(output,state,job_key,verified_frames,len(sections))
+        prior=_existing_final_result(output,state,job_key,verified_frames,len(sections),[str(s["id"]) for s in sections])
         if prior is not None:
             assert_reference_unchanged()
             return prior
