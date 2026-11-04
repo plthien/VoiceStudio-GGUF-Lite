@@ -233,27 +233,9 @@ def publish_final_pair(output: Path, final: bytes, result: dict, *, job_key: str
     if versions.is_symlink() or receipt_path.is_symlink():
         raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
     versions.mkdir(exist_ok=True)
-    # If a legacy pair exists and is fully valid, preserve its older committed
-    # bytes before any replacement; do not treat a mismatched legacy pair as PASS.
-    if old is None and target_wav.is_file() and target_summary.is_file():
-        try:
-            previous_wav=target_wav.read_bytes()
-            previous_summary=target_summary.read_bytes()
-            _verify_final_bytes(previous_wav,previous_summary)
-        except (OSError,RuntimeError):
-            previous_wav=previous_summary=None
-        if previous_wav is not None:
-            legacy_id=uuid.uuid4().hex
-            legacy_dir=_final_version(output,legacy_id)
-            legacy_dir.mkdir(exist_ok=False)
-            atomic(legacy_dir/"final.wav",previous_wav)
-            atomic(legacy_dir/"summary.json",previous_summary)
-            legacy_receipt={
-                "schema":FINAL_SCHEMA,"artifact_id":legacy_id,"job_key":job_key,
-                "wav_sha256":hashlib.sha256(previous_wav).hexdigest(),
-                "summary_sha256":hashlib.sha256(previous_summary).hexdigest()}
-            atomic(receipt_path,json.dumps(legacy_receipt,sort_keys=True).encode())
-            old=_read_commit(output,job_key)
+    # A receiptless pair is NEVER promoted into a trusted commit merely
+    # because its WAV SHA matches an editable summary. Legacy no-write reuse
+    # is separately proven against ordered verified section audio above.
     new_id=uuid.uuid4().hex
     new_dir=_final_version(output,new_id)
     new_dir.mkdir(exist_ok=False)
