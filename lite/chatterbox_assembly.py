@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import io
 import json
 import re
@@ -83,9 +84,21 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
     version = profile["version"]
     binding = reference_binding(profile, voice)
     def assert_reference_unchanged():
-        latest = http_json(base, "/profiles/" + urllib.parse.quote(voice, safe=""))
-        if reference_binding(latest, voice) != binding:
-            raise RuntimeError("RESUME_PROVENANCE_CHANGED")
+        endpoint = "/profiles/" + urllib.parse.quote(voice, safe="")
+        try:
+            latest = http_json(base, endpoint)
+            if reference_binding(latest,voice) != binding:
+                raise RuntimeError("RESUME_PROVENANCE_CHANGED")
+            proof = http_json(base, endpoint + "/integrity/verify", payload={})
+            if (not isinstance(proof,dict) or proof.get("verified") is not True
+                or not isinstance(proof.get("binding"),str)
+                or not hmac.compare_digest(proof["binding"],binding)):
+                raise RuntimeError("REFERENCE_CHANGED")
+        except RuntimeError:
+            raise
+        except (OSError, urllib.error.URLError, ValueError, KeyError, TypeError):
+            raise RuntimeError("REFERENCE_CHANGED") from None
+    assert_reference_unchanged()
     status = http_json(base, "/chatterbox/runtime/status")
     if status.get("busy"):
         raise RuntimeError("WORKER_BUSY")
@@ -296,7 +309,8 @@ def main():
             "UNCERTAIN_OR_CHANGED_SECTION_EXPLICIT_RETRY_REQUIRED",
             "VOICE_VERSION_CHANGED","WORKER_BUSY","OUTPUT_EXISTS_USE_RESUME",
              "OUTPUT_JOB_BUSY","BENCHMARK_VOICE_MISMATCH","BENCHMARK_VOICE_INVALID",
-             "REFERENCE_PROVENANCE_UNAVAILABLE") else "JOB_FAILED")
+             "REFERENCE_PROVENANCE_UNAVAILABLE","REFERENCE_CHANGED",
+             "FINAL_PUBLICATION_RECOVERY_REQUIRED") else "JOB_FAILED")
         raise SystemExit(1)
 
 

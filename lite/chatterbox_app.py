@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from .audio import AudioError, convert_reference, wav_info
 from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, SOURCE_REVISION, diagnostic, IDLE_CHOICES
 from .chatterbox_service import TurboService, TurboError
-from .chatterbox_assembly import atomic
+from .chatterbox_assembly import atomic, reference_binding
 from .pause import parse_pause_script, speech_text, PauseError, DEFAULT_PAUSE_MS, MAX_EVENT_MS, MAX_MARKERS, MAX_TOTAL_MS, PAUSE_POLICY_VERSION
 from .profiles import Store, ProfileError
 
@@ -308,6 +308,33 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     def get_voice(voice_id: str):
         row = app.state.store.get(voice_id)
         return row if row else failure(404, "PROFILE_NOT_FOUND")
+
+    @app.post("/profiles/{voice_id}/integrity/verify")
+    async def verify_owned_reference(voice_id: str):
+        """Read-only actual-byte proof. Admission excludes trusted profile mutations.
+        No Chatterbox/Torch import or inference; no private checksum disclosure.
+        """
+        if not app.state.cache_trusted or not app.state.settings_consistent:
+            return failure(503, "SERVICE_RECOVERY_REQUIRED")
+        if app.state.admission.locked() or app.state.service.lock.locked():
+            return failure(503, "REFERENCE_VERIFICATION_BUSY")
+        async with app.state.admission:
+            row=app.state.store.get(voice_id)
+            if row is None:
+                return failure(404, "PROFILE_NOT_FOUND")
+            if row.get("consent") != "confirmed" or row.get("language") != "en":
+                return failure(409, "REFERENCE_CHANGED")
+            try:
+                # Store.reference resolves the path inside the voice root and
+                # hashes the actual normalized WAV; no metadata-only attestation.
+                await asyncio.to_thread(app.state.store.reference, row)
+                latest=app.state.store.get(voice_id)
+                binding=reference_binding(row,voice_id)
+                if latest is None or reference_binding(latest,voice_id)!=binding:
+                    return failure(409, "REFERENCE_CHANGED")
+            except (ProfileError, OSError, KeyError, ValueError, RuntimeError):
+                return failure(409, "REFERENCE_CHANGED")
+            return {"verified":True,"binding":binding}
 
     @app.get("/profiles/{voice_id}/reference")
     def preview(voice_id: str):
