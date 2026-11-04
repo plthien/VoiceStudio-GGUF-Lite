@@ -35,9 +35,9 @@ def atomic(path: Path, data: bytes):
         except FileNotFoundError: pass
 
 
-def http_json(base: str, path: str, payload=None, timeout=10):
+def http_json(base: str, path: str, payload=None, timeout=10, method=None):
     body = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(base + path, body, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(base + path, body, headers={"Content-Type": "application/json"}, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as reply:
         return json.load(reply)
 
@@ -291,7 +291,7 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
             latest = http_json(base, endpoint)
             if reference_binding(latest,voice) != binding:
                 raise RuntimeError("RESUME_PROVENANCE_CHANGED")
-            proof = http_json(base, endpoint + "/integrity/verify", payload={})
+            proof = http_json(base, endpoint + "/integrity/verify", method="POST")
             if (not isinstance(proof,dict) or proof.get("verified") is not True
                 or not isinstance(proof.get("binding"),str)
                 or not hmac.compare_digest(proof["binding"],binding)):

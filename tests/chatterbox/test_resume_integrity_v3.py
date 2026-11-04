@@ -17,7 +17,8 @@ def wire_http(monkeypatch, client):
     import lite.chatterbox_assembly as asm
     posts=[]
     def routed(_base,path,payload=None,timeout=10):
-        response=(client.post(path,json=payload) if payload is not None else client.get(path))
+        response=(client.post(path,json=payload) if payload is not None else
+                  client.post(path) if kwargs.get("method")=="POST" else client.get(path))
         if response.status_code != 200:
             raise RuntimeError("REFERENCE_CHANGED")
         return response.json()

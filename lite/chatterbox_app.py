@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import io
 import math
+import sqlite3
 import os
 import shutil
 import tempfile
@@ -319,7 +320,10 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         if app.state.admission.locked() or app.state.service.lock.locked():
             return failure(503, "REFERENCE_VERIFICATION_BUSY")
         async with app.state.admission:
-            row=app.state.store.get(voice_id)
+            try:
+                row=await asyncio.to_thread(app.state.store.get,voice_id)
+            except (OSError,sqlite3.Error):
+                return failure(503, "REFERENCE_VERIFICATION_UNAVAILABLE")
             if row is None:
                 return failure(404, "PROFILE_NOT_FOUND")
             if row.get("consent") != "confirmed" or row.get("language") != "en":
@@ -328,11 +332,13 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                 # Store.reference resolves the path inside the voice root and
                 # hashes the actual normalized WAV; no metadata-only attestation.
                 await asyncio.to_thread(app.state.store.reference, row)
-                latest=app.state.store.get(voice_id)
+                latest=await asyncio.to_thread(app.state.store.get,voice_id)
                 binding=reference_binding(row,voice_id)
                 if latest is None or reference_binding(latest,voice_id)!=binding:
                     return failure(409, "REFERENCE_CHANGED")
-            except (ProfileError, OSError, KeyError, ValueError, RuntimeError):
+            except (OSError, sqlite3.Error):
+                return failure(503, "REFERENCE_VERIFICATION_UNAVAILABLE")
+            except (ProfileError, KeyError, ValueError, RuntimeError):
                 return failure(409, "REFERENCE_CHANGED")
             return {"verified":True,"binding":binding}
 
