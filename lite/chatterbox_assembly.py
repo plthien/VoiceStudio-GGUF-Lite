@@ -282,8 +282,11 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
             raise ValueError("Section input must be 1..4096 characters")
         if not str(s["id"]).replace("-", "").replace("_", "").isalnum():
             raise ValueError("Unsafe section ID")
-    profile = http_json(base, "/profiles/" + urllib.parse.quote(voice, safe=""))
-    version = profile["version"]
+    try:
+        profile = http_json(base, "/profiles/" + urllib.parse.quote(voice, safe=""))
+        version = profile["version"]
+    except (OSError, urllib.error.URLError, TypeError, ValueError, KeyError):
+        raise RuntimeError("REFERENCE_CHANGED") from None
     binding = reference_binding(profile, voice)
     def assert_reference_unchanged():
         endpoint = "/profiles/" + urllib.parse.quote(voice, safe="")

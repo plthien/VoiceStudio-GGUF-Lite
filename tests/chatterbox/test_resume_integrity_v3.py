@@ -590,3 +590,18 @@ def test_v3_n01_receipt_after_replace_cleanup_error_is_explicit(api,tmp_path,mon
     monkeypatch.setattr(asm,"atomic",original)
     assert do_job(manifest,out,resume=True)["state"]=="PASS"
     assert len(posts)==2
+
+
+def test_v3_n02_deleted_voice_initial_get_is_typed_reference_changed(api,tmp_path,monkeypatch):
+    client,_,_=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    do_job(manifest,out)
+    old_len=len(posts)
+    assert client.delete("/profiles/"+voice).status_code==200
+    with pytest.raises(RuntimeError,match="REFERENCE_CHANGED"):
+        do_job(manifest,out,resume=True)
+    assert len(posts)==old_len
+    assert (out/"final-commit.json").exists()
