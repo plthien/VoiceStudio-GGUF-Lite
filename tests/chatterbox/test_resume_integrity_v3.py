@@ -16,7 +16,7 @@ def wire_http(monkeypatch, client):
     """Actual app routes + real disk Store; only the inference response is fake."""
     import lite.chatterbox_assembly as asm
     posts=[]
-    def routed(_base,path,payload=None,timeout=10):
+    def routed(_base,path,payload=None,timeout=10,**kwargs):
         response=(client.post(path,json=payload) if payload is not None else
                   client.post(path) if kwargs.get("method")=="POST" else client.get(path))
         if response.status_code != 200:
