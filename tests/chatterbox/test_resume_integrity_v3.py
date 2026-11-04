@@ -465,3 +465,61 @@ def test_v3_n02_concurrent_profile_mutation_while_attesting_is_busy(api,monkeypa
         proof=task.result(timeout=10)
         assert proof.status_code==200
     assert client.get("/profiles/"+voice).json()["name"]=="Alpha"
+
+
+def test_v3_n02_sqlite_unavailable_is_typed_503_not_verified(api,monkeypatch):
+    import sqlite3
+    client,svc,_=api
+    voice=profile(client)["id"]
+    store=client.app.state.store
+    def inaccessible(*args,**kwargs):
+        raise sqlite3.OperationalError("sensitive db path/owner private")
+    monkeypatch.setattr(store,"get",inaccessible)
+    result=client.post("/profiles/"+voice+"/integrity/verify")
+    assert result.status_code==503
+    assert result.json()["error"]["code"]=="REFERENCE_VERIFICATION_UNAVAILABLE"
+    assert "sensitive" not in result.text
+    assert svc.loads==0
+
+
+def test_v3_n02_unavailable_attestation_and_malformed_binding_fail_closed(api,tmp_path,monkeypatch):
+    import lite.chatterbox_assembly as asm
+    client,_,_=api
+    voice=profile(client)["id"]
+    requests=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    output=tmp_path/"private"
+    original=asm.http_json
+    def untrusted(base,path,*args,**kwargs):
+        if path.endswith("/integrity/verify"):
+            return {"verified":True,"binding":"f"*64}
+        return original(base,path,*args,**kwargs)
+    monkeypatch.setattr(asm,"http_json",untrusted)
+    with pytest.raises(RuntimeError,match="REFERENCE_CHANGED"):
+        do_job(manifest,output)
+    assert not requests
+    assert not output.exists()
+
+
+def test_v3_n02_real_reference_changed_during_synthesis_is_uncertain(api,tmp_path,monkeypatch):
+    import lite.chatterbox_assembly as asm
+    client,_,settings=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    output=tmp_path/"private"
+    row=client.get("/profiles/"+voice).json()
+    file=settings.data_dir/"voices"/row["ref_path"]
+    previous=asm.urllib.request.urlopen
+    def mutate_before_reply(request,**kwargs):
+        response=previous(request,**kwargs)
+        file.write_bytes(audio(6.5))
+        return response
+    monkeypatch.setattr(asm.urllib.request,"urlopen",mutate_before_reply)
+    with pytest.raises(RuntimeError,match="REFERENCE_CHANGED"):
+        do_job(manifest,output)
+    assert len(posts)==1
+    state=json.loads((output/"resume-manifest.json").read_text())
+    assert state["sections"]["a"]["state"]=="UNCERTAIN"
+    assert not (output/"final-commit.json").exists()
+    assert not (output/"final.wav").exists()
