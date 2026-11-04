@@ -330,3 +330,137 @@ def test_v3_n02_attestation_busy_and_recovery_fail_closed(api):
     assert response.status_code==503
     assert response.json()["error"]["code"]=="SERVICE_RECOVERY_REQUIRED"
     assert svc.loads==0
+
+
+def test_v3_n01_os_process_kill_mid_projection_recovers(api,tmp_path,monkeypatch):
+    import subprocess,sys
+    client,_,_=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    output=tmp_path/"private"
+    do_job(manifest,output)
+    paths=[output/"final.wav",output/"summary.json",output/"final-commit.json"]
+    originals=[p.read_bytes() for p in paths]
+    code=r"""
+import hashlib,json,os,sys
+from pathlib import Path
+import lite.chatterbox_assembly as asm
+output=Path(sys.argv[1])
+old=bytearray((output/"final.wav").read_bytes())
+# Change an audio sample without changing WAV format/duration.
+old[48]^=0x3f
+summary=json.loads((output/"summary.json").read_text())
+summary["final_sha256"]=hashlib.sha256(old).hexdigest()
+key=json.loads((output/"resume-manifest.json").read_text())["job_key"]
+native=asm.atomic
+def die_after_first_public_view(path,data):
+    native(path,data)
+    if path==output/"final.wav":
+        os._exit(97)
+asm.atomic=die_after_first_public_view
+asm.publish_final_pair(output,bytes(old),summary,job_key=key)
+raise SystemExit(1)
+"""
+    proc=subprocess.run([sys.executable,"-c",code,str(output)],
+                        cwd=Path(__file__).resolve().parents[2],timeout=20)
+    assert proc.returncode==97
+    assert paths[0].read_bytes()!=originals[0]
+    assert paths[2].read_bytes()==originals[2]
+    result=do_job(manifest,output,resume=True)
+    assert result["state"]=="PASS"
+    assert [p.read_bytes() for p in paths]==originals
+    assert len(posts)==2
+
+
+def test_v3_n01_legacy_v2_receiptless_resume_is_migration_free(api,tmp_path,monkeypatch):
+    client,_,_=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    output=tmp_path/"private"
+    do_job(manifest,output)
+    snapshot=[(output/p).read_bytes() for p in ("final.wav","summary.json")]
+    (output/"final-commit.json").unlink()
+    state=output/"resume-manifest.json"
+    previous=json.loads(state.read_text())
+    previous["schema"]="chatterbox-job-v1"
+    state.write_text(json.dumps(previous))
+    assert do_job(manifest,output,resume=True)["state"]=="PASS"
+    assert [ (output/p).read_bytes() for p in ("final.wav","summary.json") ]==snapshot
+    assert len(posts)==2
+
+
+def test_v3_n01_legacy_forged_summary_cannot_claim_pass(api,tmp_path,monkeypatch):
+    import lite.chatterbox_assembly as asm
+    client,_,_=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    do_job(manifest,out)
+    (out/"final-commit.json").unlink()
+    state=out/"resume-manifest.json"
+    payload=json.loads(state.read_text());payload["schema"]="chatterbox-job-v1"
+    state.write_text(json.dumps(payload))
+    final=out/"final.wav"
+    changed=bytearray(final.read_bytes());changed[48]^=0x17
+    final.write_bytes(changed)
+    summary=out/"summary.json"
+    claim=json.loads(summary.read_text())
+    claim["final_sha256"]=hashlib.sha256(changed).hexdigest()
+    summary.write_text(json.dumps(claim))
+    # A receiptless legacy pair with matching SHA/summary is not enough:
+    # reassemble verified sections and detect mismatched audio content.
+    assert do_job(manifest,out,resume=True)["state"]=="PASS"
+    assert hashlib.sha256(final.read_bytes()).hexdigest()!=claim["final_sha256"]
+    assert len(posts)==2
+
+
+def test_v3_n02_reference_modified_during_last_final_assembly_rejected(api,tmp_path,monkeypatch):
+    import lite.chatterbox_assembly as asm
+    client,_,settings=api
+    voice=profile(client)["id"]
+    posts=wire_http(monkeypatch,client)
+    manifest=manifest_at(tmp_path,voice)
+    out=tmp_path/"private"
+    row=client.get("/profiles/"+voice).json()
+    target=settings.data_dir/"voices"/row["ref_path"]
+    native=asm.concatenate
+    def mutate_after_assembly(parts,*args,**kwargs):
+        result=native(parts,*args,**kwargs)
+        target.write_bytes(audio(6.4))
+        return result
+    monkeypatch.setattr(asm,"concatenate",mutate_after_assembly)
+    with pytest.raises(RuntimeError,match="REFERENCE_CHANGED"):
+        do_job(manifest,out)
+    assert len(posts)==2
+    assert not (out/"final-commit.json").exists()
+    assert not (out/"final.wav").exists()
+
+
+def test_v3_n02_concurrent_profile_mutation_while_attesting_is_busy(api,monkeypatch):
+    import concurrent.futures,threading
+    client,_,_=api
+    voice=profile(client)["id"]
+    entered=threading.Event();release=threading.Event()
+    store=client.app.state.store
+    original=store.reference
+    def gated(row):
+        entered.set()
+        if not release.wait(10):
+            raise RuntimeError("CI_BARRIER_TIMEOUT")
+        return original(row)
+    monkeypatch.setattr(store,"reference",gated)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        task=pool.submit(lambda:client.post("/profiles/"+voice+"/integrity/verify"))
+        try:
+            assert entered.wait(10)
+            response=client.put("/profiles/"+voice,json={"name":"Changed"})
+            assert response.status_code==409
+            assert response.json()["error"]["code"]=="PROFILE_ACTIVE"
+        finally:
+            release.set()
+        proof=task.result(timeout=10)
+        assert proof.status_code==200
+    assert client.get("/profiles/"+voice).json()["name"]=="Alpha"
