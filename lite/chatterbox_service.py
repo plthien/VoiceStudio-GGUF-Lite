@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import errno
 import os
 import json
 import urllib.request
@@ -18,6 +19,25 @@ from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, IDLE_CHOICES
 from .chatterbox_ipc import send, recv, ProtocolError
 from .pause import PauseScript, SpeechPart, PausePart
 from .pause_audio import assemble_pause_wav
+
+
+# Only this loopback endpoint may authorize releasing the 4 GiB GPU interlock.
+# Windows can report an absent listener as a delayed WinError 10061 (>2 s).
+# Keep both the socket-level and coroutine deadlines finite and independent.
+GGUF_STATUS_URL = "http://127.0.0.1:3900/lite/worker/status"
+GGUF_HTTP_TIMEOUT_S = 4.5
+GGUF_PROBE_OUTER_TIMEOUT_S = 5.5
+GGUF_PROBE_GRACE_S = 0.5
+
+
+def _connection_explicitly_refused(reason) -> bool:
+    """Only a definite TCP refusal is proof of *no* GGUF listener.
+
+    Timeouts, resets, remote HTTP failures and malformed JSON stay unknown.
+    """
+    return (isinstance(reason, ConnectionRefusedError)
+            or getattr(reason, "errno", None) in (errno.ECONNREFUSED, 10061)
+            or getattr(reason, "winerror", None) == 10061)
 
 
 class TurboError(RuntimeError):
@@ -159,30 +179,57 @@ class TurboService:
         return result.get("result", {})
 
     async def _assert_no_gguf(self, deadline: float) -> None:
-        """Fail closed if PR1 is resident/busy; no PR1 mutations or shared GPU lock."""
+        """Read-only GPU isolation interlock with Windows-aware bounded deadlines.
+
+        Explicit TCP refusal means no listener. Any unverified response must
+        fail closed; timeouts never imply that GPU memory is available.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TurboError("DEADLINE_EXCEEDED")
+        outer_budget = min(GGUF_PROBE_OUTER_TIMEOUT_S, remaining)
+        # urlopen has its own socket timeout. Give it enough time to observe
+        # delayed Windows refusal, but leave grace for parsing/thread dispatch.
+        http_budget = min(GGUF_HTTP_TIMEOUT_S,
+                          max(0.05, outer_budget - GGUF_PROBE_GRACE_S))
+
         def probe():
             request = urllib.request.Request(
-                "http://127.0.0.1:3900/lite/worker/status", headers={"Accept": "application/json"})
+                GGUF_STATUS_URL, headers={"Accept": "application/json"})
             try:
-                with urllib.request.urlopen(request, timeout=0.6) as result:
+                with urllib.request.urlopen(request, timeout=http_budget) as result:
                     if result.status != 200:
                         raise ValueError("GGUF status unavailable")
                     data = result.read(16385)
                     if len(data) > 16384:
                         raise ValueError("Invalid GGUF status")
                     obj = json.loads(data)
-                    if not isinstance(obj, dict) or "resident" not in obj or "busy" not in obj:
+                    if (not isinstance(obj, dict)
+                        or type(obj.get("resident")) is not bool
+                        or type(obj.get("busy")) is not bool):
                         raise ValueError("Unknown GGUF status schema")
-                    return bool(obj["resident"] or obj["busy"])
+                    return obj["resident"] or obj["busy"]
             except urllib.error.URLError as exc:
-                if isinstance(exc.reason, ConnectionRefusedError):
-                    return False  # No process listening on port 3900.
+                if _connection_explicitly_refused(exc.reason):
+                    return False
                 raise
+            except OSError as exc:
+                if _connection_explicitly_refused(exc):
+                    return False
+                raise
+
         try:
-            conflict = await asyncio.wait_for(asyncio.to_thread(probe),
-                        timeout=max(0.001, min(1.0, deadline - time.monotonic())))
-        except (OSError, ValueError, asyncio.TimeoutError, urllib.error.URLError) as exc:
+            conflict = await asyncio.wait_for(
+                asyncio.to_thread(probe), timeout=outer_budget)
+        except asyncio.TimeoutError as exc:
+            if time.monotonic() >= deadline:
+                raise TurboError("DEADLINE_EXCEEDED") from exc
             raise TurboError("GGUF_PROBE_UNAVAILABLE") from exc
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            raise TurboError("GGUF_PROBE_UNAVAILABLE") from exc
+        # asyncio.CancelledError must propagate; no CUDA load or CPU fallback.
+        if time.monotonic() >= deadline:
+            raise TurboError("DEADLINE_EXCEEDED")
         if conflict:
             raise TurboError("GGUF_WORKER_RESIDENT")
 
