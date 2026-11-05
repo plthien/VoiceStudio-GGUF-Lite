@@ -155,3 +155,40 @@ so the CLI reattests at each trustworthy boundary and stops on mismatch.
 No protocol or changes to the GGUF port 3900 are required. Real owner
 GTX 1650 CUDA, acoustic quality and 600s/1800s throughput H01–H08 remain
 `OWNER TEST PENDING`.
+
+
+## Windows GGUF probe: delayed TCP refusal vs indeterminate status
+
+Before a cold Turbo CUDA worker load, the local read-only interlock checks
+`GET http://127.0.0.1:3900/lite/worker/status`. Windows 10 may delay
+a definitive WinError 10061/ConnectionRefusedError by approximately 2 seconds
+despite no listener on 3900. The Chatterbox service therefore applies a
+**4.5-second HTTP socket timeout** and an independent **5.5-second maximum
+coroutine deadline**, each additionally bounded by the remaining overall
+generation deadline. The coroutine deadline includes local scheduling,
+HTTP body read and JSON verification. These are separate limits, not a
+nonterminating retry loop or a new background probe.
+
+Only a definite TCP *connection refused* means "no GGUF listener", allowing
+the rest of the **existing** CUDA cold-load preflight to proceed. A valid
+HTTP 200 response must contain literal JSON booleans for both `resident`
+and `busy`; either `true` prevents Turbo CUDA with
+`GGUF_WORKER_RESIDENT`. Connect/read timeout, HTTP 500, incomplete/malformed
+status, connection reset, cancelled/expired probe or an unrelated socket
+error **never** means the GPU is free. The service fails closed with
+`GGUF_PROBE_UNAVAILABLE` or, if the overall generation clock expired,
+`DEADLINE_EXCEEDED`. Client cancellation propagates; a cancelled
+read-only thread can finish after the caller exits, but cannot start CUDA,
+change GGUF state or bypass the serial-worker isolation guard.
+
+For owner diagnostics, inspect the listener on Windows with:
+
+```powershell
+Get-NetTCPConnection -LocalPort 3900 -State Listen -ErrorAction SilentlyContinue
+```
+
+No matching listener should ultimately yield connection refusal, even if
+the refusal is delayed. A **timeout is not proof of no listener**; inspect
+the local networking, loopback firewall or stalled GGUF service before
+retrying. Never bypass this interlock to force GPU inference or activate
+CPU fallback. Real performance/VRAM gates H01–H08 remain owner tests.
