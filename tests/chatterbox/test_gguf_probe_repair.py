@@ -16,6 +16,7 @@ import pytest
 import lite.chatterbox_service as mod
 from lite.chatterbox_config import ChatterboxSettings
 from lite.chatterbox_service import TurboError, TurboService
+from .test_contracts import api, profile, gen, FakeTurbo
 
 
 def probe(monkeypatch, tmp_path, urlopen, *, timeout=9.0):
