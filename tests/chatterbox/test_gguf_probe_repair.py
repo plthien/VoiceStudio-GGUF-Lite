@@ -170,3 +170,58 @@ def test_socket_timeout_not_confused_with_refusal(monkeypatch,tmp_path):
     with pytest.raises(TurboError,match="GGUF_PROBE_UNAVAILABLE"):
         asyncio.run(svc._assert_no_gguf(time.monotonic()+9))
     assert svc.loads==0
+
+
+
+def test_cold_load_never_spawns_worker_when_status_unknown(monkeypatch,tmp_path):
+    svc=TurboService(ChatterboxSettings(root=tmp_path,timeout=10))
+    monkeypatch.setattr(mod.urllib.request,"urlopen",
+                        lambda *args,**kw: (_ for _ in ()).throw(
+                            urllib.error.URLError(TimeoutError("unknown connection"))))
+    async def forbidden(*args,**kwargs):
+        pytest.fail("CUDA child process must not start if GGUF status is unknown")
+    monkeypatch.setattr(mod.asyncio,"create_subprocess_exec",forbidden)
+    with pytest.raises(TurboError,match="GGUF_PROBE_UNAVAILABLE"):
+        asyncio.run(svc._ensure_loaded(time.monotonic()+9))
+    assert svc.state=="UNLOADED" and svc.loads==0 and svc.proc is None
+
+
+def test_generation_api_stays_fail_closed_on_unknown_gguf(api,monkeypatch):
+    from .test_contracts import profile,gen,FakeTurbo
+    client,svc,_=api
+    voice=profile(client)["id"]
+    # Bind the production load/interlock logic to the synthetic worker, so the
+    # test exercises the real API's response mapping without importing CUDA.
+    async def production_preflight(deadline):
+        await TurboService._assert_no_gguf(svc,deadline)
+        await FakeTurbo._ensure_loaded(svc,deadline)
+    monkeypatch.setattr(svc,"_ensure_loaded",production_preflight)
+    monkeypatch.setattr(mod.urllib.request,"urlopen",
+                        lambda *args,**kw: (_ for _ in ()).throw(
+                            urllib.error.URLError(TimeoutError("unresolved probe"))))
+    response=gen(client,voice)
+    assert response.status_code==503
+    assert response.json()["error"]["code"]=="GGUF_PROBE_UNAVAILABLE"
+    assert not response.content.startswith(b"RIFF")
+    assert svc.loads==0 and svc.syntheses==0
+    assert svc.state=="ERROR"
+
+
+def test_deadline_while_probe_in_flight_cancels_cuda_load(monkeypatch,tmp_path):
+    entered=threading.Event()
+    release=threading.Event()
+    def slow(req, timeout):
+        entered.set()
+        release.wait(3)
+        raise urllib.error.URLError(TimeoutError("probe still pending"))
+    monkeypatch.setattr(mod.urllib.request,"urlopen",slow)
+    svc=TurboService(ChatterboxSettings(root=tmp_path))
+    async def scenario():
+        try:
+            with pytest.raises(TurboError,match="DEADLINE_EXCEEDED"):
+                await svc._assert_no_gguf(time.monotonic()+.2)
+        finally:
+            release.set()
+    asyncio.run(scenario())
+    assert entered.is_set()
+    assert svc.loads==0 and svc.proc is None
