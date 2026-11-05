@@ -77,7 +77,9 @@ def fake_job_endpoint(monkeypatch,section_audio,profile=None,on_speech=None):
         if path.endswith("/runtime/status"):return {"busy":False}
         if path.endswith("/integrity/verify"):
             return {"verified":True,
-                    "binding":reference_binding(row,row["id"])}
+                    "binding":reference_binding(row,row["id"]),
+                    "voice_id":row["id"],"voice_version":row["version"],
+                    "reference_sha256":row["ref_sha256"]}
         return dict(row)
     class Response:
         def __init__(self,data):

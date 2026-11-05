@@ -43,7 +43,8 @@ def test_multi_sentence_native_accounting_and_pre_admission_rejection(api):
     text = ("A short sentence. " * 18).strip()
     result = gen(client, owned["id"], text)
     assert result.status_code == 200
-    assert int(result.headers["x-lite-speech-segments"]) > 1
+    assert result.headers["x-lite-speech-segments"] == "1"
+    assert int(result.headers["x-tts-native-chunks"]) > 1
     loads = service.loads
     rejected = gen(client, owned["id"], "x" * 301)
     assert rejected.status_code == 422

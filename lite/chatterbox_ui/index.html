@@ -13,7 +13,8 @@
 <section data-panel="clone"><span class="overline">OWNED REFERENCE</span><h2>Clone an English voice</h2><p>Choose a clean 6–15 second WAV or MP3 and enter the exact words spoken. Audio must be longer than five seconds.</p>
 <form id="clone-form"><label>Voice name<input name="name" required maxlength="128" placeholder="My narration voice"></label>
 <label>Exact transcript<textarea name="ref_text" required maxlength="4096" rows="3"></textarea></label>
-<label>Owned WAV or MP3<input name="ref_audio" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label>
+<label>Owned WAV or MP3<input id="clone-file" name="ref_audio" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label>
+<div id="selected-reference" hidden><audio id="selected-reference-preview" controls preload="metadata"></audio><div id="selected-reference-meta" role="status"></div><button id="clear-reference" type="button">Clear selected audio</button></div>
 <label class="check"><input type="checkbox" id="consent" required> I own this voice or have explicit rights and consent to clone it.</label>
 <button type="submit" class="primary">Create voice</button></form></section>
 <section data-panel="library" hidden><span class="overline">SAVED VOICES</span><h2>Voice Library</h2><button id="refresh-library" type="button">Refresh</button>

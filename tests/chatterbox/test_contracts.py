@@ -6,6 +6,7 @@ import io
 import json
 import math
 import wave
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,8 @@ class FakeTurbo(TurboService):
             return
         self.state="READY"
         self.loads+=1
-        self.device={"name":"FAKE CUDA TEST ONLY","index":0}
+        self.proc=SimpleNamespace(returncode=None, pid=0)
+        self.device={"name":"FAKE CUDA TEST ONLY","index":0,"evidence":"synthetic_ci"}
 
     async def _rpc(self, msg, deadline):
         if self.delaying:
@@ -68,6 +70,7 @@ class FakeTurbo(TurboService):
         self._cancel_idle()
         self.cache.clear()
         self.state="UNLOADED"
+        self.proc=None
         self.active_id=None
         self.device=None
 

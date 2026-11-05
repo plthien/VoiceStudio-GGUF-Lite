@@ -126,10 +126,18 @@ class Store:
                (k != "consent" and not v.strip()) for k, v in updates.items()):
             raise ProfileError("Invalid profile fields")
         with self.lock, self.connect() as db:
-            if not db.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
+            current = db.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
+            if not current:
                 raise KeyError(profile_id)
+            # Transcript/language/consent belong to the immutable acoustic and
+            # rights identity.  Never rewrite them under an existing version.
+            identity_changed = any(
+                key in updates and updates[key] != current[key]
+                for key in ("ref_text", "language", "consent")
+            )
             columns = ", ".join(f"{key}=?" for key in updates)
-            db.execute(f"UPDATE profiles SET {columns}, updated=? WHERE id=?",
+            version_sql = ", version=version+1" if identity_changed else ""
+            db.execute(f"UPDATE profiles SET {columns}{version_sql}, updated=? WHERE id=?",
                        [*updates.values(), time.time(), profile_id])
         return self.get(profile_id)
 

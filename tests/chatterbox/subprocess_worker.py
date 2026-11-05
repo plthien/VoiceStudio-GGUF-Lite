@@ -26,7 +26,7 @@ def main():
         if cmd=="LOAD":
             loads+=1
             result={"loads":loads,"device":{"name":"SYNTHETIC CI WORKER - NOT CUDA",
-                    "index":0,"total_bytes":1,"free_bytes_on_load":1},
+                    "index":0,"total_bytes":1,"free_bytes_on_load":1,"evidence":"synthetic_ci"},
                     "model_revision":MODEL_REVISION}
         elif cmd=="SYNTH":
             if msg.get("text")=="__CI_CRASH__":

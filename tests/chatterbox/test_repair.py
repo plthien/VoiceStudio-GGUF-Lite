@@ -364,7 +364,8 @@ def test_hash_recorded_does_not_mean_model_verified(tmp_path):
 def test_symlink_reference_escape_rejected(api,tmp_path):
     c,svc,settings=api
     row=profile(c)
-    original=settings.data_dir/"voices"/row["ref_path"]
+    stored=c.app.state.store.get(row["id"])
+    original=settings.data_dir/"voices"/stored["ref_path"]
     outside=tmp_path/"outside.wav"
     outside.write_bytes(original.read_bytes())
     original.unlink()
@@ -484,9 +485,15 @@ def test_cancel_during_atempo_reaps_and_never_publishes_wav(api,monkeypatch):
         await asyncio.sleep(30)
     monkeypatch.setattr(mod,"stretch_speech_async",stalled)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future=pool.submit(gen,client,voice,"Cancel mid-stretch.",1.15)
+        request_id="cancel-owned-request-1"
+        cancel_token="YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo"
+        future=pool.submit(client.post,"/v1/audio/speech",json={
+            "model":"chatterbox-nano","voice":voice,"input":"Cancel mid-stretch.",
+            "language":"en","speed":1.15,"response_format":"wav","seed":42},headers={
+            "X-TTS-Request-Id":request_id,"X-TTS-Cancel-Token":cancel_token})
         assert arrived.wait(10)
-        cancel=client.post("/chatterbox/runtime/cancel")
+        cancel=client.post("/chatterbox/runtime/cancel",json={
+            "request_id":request_id,"cancel_token":cancel_token})
         assert cancel.status_code==200 and cancel.json()["cancelled"] is True
         response=future.result(timeout=10)
     assert response.status_code==499

@@ -88,7 +88,8 @@ class Engine:
             self.model_snapshot = verified_snapshot
             self.torch = torch
             self.device = {"name": props.name, "index": index,
-                           "total_bytes": total, "free_bytes_on_load": available}
+                           "total_bytes": total, "free_bytes_on_load": available,
+                           "evidence": "runtime_cuda_probe"}
             self.loads += 1
             return self.status()
         except torch.cuda.OutOfMemoryError as exc:

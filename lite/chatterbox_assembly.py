@@ -21,6 +21,7 @@ from pathlib import Path
 from .audio import wav_info
 from .chatterbox_audio import concatenate, FINAL_MAX_SECONDS, FINAL_MAX_BYTES
 from .chatterbox_config import MODEL_REVISION
+from .chatterbox_contract import speed_ascii, verify_http_response
 
 
 def atomic(path: Path, data: bytes):
@@ -297,7 +298,10 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
             proof = http_json(base, endpoint + "/integrity/verify", method="POST")
             if (not isinstance(proof,dict) or proof.get("verified") is not True
                 or not isinstance(proof.get("binding"),str)
-                or not hmac.compare_digest(proof["binding"],binding)):
+                or not hmac.compare_digest(proof["binding"],binding)
+                or proof.get("voice_id") != voice
+                or proof.get("voice_version") != version
+                or proof.get("reference_sha256") != profile.get("ref_sha256")):
                 raise RuntimeError("REFERENCE_CHANGED")
         except RuntimeError:
             raise
@@ -373,6 +377,17 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
                 data = reply.read(100*1024*1024+1)
                 headers = reply.headers  # Case-insensitive HTTPMessage; dict conversion loses header lookups.
             info = wav_info(data)
+            backend = headers.get("X-TTS-Backend")
+            receipt_verified = False
+            if backend == "CUDA0":
+                verify_http_response(headers, data, expected={
+                    "voice_id":voice, "voice_version":version,
+                    "reference_binding":binding,
+                    "input_sha256":hashlib.sha256(s["input"].encode("utf-8")).hexdigest(),
+                    "seed":s.get("seed",42),
+                    "requested_speed":speed_ascii(s.get("speed",1.0)),
+                })
+                receipt_verified = True
             assert_reference_unchanged()
             atomic(target, data)
             elapsed = time.monotonic() - started
@@ -380,7 +395,9 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
                      "seconds": info["seconds"], "wall_seconds": elapsed, "rtf": elapsed/info["seconds"],
                      "speed_mode": headers.get("X-TTS-Speed-Mode"),
                      "pause_count": headers.get("X-Lite-Pause-Count"),
-                     "backend": headers.get("X-TTS-Backend"),
+                     "backend": backend, "execution_receipt_verified":receipt_verified,
+                     "speech_span_count":headers.get("X-Lite-Speech-Segments"),
+                     "native_chunk_count":headers.get("X-TTS-Native-Chunks"),
                      "cuda_allocated_bytes": headers.get("X-TTS-CUDA-Allocated-Bytes"),
                      "cuda_reserved_bytes": headers.get("X-TTS-CUDA-Reserved-Bytes"),
                      "cuda_peak_bytes": headers.get("X-TTS-CUDA-Peak-Bytes"),

@@ -28,7 +28,8 @@ def test_model_allowlist_has_full_cryptographic_pins():
 
 def test_nano_production_import_tree_has_no_gguf_runtime_imports():
     modules = ["chatterbox_app.py", "chatterbox_service.py", "chatterbox_worker.py",
-               "chatterbox_config.py", "profiles.py", "chatterbox_migration.py"]
+               "chatterbox_config.py", "chatterbox_contract.py", "profiles.py",
+               "chatterbox_migration.py"]
     banned = {"lite.app", "lite.native_runner", "lite.runtime", "lite.resident_worker"}
     for name in modules:
         tree = ast.parse((ROOT / "lite" / name).read_text("utf8"))

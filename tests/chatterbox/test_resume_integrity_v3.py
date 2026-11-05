@@ -89,7 +89,7 @@ def test_v3_n02_on_disk_corruption_rejected_on_all_pass_resume(api,tmp_path,monk
     output=tmp_path/"private"
     do_job(manifest,output)
     assert len(posts)==2
-    row=client.get("/profiles/"+voice).json()
+    row=client.app.state.store.get(voice)
     target=settings.data_dir/"voices"/row["ref_path"]
     target.write_bytes(audio(6.3))  # Change real bytes; DB row unchanged.
     status=client.post("/profiles/"+voice+"/integrity/verify")
@@ -108,7 +108,7 @@ def test_v3_n02_attestation_stable_is_opaque_and_without_cuda(api):
     assert result.status_code==200,result.text
     value=result.json()
     assert value["verified"] is True and len(value["binding"])==64
-    assert row["ref_sha256"] not in json.dumps(value)
+    assert value["reference_sha256"] == row["ref_sha256"]
     assert row["source_sha256"] not in json.dumps(value)
     assert svc.loads==0 and svc.syntheses==0
     again=client.post("/profiles/"+voice+"/integrity/verify")
@@ -118,7 +118,8 @@ def test_v3_n02_attestation_stable_is_opaque_and_without_cuda(api):
 def test_v3_n02_file_replace_symlink_missing_fail_closed(api,tmp_path):
     client,svc,settings=api
     row=profile(client)
-    path=settings.data_dir/"voices"/row["ref_path"]
+    stored=client.app.state.store.get(row["id"])
+    path=settings.data_dir/"voices"/stored["ref_path"]
     original=path.read_bytes()
     import shutil
     path.unlink()
@@ -271,7 +272,7 @@ def test_v3_n02_out_of_band_reference_mutations(api,tmp_path,monkeypatch,mutatio
     manifest=manifest_at(tmp_path,voice)
     out=tmp_path/"private"
     do_job(manifest,out)
-    row=client.get("/profiles/"+voice).json()
+    row=client.app.state.store.get(voice)
     target=settings.data_dir/"voices"/row["ref_path"]
     if mutation=="replace":
         staged=tmp_path/"changed.wav";staged.write_bytes(audio(6.2))
@@ -320,6 +321,7 @@ def test_v3_n02_attestation_busy_and_recovery_fail_closed(api):
     voice=profile(client)["id"]
     class Locked:
         def locked(self):return True
+        def try_acquire(self):return None
     previous=client.app.state.admission
     client.app.state.admission=Locked()
     response=client.post("/profiles/"+voice+"/integrity/verify")
@@ -425,7 +427,7 @@ def test_v3_n02_reference_modified_during_last_final_assembly_rejected(api,tmp_p
     posts=wire_http(monkeypatch,client)
     manifest=manifest_at(tmp_path,voice)
     out=tmp_path/"private"
-    row=client.get("/profiles/"+voice).json()
+    row=client.app.state.store.get(voice)
     target=settings.data_dir/"voices"/row["ref_path"]
     native=asm.concatenate
     def mutate_after_assembly(parts,*args,**kwargs):
@@ -511,7 +513,7 @@ def test_v3_n02_real_reference_changed_during_synthesis_is_uncertain(api,tmp_pat
     posts=wire_http(monkeypatch,client)
     manifest=manifest_at(tmp_path,voice)
     output=tmp_path/"private"
-    row=client.get("/profiles/"+voice).json()
+    row=client.app.state.store.get(voice)
     file=settings.data_dir/"voices"/row["ref_path"]
     previous=asm.urllib.request.urlopen
     def mutate_before_reply(request,**kwargs):

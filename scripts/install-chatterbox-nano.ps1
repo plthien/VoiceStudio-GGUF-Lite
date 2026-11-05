@@ -23,6 +23,7 @@ $path=[IO.Path]::GetFullPath($Root).TrimEnd('\')
 if ($path -ne 'D:\VoiceStudioBuild\chatterbox-nano') {throw 'NANO_D_DRIVE_ROOT_REQUIRED'}
 $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'internal\chatterbox-sha256.ps1')
+. (Join-Path $PSScriptRoot 'internal\chatterbox-verify-model.ps1')
 $model=Join-Path $path ('models\'+$ModelSha)
 $cache=Join-Path $path 'cache'
 $venv=Join-Path $path '.venv-chatterbox'
@@ -37,28 +38,15 @@ function Set-NanoEnvironment {
   $env:PIP_CACHE_DIR=Join-Path $cache 'pip'
 }
 function Verify-Files {
-  if (!(Test-Path -LiteralPath $manifest -PathType Leaf)) {throw 'MODEL_MANIFEST_INVALID'}
-  $m=Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json
-  if ($m.schema -ne 'chatterbox-nano-model-manifest-v1' -or $m.model_id -ne 'chatterbox-nano' -or
-      $m.repo_id -ne $ModelRepo -or $m.loader_mode -ne 'nano=True' -or
-      $m.revision -ne $ModelSha -or $m.source_revision -ne $SourceSha) {throw 'MODEL_MANIFEST_INVALID'}
-  $rootFiles=@(Get-ChildItem -LiteralPath $model -File | Select-Object -ExpandProperty Name)
-  $allowed=@($Required)+@('manifest.json')
-  if(@($rootFiles | Where-Object {$_ -notin $allowed}).Count -or
-     @($allowed | Where-Object {$_ -notin $rootFiles}).Count){throw 'MODEL_MANIFEST_INVALID'}
-  foreach($name in $Required) {
-    $file=Join-Path $model $name
-    if(!(Test-Path -LiteralPath $file -PathType Leaf)) {throw "MODEL_FILES_MISSING: $name"}
-    $digest=Get-ChatterboxSha256 -LiteralPath $file
-    if($digest -ne $Expected[$name] -or $digest -ne $m.sha256.$name) {throw "MODEL_HASH_MISMATCH: $name"}
-  }
+  Test-ChatterboxModelSnapshot -ModelDirectory $model -ManifestPath $manifest `
+    -RequiredFiles $Required -ExpectedHashes $Expected -ModelRepo $ModelRepo `
+    -ModelRevision $ModelSha -SourceRevision $SourceSha | Out-Null
 }
 Set-NanoEnvironment
 if($VerifyOnly) {
   $env:HF_HUB_OFFLINE='1';$env:TRANSFORMERS_OFFLINE='1'
   Verify-Files
-  if (!(Test-Path -LiteralPath $py -PathType Leaf)) {throw 'ENV_NOT_INSTALLED'}
-  if (!(Get-Command ffmpeg -ErrorAction SilentlyContinue)) {throw 'FFMPEG_UNAVAILABLE'}
+  Assert-ChatterboxVerifyPrerequisites -PythonPath $py | Out-Null
   $env:PYTHONPATH=$repo
   & $py -m lite.chatterbox_config --verify
   if ($LASTEXITCODE -ne 0) {throw 'NANO_PREFLIGHT_FAILED'}

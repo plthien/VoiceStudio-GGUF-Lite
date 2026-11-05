@@ -54,6 +54,8 @@ def test_cloning_generate_library_and_runtime(live, viewport):
         page.get_by_label("Exact transcript",exact=True).fill("This is the exact audio transcript")
         page.locator('#clone-form input[name=ref_audio]').set_input_files({
           "name":"owned.wav","mimeType":"audio/wav","buffer":audio(6)})
+        expect(page.locator("#selected-reference-preview")).to_be_visible()
+        expect(page.locator("#selected-reference-meta")).to_contain_text("owned.wav")
         page.locator("#consent").check()
         page.get_by_role("button",name="Create voice").click()
         expect(page.get_by_text("Owned Voice · version 1")).to_be_visible(timeout=10000)
@@ -65,6 +67,8 @@ def test_cloning_generate_library_and_runtime(live, viewport):
         expect(page.get_by_text("Generation complete")).to_be_visible(timeout=15000)
         expect(page.locator("#download")).to_be_visible()
         expect(page.locator("#metrics")).to_contain_text("Speech WPM")
+        expect(page.locator("#metrics")).to_contain_text("speech spans")
+        expect(page.locator("#metrics")).to_contain_text("native chunks")
         page.get_by_role("tab",name="Runtime & Settings").click()
         expect(page.locator("#runtime-status")).to_contain_text("FAKE CUDA TEST ONLY")
         page.locator("#idle").select_option("300")
@@ -72,6 +76,8 @@ def test_cloning_generate_library_and_runtime(live, viewport):
         expect(page.get_by_text("Idle setting saved")).to_be_visible()
         page.get_by_role("button",name="Unload Now").click()
         expect(page.get_by_text("Worker unloaded")).to_be_visible()
+        expect(page.locator("#runtime-status")).to_contain_text("cold_load_eligible")
+        expect(page.locator("#runtime-status")).to_contain_text("cuda_verified")
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
         browser.close()
 
@@ -81,6 +87,9 @@ def test_error_and_cancel_controls(live):
     with sync_playwright() as pw:
         browser=pw.chromium.launch(headless=True)
         page=browser.new_page()
+        observed=[]
+        page.on("request",lambda r: observed.append((r.url,r.headers,r.post_data_json))
+                if r.method=="POST" and (r.url.endswith("/v1/audio/speech") or r.url.endswith("/lite/worker/cancel")) else None)
         page.goto(url+"/ui")
         page.get_by_role("tab",name="Text to Speech").click()
         expect(page.locator("#generate")).to_be_disabled()
@@ -103,6 +112,42 @@ def test_error_and_cancel_controls(live):
         expect(page.locator("#cancel")).to_be_enabled()
         page.locator("#cancel").click()
         expect(page.locator("#notice")).to_contain_text(re.compile("CANCELLED|Cancellation requested"))
+        speech=[x for x in observed if x[0].endswith("/v1/audio/speech")][-1]
+        cancel=[x for x in observed if x[0].endswith("/lite/worker/cancel")][-1]
+        assert speech[1]["x-tts-request-id"]==cancel[2]["request_id"]
+        assert speech[1]["x-tts-cancel-token"]==cancel[2]["cancel_token"]
+        browser.close()
+
+
+@pytest.mark.parametrize("viewport",[(1280,900),(390,844)])
+def test_selected_file_preview_revocation_and_transcript_version(live, viewport):
+    url,_=live
+    with sync_playwright() as pw:
+        browser=pw.chromium.launch(headless=True)
+        page=browser.new_page(viewport={"width":viewport[0],"height":viewport[1]})
+        page.add_init_script("""window.__revoked=[]; const old=URL.revokeObjectURL.bind(URL); URL.revokeObjectURL=(u)=>{window.__revoked.push(u);old(u)};""")
+        requests=[]
+        page.on("request",lambda r: requests.append(r.url) if r.method=="POST" else None)
+        page.goto(url+"/ui")
+        page.get_by_label("Voice name").fill("Preview Voice")
+        page.get_by_label("Exact transcript",exact=True).fill("Original exact transcript")
+        page.locator("#clone-file").set_input_files({"name":"first.wav","mimeType":"audio/wav","buffer":audio(6)})
+        expect(page.locator("#selected-reference-meta")).to_contain_text("first.wav")
+        assert not any(path.endswith("/profiles") for path in requests)
+        page.locator("#clone-file").set_input_files({"name":"second.wav","mimeType":"audio/wav","buffer":audio(6)})
+        expect(page.locator("#selected-reference-meta")).to_contain_text("second.wav")
+        assert page.evaluate("window.__revoked.length")>=1
+        page.locator("#consent").check();page.get_by_role("button",name="Create voice").click()
+        expect(page.get_by_text("Preview Voice · version 1")).to_be_visible(timeout=10000)
+        expect(page.get_by_text("Exact transcript: Original exact transcript")).to_be_visible()
+        def dialog_handler(dialog):
+            if dialog.type=="prompt": dialog.accept("Corrected exact transcript")
+            else: dialog.accept()
+        page.on("dialog",dialog_handler)
+        page.get_by_role("button",name="Edit transcript").click()
+        expect(page.get_by_text("Preview Voice · version 2")).to_be_visible(timeout=10000)
+        expect(page.get_by_text("Exact transcript: Corrected exact transcript")).to_be_visible()
+        assert page.evaluate("window.__revoked.length")>=2
         browser.close()
 
 

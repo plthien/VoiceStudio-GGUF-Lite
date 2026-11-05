@@ -79,9 +79,12 @@ class TurboService:
         self.hits = 0
         self.device = None
         self.memory = None
+        self.model_hash_verified = False
+        self.live_generation_verified_at = None
 
     def status(self):
-        return {"state": self.state, "resident": bool(self.proc and self.proc.returncode is None),
+        resident = bool(self.proc and self.proc.returncode is None)
+        return {"state": self.state, "resident": resident,
                 "pid": self.proc.pid if self.proc and self.proc.returncode is None else None,
                 "busy": self.lock.locked(), "active": self.active_id is not None,
                 "load_count": self.loads, "generation_count": self.syntheses,
@@ -92,7 +95,15 @@ class TurboService:
                     if self.idle_deadline is not None else None,
                 "model": "chatterbox-nano", "backend": "CUDA0",
                 "idle_timeout_seconds": self.idle_timeout,
-                "model_revision": MODEL_REVISION}
+                "model_revision": MODEL_REVISION,
+                "model_hash_verified": bool(self.model_hash_verified and resident),
+                "cuda_verified": bool(isinstance(self.device,dict)
+                    and self.device.get("evidence") == "runtime_cuda_probe"
+                    and resident),
+                "live_generation_verified": bool(
+                    self.live_generation_verified_at is not None and resident),
+                "live_generation_verified_at": (
+                    self.live_generation_verified_at if resident else None)}
 
     def _cancel_idle(self):
         self.idle_deadline = None
@@ -153,6 +164,8 @@ class TurboService:
         finally:
             self.device = None
             self.memory = None
+            self.model_hash_verified = False
+            self.live_generation_verified_at = None
             self.state = "UNLOADED"
             self.active_id = None
 
@@ -276,6 +289,9 @@ class TurboService:
             or not self.device["name"] or type(self.device.get("index")) is not int):
             raise TurboError("CUDA_PROOF_MISSING")
         self.state = "READY"
+        # LOAD is the only production path that performs the full immutable
+        # snapshot hash verification before importing the model.
+        self.model_hash_verified = True
 
     async def invalidate(self, voice=None):
         if self.lock.locked():
@@ -302,6 +318,7 @@ class TurboService:
                 parts = script.parts if script is not None else (SpeechPart(text),)
                 speech_wavs = []
                 chunk_hashes = []
+                observed_model = observed_backend = observed_revision = None
                 last_memory = {}
                 max_segment_peak = None
                 measured_segments = 0
@@ -327,6 +344,9 @@ class TurboService:
                                 or answer.get("backend") != "CUDA0"
                                 or answer.get("model_revision") != MODEL_REVISION):
                             raise TurboError("MODEL_IDENTITY_CHANGED")
+                        observed_model = answer["model_id"]
+                        observed_backend = answer["backend"]
+                        observed_revision = answer["model_revision"]
                         raw = base64.b64decode(answer["wav"], validate=True)
                         left=deadline-time.monotonic()
                         if left<=0: raise TurboError("DEADLINE_EXCEEDED")
@@ -383,6 +403,7 @@ class TurboService:
                 audio_s = info["seconds"]
                 self.state = "READY"
                 self.last_error = None
+                self.live_generation_verified_at = time.time()
                 return data, {**meta, "audio_s": audio_s, "speech_s": speech_s,
                               "elapsed_s": elapsed, "deadline_at":deadline,
                               "rtf": elapsed / audio_s,
@@ -392,7 +413,8 @@ class TurboService:
                               "native_speech_segments": total_speech_generations,
                               "chunk_text_sha256": chunk_hashes,
                               "seed_policy_version": POLICY_VERSION,
-                              "model_revision": MODEL_REVISION}
+                              "model": observed_model, "backend": observed_backend,
+                              "model_revision": observed_revision}
             except BaseException as exc:
                 self.last_error = exc.code if isinstance(exc, TurboError) else "GENERATION_FAILED"
                 await self._kill()

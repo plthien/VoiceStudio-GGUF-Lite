@@ -12,6 +12,9 @@ import tempfile
 import time
 import wave
 import hashlib
+import base64
+import hmac
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -29,6 +32,8 @@ from .chatterbox_segmentation import (HARD_CHARS, TARGET_CHARS, POLICY_VERSION,
     segment_text, SegmentationError, SUPPORTED_TAGS)
 from .chatterbox_migration import legacy_sources, preview as migration_preview, apply as migration_apply
 from .chatterbox_assembly import atomic, reference_binding
+from .chatterbox_contract import (CONTRACT_VERSION, SPEED_POLICY_VERSION,
+    build_receipt, frame_seconds, speed_ascii, weights_manifest_sha256)
 from .pause import parse_pause_script, speech_text, PauseError, DEFAULT_PAUSE_MS, MAX_EVENT_MS, MAX_MARKERS, MAX_TOTAL_MS, PAUSE_POLICY_VERSION
 from .profiles import Store, ProfileError
 
@@ -77,6 +82,31 @@ class SizeGuard:
             if not started and str(exc) == "BODY_TOO_LARGE":
                 return await failure(413, "BODY_TOO_LARGE")(scope, receive, send)
             raise
+
+
+class AdmissionGate:
+    """Event-loop-local atomic no-wait ownership gate.
+
+    ``try_acquire`` contains no await point, so a returned busy result proves
+    that the rejected request was never queued for worker admission.
+    """
+    def __init__(self):
+        self._owner = None
+
+    def locked(self):
+        return self._owner is not None
+
+    def try_acquire(self):
+        if self._owner is not None:
+            return None
+        owner = object()
+        self._owner = owner
+        return owner
+
+    def release(self, owner):
+        if self._owner is not owner:
+            raise RuntimeError("ADMISSION_OWNER_MISMATCH")
+        self._owner = None
 
 
 class Speech(BaseModel):
@@ -140,6 +170,25 @@ class ProfilePatch(BaseModel):
     ref_text: str | None = None
     language: str | None = None
     consent: str | None = None
+    confirm_transcript_change: bool = False
+
+
+class CancelRequest(BaseModel):
+    request_id: str = Field(min_length=8, max_length=128,
+                            pattern=r"^[A-Za-z0-9._~-]+$")
+    cancel_token: str = Field(min_length=22, max_length=128,
+                              pattern=r"^[A-Za-z0-9_-]+$")
+
+    @field_validator("cancel_token")
+    @classmethod
+    def valid_secret(cls, value):
+        try:
+            raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Invalid cancel token") from exc
+        if len(raw) < 16:
+            raise ValueError("Cancel token needs 128 bits")
+        return value
 
 
 class MigrationSelection(BaseModel):
@@ -149,7 +198,7 @@ class MigrationSelection(BaseModel):
 def public_profile(row):
     if not row:
         return row
-    return {key: row[key] for key in ("id", "name", "language", "ref_text", "ref_path", "ref_sha256",
+    return {key: row[key] for key in ("id", "name", "language", "ref_text", "ref_sha256",
             "source_sha256", "version", "consent", "created", "updated") if key in row}
 
 
@@ -164,8 +213,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     app.state.settings = settings
     app.state.store = store or Store(settings)
     app.state.service = service or TurboService(settings)
-    app.state.admission = asyncio.Lock()
-    app.state.generation_task = None
+    app.state.admission = AdmissionGate()
+    app.state.active_generation = None
     app.state.cache_trusted = True
     app.state.settings_consistent = True
     app.state.settings_path = settings.data_dir / "chatterbox-settings.json"
@@ -231,14 +280,22 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     def readiness():
         status=app.state.service.status()
         result=diagnostic(settings)
-        attested=bool(status.get("resident") and status.get("state")=="READY" and
-                      isinstance(status.get("cuda"),dict) and status["cuda"].get("name"))
-        result["model_hash_verified"]=attested
+        model_verified=bool(status.get("model_hash_verified"))
+        cuda_verified=bool(status.get("cuda_verified"))
         eligible=bool(result["installation_preflight_ready"]
                       and app.state.cache_trusted and app.state.settings_consistent)
+        result["contract_version"] = CONTRACT_VERSION
+        result["installation_prerequisites_ready"] = result["installation_preflight_ready"]
+        result["model_hash_verified"] = model_verified
+        result["cuda_verified"] = cuda_verified
+        result["worker_resident"] = bool(status.get("resident"))
+        result["worker_busy"] = bool(status.get("busy") or app.state.admission.locked())
+        result["cold_load_eligible"] = eligible
         result["runtime_ready"]=eligible
         result["generation_ready"]=eligible
         result["tts_ready"]=eligible
+        result["live_generation_verified"] = bool(status.get("live_generation_verified"))
+        result["readiness_semantics"] = "eligible_to_attempt_cold_load_not_cuda_attestation"
         result["cloning_ready"]="FFMPEG_UNAVAILABLE" not in result["issues"]
         result["ready"]=eligible
         result["service_recovery_required"]=not (
@@ -251,19 +308,25 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     def runtime_status():
         return {**app.state.service.status(), "model": MODEL_ID, "backend": "CUDA0",
                 "voice_count": len(app.state.store.list()),
-                "ffmpeg_installed": bool(ffmpeg_path())}
+                "ffmpeg_installed": bool(ffmpeg_path()),
+                "admission_busy": app.state.admission.locked(),
+                "contract_version": CONTRACT_VERSION}
 
     @app.get("/lite/model-capability")
     @app.get("/chatterbox/capability", include_in_schema=False)
     def capability():
-        return {"model": MODEL_ID, "repo_id": MODEL_REPO, "language": "en", "backend": "CUDA0",
+        return {"contract_version": CONTRACT_VERSION, "model": MODEL_ID,
+                "repo_id": MODEL_REPO, "language": "en", "backend": "CUDA0",
                 "loader_mode": "nano=True", "model_revision": MODEL_REVISION,
                 "source_revision": SOURCE_REVISION, "weights_sha256": MODEL_HASHES,
+                "weights_manifest_sha256": weights_manifest_sha256(),
                 "sample_rate": 24000, "channels": 1, "pcm_bits": 16,
                 "speed_mode": "postprocess_atempo", "speed_min": 0.75, "speed_max": 1.25,
                 "pause_policy": PAUSE_POLICY_VERSION, "default_pause_ms": DEFAULT_PAUSE_MS,
                 "max_pause_ms": MAX_EVENT_MS, "max_pause_count": MAX_MARKERS,
                 "max_pause_total_ms": MAX_TOTAL_MS, "max_chars": 4096,
+                "api_max_input_characters": 4096,
+                "definite_429_nonadmission": True,
                 "native_segment_target_chars": TARGET_CHARS,
                 "native_segment_hard_chars": HARD_CHARS,
                 "segmentation_policy": POLICY_VERSION,
@@ -272,13 +335,16 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     @app.get("/lite/speed-capability")
     def speed_capability():
         return {"supported": True, "mode": "postprocess_atempo", "min": 0.75,
-                "max": 1.25, "policy_version": "nano_atempo_speech_only_v1"}
+                "max": 1.25, "policy_version": SPEED_POLICY_VERSION,
+                "applies_to": "speech_only", "authored_pauses_affected": False}
 
     @app.get("/lite/pause-capability")
     def pause_capability():
         return {"supported": True, "policy": PAUSE_POLICY_VERSION, "sample_rate": 24000,
+                "policy_version": PAUSE_POLICY_VERSION, "sample_rate_hz": 24000,
                 "default_ms": DEFAULT_PAUSE_MS, "max_event_ms": MAX_EVENT_MS,
                 "max_markers": MAX_MARKERS, "max_total_ms": MAX_TOTAL_MS,
+                "pcm_sample_value": 0, "channels": 1, "sample_width_bytes": 2,
                 "grammar": ["[pause]", "[pause 800ms]", "[pause 1.5s]"]}
 
     @app.get("/lite/worker/settings")
@@ -292,9 +358,12 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         import json
         if not app.state.settings_consistent:
             return failure(503,"SETTINGS_RECOVERY_REQUIRED")
-        if app.state.admission.locked() or app.state.service.lock.locked():
+        owner = app.state.admission.try_acquire()
+        if owner is None or app.state.service.lock.locked():
+            if owner is not None:
+                app.state.admission.release(owner)
             return failure(409,"WORKER_BUSY")
-        async with app.state.admission:
+        try:
             previous=app.state.service.idle_timeout
             try:
                 old_bytes=(await asyncio.to_thread(app.state.settings_path.read_bytes)
@@ -323,26 +392,37 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                     return failure(503,"SETTINGS_RECOVERY_REQUIRED")
                 return failure(500,"SETTINGS_SAVE_FAILED")
             return obj
+        finally:
+            app.state.admission.release(owner)
 
     @app.post("/lite/worker/unload")
     @app.post("/chatterbox/runtime/unload", include_in_schema=False)
     async def unload():
-        if app.state.admission.locked():
+        owner = app.state.admission.try_acquire()
+        if owner is None:
             return failure(409, "WORKER_BUSY")
         try:
             return await app.state.service.unload_now()
         except TurboError:
             return failure(409, "WORKER_BUSY")
+        finally:
+            app.state.admission.release(owner)
 
     @app.post("/lite/worker/cancel")
     @app.post("/chatterbox/runtime/cancel", include_in_schema=False)
-    async def cancel():
-        task = app.state.generation_task
-        if task is None or task.done():
-            return {"cancelled": False}
-        task.cancel()
-        # Cancelled operation owns teardown and lock release; no worker reuse.
-        return {"cancelled": True}
+    async def cancel(change: CancelRequest):
+        active = app.state.active_generation
+        if active is None or active["task"].done():
+            return failure(404, "NO_ACTIVE_REQUEST")
+        if active["request_id"] is None:
+            return failure(409, "CANCELLATION_NOT_ENABLED")
+        if (not hmac.compare_digest(change.request_id, active["request_id"])
+                or not hmac.compare_digest(change.cancel_token, active["cancel_token"])):
+            return failure(403, "CANCEL_NOT_AUTHORIZED")
+        active["task"].cancel()
+        # The request task remains the only teardown owner; this acknowledgment
+        # does not claim that CUDA cleanup has completed yet.
+        return {"cancelled": True, "state": "cancelling", "request_id": change.request_id}
 
     @app.get("/lite/rights")
     def rights():
@@ -386,13 +466,16 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     @app.post("/profiles/{voice_id}/integrity/verify")
     async def verify_owned_reference(voice_id: str):
         """Read-only actual-byte proof. Admission excludes trusted profile mutations.
-        No Chatterbox/Torch import or inference; no private checksum disclosure.
+        No Chatterbox/Torch import or inference; no filesystem path disclosure.
         """
         if not app.state.cache_trusted or not app.state.settings_consistent:
             return failure(503, "SERVICE_RECOVERY_REQUIRED")
-        if app.state.admission.locked() or app.state.service.lock.locked():
+        owner = app.state.admission.try_acquire()
+        if owner is None or app.state.service.lock.locked():
+            if owner is not None:
+                app.state.admission.release(owner)
             return failure(503, "REFERENCE_VERIFICATION_BUSY")
-        async with app.state.admission:
+        try:
             try:
                 row=await asyncio.to_thread(app.state.store.get,voice_id)
             except (OSError,sqlite3.Error):
@@ -413,7 +496,11 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                 return failure(503, "REFERENCE_VERIFICATION_UNAVAILABLE")
             except (ProfileError, KeyError, ValueError, RuntimeError):
                 return failure(409, "REFERENCE_CHANGED")
-            return {"verified":True,"binding":binding}
+            return {"verified":True,"binding":binding, "voice_id":row["id"],
+                    "voice_version":row["version"],
+                    "reference_sha256":row["ref_sha256"]}
+        finally:
+            app.state.admission.release(owner)
 
     @app.get("/profiles/{voice_id}/reference")
     def preview(voice_id: str):
@@ -429,9 +516,11 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
 
     async def owned_mutation(fun, invalidate_voice=None, *, invalidate=True):
         """Keep admission owned until cache invalidation and acknowledgment."""
-        if app.state.admission.locked() or app.state.service.lock.locked():
+        admission_owner = app.state.admission.try_acquire()
+        if admission_owner is None or app.state.service.lock.locked():
+            if admission_owner is not None:
+                app.state.admission.release(admission_owner)
             return failure(409,"PROFILE_ACTIVE")
-        await app.state.admission.acquire()
         async def owner():
             try:
                 try:
@@ -461,17 +550,36 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                     raise TurboError("MUTATION_COMMITTED_CACHE_RESET")
                 return changed
             finally:
-                app.state.admission.release()
+                app.state.admission.release(admission_owner)
         try:
             task=asyncio.create_task(owner())
         except BaseException:
-            app.state.admission.release()
+            app.state.admission.release(admission_owner)
             raise
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         return await asyncio.shield(task)
 
     def check_consent(value):
         return isinstance(value, str) and value == "confirmed"
+
+    def request_cancel_identity(request: Request):
+        request_id = request.headers.get("x-tts-request-id")
+        cancel_token = request.headers.get("x-tts-cancel-token")
+        if request_id is None and cancel_token is None:
+            return None, None
+        if request_id is None or cancel_token is None:
+            raise ValueError("CANCEL_IDENTITY_INCOMPLETE")
+        if not re.fullmatch(r"[A-Za-z0-9._~-]{8,128}", request_id):
+            raise ValueError("INVALID_REQUEST_ID")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{22,128}", cancel_token):
+            raise ValueError("INVALID_CANCEL_TOKEN")
+        try:
+            secret = base64.urlsafe_b64decode(cancel_token + "=" * (-len(cancel_token) % 4))
+        except (ValueError, TypeError) as exc:
+            raise ValueError("INVALID_CANCEL_TOKEN") from exc
+        if len(secret) < 16 or hmac.compare_digest(request_id, cancel_token):
+            raise ValueError("INVALID_CANCEL_TOKEN")
+        return request_id, cancel_token
 
     async def import_voice(name, ref_text, language, ref_audio, consent, voice_id=None):
         if not check_consent(consent):
@@ -543,8 +651,15 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     @app.put("/profiles/{voice_id}")
     async def edit_voice(voice_id: str, change: ProfilePatch):
         data = change.model_dump(exclude_unset=True)
+        confirmed = bool(data.pop("confirm_transcript_change", False))
         if data.get("language", "en") != "en" or data.get("consent", "confirmed") != "confirmed":
             return failure(422, "INVALID_PROFILE")
+        current = app.state.store.get(voice_id)
+        if not current:
+            return failure(404, "PROFILE_NOT_FOUND")
+        transcript_changed = "ref_text" in data and data["ref_text"] != current["ref_text"]
+        if transcript_changed and not confirmed:
+            return failure(422, "TRANSCRIPT_CHANGE_CONFIRMATION_REQUIRED")
         try:
             identity_change = bool(set(data) - {"name"})
             changed = await owned_mutation(
@@ -588,13 +703,21 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
             return failure(422, exc.code)
         except ValueError as exc:
             return failure(422, str(exc) if str(exc) == "UNSUPPORTED_PARALINGUISTIC_TAG" else "INVALID_TEXT")
+        try:
+            request_id, cancel_token = request_cancel_identity(request)
+        except ValueError as exc:
+            return failure(422, str(exc))
         if not app.state.cache_trusted or not app.state.settings_consistent:
             return failure(503,"SERVICE_RECOVERY_REQUIRED")
-        if app.state.admission.locked() or app.state.service.lock.locked():
+        admission_owner = app.state.admission.try_acquire()
+        if admission_owner is None or app.state.service.lock.locked():
+            if admission_owner is not None:
+                app.state.admission.release(admission_owner)
             response = failure(429,"WORKER_BUSY")
             response.headers["Retry-After"] = "1"
             return response
-        async with app.state.admission:
+        active = None
+        try:
             row = app.state.store.get(body.voice)
             if not row:
                 return failure(404, "PROFILE_NOT_FOUND")
@@ -610,7 +733,9 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
             task = asyncio.create_task(app.state.service.synthesize(
                 profile=row, reference=reference, text=body.input, script=script,
                 speed=body.speed, seed=body.seed))
-            app.state.generation_task = task
+            active = {"marker": object(), "request_id": request_id,
+                      "cancel_token": cancel_token, "task": task}
+            app.state.active_generation = active
             try:
                 # Disconnect must cancel and reap the worker, not detach generation.
                 while not task.done():
@@ -622,28 +747,39 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                     await asyncio.wait({task}, timeout=0.1)
                 data, info = await task
                 latest = app.state.store.get(body.voice)
-                if (latest is None or reference_binding(latest, body.voice) != reference_binding(row, body.voice)
+                binding = reference_binding(row, body.voice)
+                if (latest is None or reference_binding(latest, body.voice) != binding
                     or app.state.store.reference(latest).resolve(strict=True) != reference.resolve(strict=True)):
                     return failure(409, "REFERENCE_CHANGED")
+                wav = wav_info(data, max_bytes=settings.max_output_bytes, max_seconds=600)
+                if (wav["frames"] != info["audio_frames"]
+                        or info["audio_frames"] != info["speech_frames"] + info["pause_frames"]):
+                    return failure(500, "AUDIO_INTEGRITY_FAILURE")
                 words = len(speech_text(script, body.input).split())
                 speech_wpm = words * 60 / info["speech_s"]
                 final_wpm = words * 60 / info["audio_s"]
-                proof = hashlib.sha256((MODEL_ID + "\0" + MODEL_REVISION + "\0" +
-                    reference_binding(row, body.voice) + "\0" + hashlib.sha256(data).hexdigest()).encode()).hexdigest()
+                _receipt, _raw_receipt, receipt_token, proof = build_receipt(
+                    profile=row, reference_binding=binding, input_text=body.input,
+                    seed=body.seed, speed=body.speed, wav=data, info=info)
+                requested_speed = speed_ascii(body.speed)
                 meta = {"X-TTS-Engine": MODEL_ID, "X-TTS-Backend": "CUDA0",
                         "X-TTS-Model-Revision": MODEL_REVISION,
                         "X-TTS-Voice-Version": str(row["version"]),
-                        "X-TTS-Elapsed-S": str(info["elapsed_s"]), "X-TTS-Audio-S": str(info["audio_s"]),
+                        "X-TTS-Elapsed-S": f'{info["elapsed_s"]:.6f}',
+                        "X-TTS-Audio-S": frame_seconds(info["audio_frames"]),
                         "X-TTS-RTF": str(info["rtf"]), "X-TTS-Speed-Mode": "postprocess_atempo",
-                        "X-TTS-Requested-Speed": str(body.speed), "X-TTS-Effective-Speed": str(body.speed),
+                        "X-TTS-Requested-Speed": requested_speed,
+                        "X-TTS-Effective-Speed": requested_speed,
                         "X-TTS-Pause-Unaffected": "true", "X-TTS-Speech-WPM": f"{speech_wpm:.2f}",
                         "X-TTS-Final-WPM": f"{final_wpm:.2f}",
                         "X-Lite-Pause-Count": str(info["pause_count"]),
-                        "X-Lite-Pause-S": str(info["pause_frames"] / 24000),
-                        "X-Lite-Speech-S": str(info["speech_s"]),
-                        "X-Lite-Audio-S": str(info["audio_s"]),
-                        "X-Lite-Speech-Segments": str(info.get("native_speech_segments", info["speech_segments"])),
+                        "X-Lite-Pause-S": frame_seconds(info["pause_frames"]),
+                        "X-Lite-Speech-S": frame_seconds(info["speech_frames"]),
+                        "X-Lite-Audio-S": frame_seconds(info["audio_frames"]),
+                        "X-Lite-Speech-Segments": str(info["speech_segments"]),
+                        "X-TTS-Native-Chunks": str(info["native_speech_segments"]),
                         "X-Lite-Speech-RTF": str(info["speech_rtf"]),
+                        "X-TTS-Execution-Receipt": receipt_token,
                         "X-TTS-Execution-Proof": proof,
                         "X-TTS-Segmentation-Policy": info.get("seed_policy_version", POLICY_VERSION),
                         "Cache-Control": "no-store"}
@@ -675,7 +811,10 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
             except (AudioError, OSError, ValueError):
                 return failure(500, "AUDIO_INTEGRITY_FAILURE")
             finally:
-                app.state.generation_task = None
+                if app.state.active_generation is active:
+                    app.state.active_generation = None
+        finally:
+            app.state.admission.release(admission_owner)
     app.add_middleware(SizeGuard, limit=settings.max_ref_bytes + 65536)
     return app
 

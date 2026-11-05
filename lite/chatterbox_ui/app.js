@@ -4,6 +4,7 @@
   const $ = s => document.querySelector(s);
   const $$ = s => Array.from(document.querySelectorAll(s));
   let voices = [], busy = false, currentWav = null, generationToken = 0;
+  let selectedReferenceUrl = null, activeCancel = null;
   function notice(msg, error = false) { const el = $('#notice'); el.textContent = msg || ''; el.dataset.error = String(error); }
   async function call(path, opts = {}) {
     const r = await fetch(path, {cache:'no-store', ...opts});
@@ -16,6 +17,7 @@
   }
   async function json(path, opts = {}) { return (await call(path, opts)).json(); }
   function show(tab) {
+    if (tab !== 'clone') releaseSelectedReference(true);
     $$('[role=tab]').forEach(el => el.setAttribute('aria-selected', String(el.dataset.tab === tab)));
     $$('[data-panel]').forEach(el => el.hidden = el.dataset.panel !== tab);
     if (tab === 'library' || tab === 'generate') refreshVoices().catch(e=>notice(e.message,true));
@@ -23,6 +25,36 @@
   }
   $$('[role=tab]').forEach(el => el.addEventListener('click', () => show(el.dataset.tab)));
   const safe = value => String(value == null ? '' : value);
+  function releaseSelectedReference(clearInput = false) {
+    if (selectedReferenceUrl) URL.revokeObjectURL(selectedReferenceUrl);
+    selectedReferenceUrl = null;
+    const audio=$('#selected-reference-preview');audio.onloadedmetadata=null;audio.onerror=null;audio.removeAttribute('src');audio.load();
+    $('#selected-reference').hidden=true;$('#selected-reference-meta').textContent='';
+    if(clearInput)$('#clone-file').value='';
+  }
+  $('#clone-file').addEventListener('change',()=>{
+    releaseSelectedReference(false);
+    const file=$('#clone-file').files[0];if(!file)return;
+    const recognizedType=['audio/wav','audio/x-wav','audio/mpeg'].includes(file.type);
+    if(file.size<64||file.size>24*1024*1024||(!recognizedType&&!/\.(wav|mp3)$/i.test(file.name))){
+      $('#clone-file').value='';notice('INVALID_AUDIO',true);return;
+    }
+    selectedReferenceUrl=URL.createObjectURL(file);
+    const ownedUrl=selectedReferenceUrl;
+    const audio=$('#selected-reference-preview');audio.src=selectedReferenceUrl;
+    $('#selected-reference').hidden=false;
+    $('#selected-reference-meta').textContent=file.name+' · '+Math.ceil(file.size/1024)+' KiB · metadata pending';
+    audio.onloadedmetadata=()=>{
+      if(selectedReferenceUrl!==ownedUrl)return;
+      if(!Number.isFinite(audio.duration)||audio.duration<=0||audio.duration>60){
+        releaseSelectedReference(true);notice('INVALID_AUDIO_DURATION',true);return;
+      }
+      $('#selected-reference-meta').textContent=file.name+' · '+Math.ceil(file.size/1024)+' KiB · '+audio.duration.toFixed(2)+' s';
+    };
+    audio.onerror=()=>{if(selectedReferenceUrl===ownedUrl){releaseSelectedReference(true);notice('INVALID_AUDIO',true);}};
+  });
+  $('#clear-reference').addEventListener('click',()=>releaseSelectedReference(true));
+  $('#clone-form').addEventListener('reset',()=>queueMicrotask(()=>releaseSelectedReference(false)));
   async function refreshVoices() {
     voices = await json('/profiles');
     const select = $('#voice'), prior = select.value;
@@ -36,10 +68,12 @@
       const card=document.createElement('article');card.className='voice-card';
       const title=document.createElement('strong');title.textContent=safe(v.name)+' · version '+safe(v.version);
       card.append(title, document.createElement('p'));card.lastChild.textContent='English · consent: '+safe(v.consent);
+      const transcript=document.createElement('p');transcript.className='transcript';transcript.textContent='Exact transcript: '+safe(v.ref_text);card.append(transcript);
       function button(label, action) {const b=document.createElement('button');b.type='button';b.textContent=label;b.addEventListener('click',()=>action(v).catch(e=>notice(e.message,true)));card.append(b);}
       button('Preview', async v=>{const response=await call('/profiles/'+encodeURIComponent(v.id)+'/reference'); const blob=await response.blob(); const url=URL.createObjectURL(blob); const player=new Audio(url); const release=()=>URL.revokeObjectURL(url);player.onended=release;player.onerror=release;try{await player.play();}catch(error){release();throw error;}});
       button('Replace reference',async v=>{const pane=$('#replace-panel');pane.hidden=false;pane.querySelector('[name=voice_id]').value=v.id;pane.scrollIntoView({behavior:'smooth'});});
       button('Edit name', async v=>{const name=prompt('Voice name',v.name);if(!name)return;await json('/profiles/'+encodeURIComponent(v.id),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});notice('Voice updated');await refreshVoices();});
+      button('Edit transcript', async v=>{const ref_text=prompt('Exact reference transcript',v.ref_text);if(ref_text===null||ref_text===v.ref_text)return;if(!confirm('Changing the transcript creates a new voice identity version and clears its conditioning cache. Continue?'))return;await json('/profiles/'+encodeURIComponent(v.id),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({ref_text,confirm_transcript_change:true})});notice('Transcript version updated');await refreshVoices();});
       button('Delete record', async v=>{if(!confirm('Delete the library record but retain owned files?'))return;await json('/profiles/'+encodeURIComponent(v.id),{method:'DELETE'});notice('Voice record deleted');await refreshVoices();});
       button('Delete + purge', async v=>{if(!confirm('Permanently purge this voice and owned files?'))return;await json('/profiles/'+encodeURIComponent(v.id)+'?purge=true',{method:'DELETE'});notice('Voice and owned files purged');await refreshVoices();});
       list.append(card);
@@ -91,27 +125,31 @@
       insertPause('[pause '+raw+']');
     } catch(e) { notice(e.message,true); }
   });
-  function setBusy(value){busy=value;$('#generate').disabled=value||voices.length===0;$('#cancel').disabled=!value;$('#progress').textContent=value?'Generating (single CUDA task)...':'';}
+  function randomBase64Url(bytes=32){const raw=new Uint8Array(bytes);crypto.getRandomValues(raw);let text='';raw.forEach(v=>text+=String.fromCharCode(v));return btoa(text).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+  function setBusy(value){busy=value;$('#generate').disabled=value||voices.length===0;$('#cancel').disabled=!value||!activeCancel;$('#progress').textContent=value?'Generating (single CUDA task)...':'';}
   $('#generate-form').addEventListener('submit', async e=>{
     e.preventDefault();if(busy)return;
-    const token=++generationToken, frozenVoice=$('#voice').value;setBusy(true);notice('');
+    const token=++generationToken, frozenVoice=$('#voice').value;
+    activeCancel={request_id:(crypto.randomUUID?crypto.randomUUID():randomBase64Url(18)),cancel_token:randomBase64Url(32)};setBusy(true);notice('');
     try{
       const payload={model:'chatterbox-nano',voice:$('#voice').value,input:$('#input').value,
         response_format:'wav',language:'en',speed:Number($('#speed').value),seed:Number($('#seed').value)};
-      const response=await call('/v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const response=await call('/v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json','X-TTS-Request-Id':activeCancel.request_id,'X-TTS-Cancel-Token':activeCancel.cancel_token},body:JSON.stringify(payload)});
       const data=await response.blob();if(token!==generationToken||$('#voice').value!==frozenVoice){notice('Result discarded because the selected voice changed',true);return;}if(currentWav)URL.revokeObjectURL(currentWav);currentWav=URL.createObjectURL(data);
       $('#playback').src=currentWav;$('#download').href=currentWav;$('#download').hidden=false;
       const header=k=>response.headers.get(k)||'—';
       $('#metrics').textContent='Speech WPM: '+header('X-TTS-Speech-WPM')+' · Final WPM: '+header('X-TTS-Final-WPM')+
         '\nElapsed: '+header('X-TTS-Elapsed-S')+' s · Audio: '+header('X-TTS-Audio-S')+' s · RTF: '+header('X-TTS-RTF')+
-        '\nSpeech: '+header('X-Lite-Speech-S')+' s · pauses: '+header('X-Lite-Pause-S')+' s · native chunks: '+header('X-Lite-Speech-Segments');
+        '\nSpeech: '+header('X-Lite-Speech-S')+' s · pauses: '+header('X-Lite-Pause-S')+' s · speech spans: '+header('X-Lite-Speech-Segments')+' · native chunks: '+header('X-TTS-Native-Chunks');
       notice('Generation complete');
-    }catch(ex){notice(ex.message,true);}finally{setBusy(false);}
+    }catch(ex){notice(ex.message,true);}finally{activeCancel=null;setBusy(false);}
   });
-  $('#cancel').addEventListener('click',async()=>{generationToken++;try{await json('/lite/worker/cancel',{method:'POST'});notice('Cancellation requested');}catch(e){notice(e.message,true);}});
+  $('#cancel').addEventListener('click',async()=>{generationToken++;const owned=activeCancel;if(!owned)return;try{await json('/lite/worker/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(owned)});notice('Cancellation requested; waiting for worker cleanup');}catch(e){notice(e.message,true);}});
   async function refreshRuntime(){
     const [state,settings,ready,rights]=await Promise.all([json('/lite/worker/status'),json('/lite/worker/settings'),json('/lite/readiness'),json('/lite/rights')]);
-    $('#runtime-status').textContent=JSON.stringify({state:state.state,cuda:state.cuda,loaded:state.resident,
+    $('#runtime-status').textContent=JSON.stringify({state:state.state,cold_load_eligible:ready.cold_load_eligible,
+      model_hash_verified:ready.model_hash_verified,cuda_verified:ready.cuda_verified,
+      live_generation_verified:ready.live_generation_verified,cuda:state.cuda,loaded:state.resident,
       pid:state.pid,loads:state.load_count,generations:state.generation_count,cache_hits:state.condition_cache_hits,
       idle_remaining_seconds:state.idle_remaining_seconds,model_revision:state.model_revision,
       source_revision:ready.source_revision,issues:ready.issues},null,2);$('#rights').textContent=JSON.stringify(rights,null,2);
@@ -128,6 +166,6 @@
   $('#migration-choice').addEventListener('change',()=>{$('#migration-apply').disabled=!$('#migration-choice').value;});
   $('#migration-apply').addEventListener('click',async()=>{try{const id=$('#migration-choice').value;const result=await json('/lite/migration/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice_id:id})});$('#migration-feedback').textContent='Imported '+result.migrated+' profile';await refreshVoices();}catch(e){notice(e.message,true);}});
   $('#diagnostic').addEventListener('click',async()=>{const out=$('#diagnostic-status');out.textContent='Running three sequential requests…';let passed=0;try{for(let i=0;i<3;i++){const r=await call('/v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'chatterbox-nano',voice:$('#voice').value,input:'Nano diagnostic request '+(i+1)+'.',response_format:'wav',language:'en',speed:1,seed:42+i})});await r.blob();passed++;}out.textContent='Diagnostic PASS: '+passed+'/3';}catch(e){out.textContent='Diagnostic failed after '+passed+'/3: '+e.message;}});
-  addEventListener('pagehide',()=>{if(currentWav){URL.revokeObjectURL(currentWav);currentWav=null;}});
+  addEventListener('pagehide',()=>{releaseSelectedReference(false);if(currentWav){URL.revokeObjectURL(currentWav);currentWav=null;}});
   refreshVoices().catch(e=>notice(e.message,true));
 })();

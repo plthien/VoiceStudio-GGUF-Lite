@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .audio import wav_info
 from .chatterbox_assembly import atomic, do_job, load_source, output_job_lock
+from .chatterbox_contract import verify_http_response
 
 
 def run_case(name, text, voice, base, output):
@@ -29,11 +30,18 @@ def run_case(name, text, voice, base, output):
             data=reply.read(100*1024*1024+1)
             headers=reply.headers
         info=wav_info(data)
+        receipt_verified=False
+        if headers.get("X-TTS-Backend")=="CUDA0":
+            verify_http_response(headers,data)
+            receipt_verified=True
         speech_header=headers.get("X-Lite-Speech-S")
         speech_s=info["seconds"] if speech_header is None else float(speech_header)
         record.update(state="PASS",audio_s=info["seconds"],speech_s=speech_s,
                       pause_s=float(headers.get("X-Lite-Pause-S",0)),
                       rtf=(time.monotonic()-started)/info["seconds"],backend=headers.get("X-TTS-Backend"),
+                      execution_receipt_verified=receipt_verified,
+                      speech_span_count=headers.get("X-Lite-Speech-Segments"),
+                      native_chunk_count=headers.get("X-TTS-Native-Chunks"),
                       model_revision=headers.get("X-TTS-Model-Revision"),voice_version=headers.get("X-TTS-Voice-Version"),
                       cuda_allocated_bytes=headers.get("X-TTS-CUDA-Allocated-Bytes"),
                       cuda_peak_bytes=headers.get("X-TTS-CUDA-Peak-Bytes"),
