@@ -1,1 +1,1 @@
-"""Chatterbox Turbo CI fixtures (no GPU)."""
+"""Chatterbox Nano CI fixtures (no GPU)."""

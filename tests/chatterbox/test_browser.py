@@ -49,16 +49,16 @@ def test_cloning_generate_library_and_runtime(live, viewport):
         browser=pw.chromium.launch(headless=True)
         page=browser.new_page(viewport={"width":viewport[0],"height":viewport[1]})
         page.goto(url+"/ui")
-        expect(page.get_by_role("heading",name="Chatterbox Turbo")).to_be_visible()
+        expect(page.get_by_role("heading",name="VoiceStudio Nano Lite")).to_be_visible()
         page.get_by_label("Voice name").fill("Owned Voice")
         page.get_by_label("Exact transcript",exact=True).fill("This is the exact audio transcript")
         page.locator('#clone-form input[name=ref_audio]').set_input_files({
           "name":"owned.wav","mimeType":"audio/wav","buffer":audio(6)})
         page.locator("#consent").check()
-        page.get_by_role("button",name="Import voice").click()
+        page.get_by_role("button",name="Create voice").click()
         expect(page.get_by_text("Owned Voice · version 1")).to_be_visible(timeout=10000)
-        page.get_by_role("button",name="Preview").click()
-        page.get_by_role("tab",name="Generate").click()
+        page.get_by_role("button",name="Preview",exact=True).click()
+        page.get_by_role("tab",name="Text to Speech").click()
         page.locator("#input").fill("Hello. [pause 250ms] Goodbye.")
         page.locator("#speed").evaluate("(el) => { el.value = '1.15'; el.dispatchEvent(new Event('input', {bubbles:true})); }")
         page.get_by_role("button",name="Generate WAV").click()
@@ -82,7 +82,7 @@ def test_error_and_cancel_controls(live):
         browser=pw.chromium.launch(headless=True)
         page=browser.new_page()
         page.goto(url+"/ui")
-        page.get_by_role("tab",name="Generate").click()
+        page.get_by_role("tab",name="Text to Speech").click()
         expect(page.locator("#generate")).to_be_disabled()
         page.get_by_role("tab",name="Voice Cloning").click()
         page.locator('#clone-form input[name=name]').fill("Own")
@@ -93,7 +93,7 @@ def test_error_and_cancel_controls(live):
         page.locator("#clone-form button[type=submit]").click()
         expect(page.get_by_text("Own · version 1")).to_be_visible(timeout=10000)
         fake.fail=True
-        page.get_by_role("tab",name="Generate").click()
+        page.get_by_role("tab",name="Text to Speech").click()
         page.locator("#input").fill("Hello.")
         page.locator("#generate").click()
         expect(page.locator("#notice")).to_contain_text("WORKER_FAILURE",timeout=15000)
@@ -167,7 +167,7 @@ def test_benchmark_longform_forces_cold_start(live, tmp_path, monkeypatch):
         assert response.status_code==200
         voice=response.json()["id"]
         warm=client.post(url+"/v1/audio/speech",json={
-            "model":"chatterbox-turbo", "voice":voice, "input":"Warm the model.",
+            "model":"chatterbox-nano", "voice":voice, "input":"Warm the model.",
             "response_format":"wav", "speed":1.0, "language":"en"})
         assert warm.status_code==200
         assert fake.loads==1
@@ -203,13 +203,13 @@ def test_rendered_custom_pause_caret_validation_and_generate(live, viewport):
         page.locator('#clone-form input[name=ref_audio]').set_input_files({
             "name":"owned.wav","mimeType":"audio/wav","buffer":audio(6)})
         page.locator("#consent").check()
-        page.get_by_role("button",name="Import voice").click()
+        page.get_by_role("button",name="Create voice").click()
         expect(page.get_by_text("Owned · version 1")).to_be_visible(timeout=10000)
-        page.get_by_role("tab",name="Generate").click()
+        page.get_by_role("tab",name="Text to Speech").click()
         field=page.locator("#input")
         field.fill("Hello. Goodbye.")
         field.evaluate("(el)=>el.setSelectionRange(7,7)")
-        custom=page.get_by_label("Custom pause duration")
+        custom=page.get_by_label("Custom 1–10000ms")
         custom.fill("800ms")
         page.get_by_role("button",name="+ custom pause").click()
         assert field.input_value()=="Hello. [pause 800ms]Goodbye."
@@ -227,6 +227,6 @@ def test_rendered_custom_pause_caret_validation_and_generate(live, viewport):
         custom.fill("800ms")
         page.get_by_role("button",name="Generate WAV").click()
         expect(page.locator("#notice")).to_contain_text("Generation complete",timeout=15000)
-        expect(page.locator("#metrics")).to_contain_text("Pauses: 2")
+        expect(page.locator("#metrics")).to_contain_text("pauses: 2")
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
         browser.close()

@@ -223,6 +223,8 @@ def test_cli_synthetic_valid_hashes_only_preflight(tmp_path,monkeypatch):
         (settings.model_dir/name).write_bytes(content)
         digests[name]=hashlib.sha256(content).hexdigest()
     (settings.model_dir/"manifest.json").write_text(json.dumps({
+        "schema":"chatterbox-nano-model-manifest-v1","model_id":cfg.MODEL_ID,
+        "repo_id":cfg.MODEL_REPO,"loader_mode":"nano=True",
         "revision":MODEL_REVISION,"source_revision":cfg.SOURCE_REVISION,"sha256":digests}))
     monkeypatch.setattr(cfg,"MODEL_HASHES",{k:digests[k] for k in cfg.MODEL_HASHES})
     monkeypatch.setattr(cfg.ChatterboxSettings,"load",classmethod(lambda cls:settings))
@@ -241,19 +243,22 @@ def test_offline_installer_windows_sha_and_verify_negative(tmp_path,shell):
     exe=shutil.which(shell)
     if not exe:pytest.skip("Shell unavailable")
     script=Path(__file__).resolve().parents[2]/"scripts"/"internal"/"chatterbox-sha256.ps1"
-    installer=script.parent.parent/"install-chatterbox-turbo.ps1"
+    installer=script.parent.parent/"install-chatterbox-nano.ps1"
     sample=tmp_path/"abc.bin";sample.write_bytes(b"abc")
     escaped=str(sample).replace("'","''")
     command=f". '{str(script).replace(chr(39),chr(39)*2)}'; Get-ChatterboxSha256 -LiteralPath '{escaped}'"
-    result=subprocess.run([exe,"-NoProfile","-NonInteractive","-Command",command],
-                          capture_output=True,text=True,timeout=30)
+    try:
+        result=subprocess.run([exe,"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-Command",command],
+                              capture_output=True,text=True,timeout=30)
+    except OSError:
+        pytest.skip("Shell application alias is not executable")
     assert result.returncode==0,result.stderr
     assert result.stdout.strip().lower()==hashlib.sha256(b"abc").hexdigest()
     wrong=subprocess.run([exe,"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass",
         "-File",str(installer),"-VerifyOnly","-Root",str(tmp_path)],
         capture_output=True,text=True,timeout=30)
     assert wrong.returncode!=0
-    assert "Root must be" in wrong.stdout+wrong.stderr
+    assert "NANO_D_DRIVE_ROOT_REQUIRED" in wrong.stdout+wrong.stderr
 
 
 def test_generation_cuda_peak_is_reset_between_requests(tmp_path,monkeypatch):
@@ -420,18 +425,20 @@ def test_offline_verify_only_bad_manifest_real_root_if_unused(shell):
     """Use canonical D: installation root only when no user installation exists."""
     exe=shutil.which(shell)
     if not exe:pytest.skip("Shell unavailable")
-    root=Path(r"D:\VoiceStudioBuild\chatterbox-turbo")
+    root=Path(r"D:\VoiceStudioBuild\chatterbox-nano")
     model=root/"models"/MODEL_REVISION
     if (model/"manifest.json").exists() or any(model.glob("*.safetensors")):
         pytest.skip("Owner has model content; never modify an existing installation")
-    installer=Path(__file__).resolve().parents[2]/"scripts"/"install-chatterbox-turbo.ps1"
-    # Read-only verification may create missing empty directories, but this test
-    # never deletes or overwrites shared D: data after the probe.
-    p=subprocess.run([exe,"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass",
-                     "-File",str(installer),"-VerifyOnly"],
-                     capture_output=True,text=True,timeout=30)
+    installer=Path(__file__).resolve().parents[2]/"scripts"/"install-chatterbox-nano.ps1"
+    # Read-only verification never creates, deletes or overwrites owner data.
+    try:
+        p=subprocess.run([exe,"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass",
+                         "-File",str(installer),"-VerifyOnly"],
+                         capture_output=True,text=True,timeout=30)
+    except OSError:
+        pytest.skip("Shell application alias is not executable")
     assert p.returncode!=0
-    assert "MODEL_MANIFEST_UNAVAILABLE" in p.stdout+p.stderr
+    assert "MODEL_MANIFEST_INVALID" in p.stdout+p.stderr
     assert "installed" not in p.stdout.lower()
 
 

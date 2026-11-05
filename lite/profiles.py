@@ -12,7 +12,20 @@ from pathlib import Path
 from threading import RLock
 
 from .audio import AudioError, convert_reference
-from .config import Settings, require_owned_path
+from .chatterbox_config import ffmpeg_path
+from typing import TYPE_CHECKING, Any
+if TYPE_CHECKING:
+    from .config import Settings
+else:
+    Settings = Any
+
+
+def require_owned_path(path: Path, root: Path) -> Path:
+    resolved = path.resolve(strict=True)
+    owned = root.resolve(strict=True)
+    if path.is_symlink() or not resolved.is_relative_to(owned) or not resolved.is_file():
+        raise ValueError("Reference is outside owned voice store")
+    return resolved
 
 class ProfileError(ValueError):
     pass
@@ -56,7 +69,7 @@ class Store:
 
     def import_audio(self, *, name: str, ref_text: str, language: str,
                      source: bytes, suffix: str, profile_id: str | None = None,
-                     consent: str | None = None) -> dict:
+                     consent: str | None = None, create_with_id: bool = False) -> dict:
         if not name.strip() or len(name) > 128 or not ref_text.strip() or len(ref_text) > 4096:
             raise ProfileError("Name and explicit reference transcript are required")
         if suffix.lower() not in (".wav", ".mp3"):
@@ -69,7 +82,7 @@ class Store:
             raise ProfileError("Unsafe voice identifier")
         with self.lock:
             existing = self.get(profile_id) if profile_id else None
-            if profile_id is not None and existing is None:
+            if profile_id is not None and existing is None and not create_with_id:
                 raise KeyError(profile_id)
             identity = profile_id or str(uuid.uuid4())
             version = (existing["version"] + 1) if existing else 1
@@ -80,8 +93,7 @@ class Store:
             normalized = target_dir / "reference.wav"
             try:
                 source_file.write_bytes(source)
-                import shutil as _shutil
-                ffmpeg = _shutil.which("ffmpeg")
+                ffmpeg = ffmpeg_path()
                 if not ffmpeg:
                     raise ProfileError("FFmpeg unavailable")
                 convert_reference(source_file, normalized, ffmpeg=ffmpeg,

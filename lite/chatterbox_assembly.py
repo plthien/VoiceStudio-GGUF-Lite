@@ -364,7 +364,7 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
         print(f"START {order+1}/{len(sections)} {identifier}", flush=True)
         started = time.monotonic()
         try:
-            body = {"model": "chatterbox-turbo", "voice": voice, "input": s["input"],
+            body = {"model": "chatterbox-nano", "voice": voice, "input": s["input"],
                     "response_format": "wav", "language": "en",
                     "speed": s.get("speed", 1.0), "seed": s.get("seed", 42)}
             req = urllib.request.Request(base + "/v1/audio/speech",
@@ -426,7 +426,12 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
     final = concatenate(ordered_wavs())
     info=wav_info(final, max_bytes=FINAL_MAX_BYTES, max_seconds=FINAL_MAX_SECONDS)
     assert_reference_unchanged()
-    result = {"state":"PASS","audio_s":info["seconds"],"final_sha256":info["sha256"],"sections":len(sections),
+    result = {"state":"PASS","audio_s":info["seconds"],"final_sha256":info["sha256"],
+              "sections":len(sections),"prepared_sections":len(sections),
+              "completed_sections":len(sections),"full_manifest_coverage":True,
+              "source_characters":sum(len(s["input"]) for s in sections),
+              "source_words":sum(len(s["input"].split()) for s in sections),
+              "ordered_source_sha256":[hashlib.sha256(s["input"].encode()).hexdigest() for s in sections],
               "voice_version":version,"model_revision":MODEL_REVISION}
     return publish_final_pair(output,final,result,job_key=job_key)
 
@@ -477,7 +482,17 @@ def output_job_lock(output: Path):
             try:
                 if os.name=="nt":
                     import msvcrt
-                    msvcrt.locking(fd.fileno(),msvcrt.LK_NBLCK,1)
+                    # Windows may release a killed process' byte-range lock a few
+                    # scheduler ticks after wait() observes process termination.
+                    for attempt in range(10):
+                        fd.seek(0)
+                        try:
+                            msvcrt.locking(fd.fileno(),msvcrt.LK_NBLCK,1)
+                            break
+                        except OSError:
+                            if attempt == 9:
+                                raise
+                            time.sleep(.02)
                 else:
                     import fcntl
                     fcntl.flock(fd.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)

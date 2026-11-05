@@ -1,4 +1,4 @@
-name: Chatterbox Turbo mock CI
+name: Chatterbox Nano mock CI
 on:
   pull_request:
     paths:
@@ -9,6 +9,8 @@ on:
       - 'tests/chatterbox/**'
       - 'requirements-chatterbox.txt'
       - 'docs/chatterbox-turbo-pr2.md'
+      - 'docs/chatterbox-nano.md'
+      - 'docs/integrations/youtube-studio-nano-api-v1.md'
       - '.github/workflows/chatterbox-tests.yml'
   workflow_dispatch:
 jobs:
@@ -18,6 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-latest]
+    env:
+      CHATTERBOX_ALLOW_TEST_ROOT: '1'
+      CHATTERBOX_ROOT: ${{ github.workspace }}/.nano-test-root
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -40,7 +45,7 @@ jobs:
         run: python -m pytest tests/chatterbox -vv -ra --timeout=35
       - name: Original Lite regression
         run: python -m pytest tests/lite -vv -ra --timeout=35
-      - name: PowerShell parser
+      - name: PowerShell 7 parser and VerifyOnly negative behavior
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -51,3 +56,18 @@ jobs:
             if($parseErrors){$err+=$parseErrors}
           }
           if($err.Count){throw ($err|Out-String)}
+          try { & .\scripts\install-chatterbox-nano.ps1 -VerifyOnly; throw 'EXPECTED_VERIFY_FAILURE' }
+          catch { if($_.Exception.Message -notmatch 'MODEL_MANIFEST_INVALID'){ throw } }
+      - name: Windows PowerShell 5.1 parser and VerifyOnly negative behavior
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $err=@()
+          Get-ChildItem scripts -Recurse -File -Filter '*chatterbox*.ps1' | ForEach-Object {
+            $tok=$null;$parseErrors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tok,[ref]$parseErrors) | Out-Null
+            if($parseErrors){$err+=$parseErrors}
+          }
+          if($err.Count){throw ($err|Out-String)}
+          try { & .\scripts\install-chatterbox-nano.ps1 -VerifyOnly; throw 'EXPECTED_VERIFY_FAILURE' }
+          catch { if($_.Exception.Message -notmatch 'MODEL_MANIFEST_INVALID'){ throw } }

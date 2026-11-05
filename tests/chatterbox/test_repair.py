@@ -67,7 +67,7 @@ def test_benchmark_cli_json_csv_and_exit(tmp_path,monkeypatch,audio_s,wall_s,exp
     monkeypatch.setattr(sys,"argv",["benchmark","--mode","LongForm","--voice-id","test-voice",
                                    "--manifest",str(manifest),"--output",str(output)])
     assert bench.main()==expected
-    assert calls==["http://127.0.0.1:3901/chatterbox/runtime/unload"]
+    assert calls==["http://127.0.0.1:3901/lite/worker/unload"]
     rows=json.loads((output/"owner-metrics.json").read_text())
     assert rows[0]["generation_state"]=="PASS"
     assert rows[0]["h07_status"]==("PASS" if expected==0 else
@@ -346,16 +346,18 @@ def test_spawn_failure_typed_and_never_replayed(tmp_path,monkeypatch):
 
 
 def test_hash_recorded_does_not_mean_model_verified(tmp_path):
-    from lite.chatterbox_config import diagnostic,SOURCE_REVISION,REQUIRED_FILES
+    from lite.chatterbox_config import diagnostic,SOURCE_REVISION,REQUIRED_FILES,MODEL_ID,MODEL_REPO
     settings=ChatterboxSettings(root=tmp_path)
     settings.model_dir.mkdir(parents=True)
     settings.venv_python.parent.mkdir(parents=True)
     settings.venv_python.touch()
     (settings.model_dir/"manifest.json").write_text(json.dumps({
+        "schema":"chatterbox-nano-model-manifest-v1","model_id":MODEL_ID,
+        "repo_id":MODEL_REPO,"loader_mode":"nano=True",
         "revision":MODEL_REVISION,"source_revision":SOURCE_REVISION,
         "sha256":{name:"not-a-real-hash" for name in REQUIRED_FILES}}))
     state=diagnostic(settings)
-    assert state["installed"] is True and state["model_manifest_recorded"] is True
+    assert state["installed"] is True and state["model_manifest_recorded"] is False
     assert state["model_hash_verified"] is False and state["ready"] is False
 
 
@@ -395,7 +397,7 @@ def test_atempo_timeout_is_typed_and_reaps_no_partial_wav(api,monkeypatch):
     assert service.state=="ERROR"
 
 
-@pytest.mark.parametrize("operation",["import","edit","delete"])
+@pytest.mark.parametrize("operation",["import","delete"])
 def test_all_profile_mutations_keep_admission_through_invalidation(api,monkeypatch,operation):
     client,service,_=api
     owned=profile(client)["id"]
@@ -412,8 +414,6 @@ def test_all_profile_mutations_keep_admission_through_invalidation(api,monkeypat
                 data={"name":"Another","ref_text":"New authorized transcript",
                       "consent":"confirmed","language":"en"},
                 files={"ref_audio":("reference.wav",audio(6),"audio/wav")})
-        if operation=="edit":
-            return client.put("/profiles/"+owned,json={"name":"Edited"})
         return client.delete("/profiles/"+owned+"?purge=true")
     with ThreadPoolExecutor(max_workers=1) as pool:
         future=pool.submit(change)
@@ -424,6 +424,16 @@ def test_all_profile_mutations_keep_admission_through_invalidation(api,monkeypat
             release.set()
         assert future.result(timeout=10).status_code==200
     assert not service.lock.locked()
+
+
+def test_name_only_edit_preserves_resident_conditioning_cache(api,monkeypatch):
+    client,service,_=api
+    owned=profile(client)["id"]
+    async def must_not_invalidate(_voice=None):
+        pytest.fail("name-only edit must not invalidate reference conditionals")
+    monkeypatch.setattr(service,"invalidate",must_not_invalidate)
+    changed=client.put("/profiles/"+owned,json={"name":"Edited"})
+    assert changed.status_code==200 and changed.json()["name"]=="Edited"
 
 
 @pytest.mark.parametrize("failure",["fsync","replace","mkstemp"])
@@ -518,6 +528,8 @@ def test_synthetic_pinned_manifest_requires_real_digests(tmp_path,monkeypatch):
     monkeypatch.setattr(cfg,"MODEL_HASHES",{
         name:hashes[name] for name in cfg.MODEL_HASHES})
     (settings.model_dir/"manifest.json").write_text(json.dumps({
+        "schema":"chatterbox-nano-model-manifest-v1","model_id":cfg.MODEL_ID,
+        "repo_id":cfg.MODEL_REPO,"loader_mode":"nano=True",
         "revision":cfg.MODEL_REVISION,"source_revision":cfg.SOURCE_REVISION,
         "sha256":hashes}))
     assert cfg.verify_model_files(settings)==(True,[])

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .audio import AudioError, wav_info
+from .chatterbox_config import ffmpeg_path
 
 
 def stretch_speech(data: bytes, speed: float, deadline_seconds: float, max_bytes: int) -> bytes:
@@ -19,7 +20,7 @@ def stretch_speech(data: bytes, speed: float, deadline_seconds: float, max_bytes
     wav_info(data, max_bytes=max_bytes, max_seconds=600)
     if speed == 1.0:
         return data
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = ffmpeg_path()
     if not ffmpeg:
         raise AudioError("FFMPEG_UNAVAILABLE")
     base = os.environ.get("CHATTERBOX_ROOT")
@@ -98,7 +99,7 @@ async def stretch_speech_async(data: bytes, speed: float, deadline_seconds: floa
     wav_info(data, max_bytes=max_bytes, max_seconds=600)
     if speed == 1.0:
         return data
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = ffmpeg_path()
     if not ffmpeg:
         raise AudioError("FFMPEG_UNAVAILABLE")
     temp_parent.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,4 @@
-"""Separate localhost Chatterbox Turbo API; no GGUF application initialization."""
+"""Localhost Chatterbox-Nano API; no GGUF application initialization."""
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import time
 import wave
+import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -21,8 +22,12 @@ from fastapi.responses import JSONResponse, Response, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .audio import AudioError, convert_reference, wav_info
-from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, SOURCE_REVISION, diagnostic, IDLE_CHOICES
+from .chatterbox_config import (ChatterboxSettings, MODEL_ID, MODEL_REPO,
+    MODEL_HASHES, MODEL_REVISION, SOURCE_REVISION, diagnostic, ffmpeg_path, IDLE_CHOICES)
 from .chatterbox_service import TurboService, TurboError
+from .chatterbox_segmentation import (HARD_CHARS, TARGET_CHARS, POLICY_VERSION,
+    segment_text, SegmentationError, SUPPORTED_TAGS)
+from .chatterbox_migration import legacy_sources, preview as migration_preview, apply as migration_apply
 from .chatterbox_assembly import atomic, reference_binding
 from .pause import parse_pause_script, speech_text, PauseError, DEFAULT_PAUSE_MS, MAX_EVENT_MS, MAX_MARKERS, MAX_TOTAL_MS, PAUSE_POLICY_VERSION
 from .profiles import Store, ProfileError
@@ -86,8 +91,8 @@ class Speech(BaseModel):
     @field_validator("model")
     @classmethod
     def valid_model(cls, value):
-        if value != "chatterbox-turbo":
-            raise ValueError("Only chatterbox-turbo")
+        if value != MODEL_ID:
+            raise ValueError("Only chatterbox-nano")
         return value
 
     @field_validator("response_format")
@@ -137,6 +142,17 @@ class ProfilePatch(BaseModel):
     consent: str | None = None
 
 
+class MigrationSelection(BaseModel):
+    voice_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def public_profile(row):
+    if not row:
+        return row
+    return {key: row[key] for key in ("id", "name", "language", "ref_text", "ref_path", "ref_sha256",
+            "source_sha256", "version", "consent", "created", "updated") if key in row}
+
+
 def create_app(settings: ChatterboxSettings | None = None, store=None, service=None):
     settings = settings or ChatterboxSettings.load()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -144,7 +160,7 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     async def lifespan(app):
         yield
         await app.state.service.stop()
-    app = FastAPI(title="Chatterbox Turbo Local POC", version="1.0", lifespan=lifespan)
+    app = FastAPI(title="VoiceStudio Nano Lite", version="1.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store or Store(settings)
     app.state.service = service or TurboService(settings)
@@ -210,38 +226,68 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     def health():
         return {"status": "alive", "ready": False}
 
-    @app.get("/chatterbox/readiness")
+    @app.get("/lite/readiness")
+    @app.get("/chatterbox/readiness", include_in_schema=False)
     def readiness():
         status=app.state.service.status()
         result=diagnostic(settings)
         attested=bool(status.get("resident") and status.get("state")=="READY" and
                       isinstance(status.get("cuda"),dict) and status["cuda"].get("name"))
         result["model_hash_verified"]=attested
-        result["ready"]=bool(attested and result["installation_preflight_ready"]
-                             and app.state.cache_trusted and app.state.settings_consistent)
+        eligible=bool(result["installation_preflight_ready"]
+                      and app.state.cache_trusted and app.state.settings_consistent)
+        result["runtime_ready"]=eligible
+        result["generation_ready"]=eligible
+        result["tts_ready"]=eligible
+        result["cloning_ready"]="FFMPEG_UNAVAILABLE" not in result["issues"]
+        result["ready"]=eligible
         result["service_recovery_required"]=not (
             app.state.cache_trusted and app.state.settings_consistent)
         return {**result,"worker":status}
 
-    @app.get("/chatterbox/runtime/status")
+    @app.get("/lite/status")
+    @app.get("/lite/worker/status")
+    @app.get("/chatterbox/runtime/status", include_in_schema=False)
     def runtime_status():
-        return app.state.service.status()
+        return {**app.state.service.status(), "model": MODEL_ID, "backend": "CUDA0",
+                "voice_count": len(app.state.store.list()),
+                "ffmpeg_installed": bool(ffmpeg_path())}
 
-    @app.get("/chatterbox/capability")
+    @app.get("/lite/model-capability")
+    @app.get("/chatterbox/capability", include_in_schema=False)
     def capability():
-        return {"model": "chatterbox-turbo", "language": "en", "backend": "CUDA experimental",
-                "model_revision": MODEL_REVISION, "source_revision": SOURCE_REVISION,
+        return {"model": MODEL_ID, "repo_id": MODEL_REPO, "language": "en", "backend": "CUDA0",
+                "loader_mode": "nano=True", "model_revision": MODEL_REVISION,
+                "source_revision": SOURCE_REVISION, "weights_sha256": MODEL_HASHES,
                 "sample_rate": 24000, "channels": 1, "pcm_bits": 16,
                 "speed_mode": "postprocess_atempo", "speed_min": 0.75, "speed_max": 1.25,
                 "pause_policy": PAUSE_POLICY_VERSION, "default_pause_ms": DEFAULT_PAUSE_MS,
                 "max_pause_ms": MAX_EVENT_MS, "max_pause_count": MAX_MARKERS,
-                "max_pause_total_ms": MAX_TOTAL_MS, "max_chars": 4096}
+                "max_pause_total_ms": MAX_TOTAL_MS, "max_chars": 4096,
+                "native_segment_target_chars": TARGET_CHARS,
+                "native_segment_hard_chars": HARD_CHARS,
+                "segmentation_policy": POLICY_VERSION,
+                "supported_paralinguistic_tokens": sorted(SUPPORTED_TAGS)}
 
-    @app.get("/chatterbox/runtime/settings")
+    @app.get("/lite/speed-capability")
+    def speed_capability():
+        return {"supported": True, "mode": "postprocess_atempo", "min": 0.75,
+                "max": 1.25, "policy_version": "nano_atempo_speech_only_v1"}
+
+    @app.get("/lite/pause-capability")
+    def pause_capability():
+        return {"supported": True, "policy": PAUSE_POLICY_VERSION, "sample_rate": 24000,
+                "default_ms": DEFAULT_PAUSE_MS, "max_event_ms": MAX_EVENT_MS,
+                "max_markers": MAX_MARKERS, "max_total_ms": MAX_TOTAL_MS,
+                "grammar": ["[pause]", "[pause 800ms]", "[pause 1.5s]"]}
+
+    @app.get("/lite/worker/settings")
+    @app.get("/chatterbox/runtime/settings", include_in_schema=False)
     def get_settings():
         return {"schema": "chatterbox-settings-v1", "idle_timeout_seconds": app.state.service.idle_timeout}
 
-    @app.put("/chatterbox/runtime/settings")
+    @app.put("/lite/worker/settings")
+    @app.put("/chatterbox/runtime/settings", include_in_schema=False)
     async def put_settings(change: IdleSetting):
         import json
         if not app.state.settings_consistent:
@@ -278,7 +324,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                 return failure(500,"SETTINGS_SAVE_FAILED")
             return obj
 
-    @app.post("/chatterbox/runtime/unload")
+    @app.post("/lite/worker/unload")
+    @app.post("/chatterbox/runtime/unload", include_in_schema=False)
     async def unload():
         if app.state.admission.locked():
             return failure(409, "WORKER_BUSY")
@@ -287,7 +334,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         except TurboError:
             return failure(409, "WORKER_BUSY")
 
-    @app.post("/chatterbox/runtime/cancel")
+    @app.post("/lite/worker/cancel")
+    @app.post("/chatterbox/runtime/cancel", include_in_schema=False)
     async def cancel():
         task = app.state.generation_task
         if task is None or task.done():
@@ -296,9 +344,34 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         # Cancelled operation owns teardown and lock release; no worker reuse.
         return {"cancelled": True}
 
+    @app.get("/lite/rights")
+    def rights():
+        return {"application_license": "AGPL-3.0", "model_license": "MIT",
+                "model_repo": MODEL_REPO, "model_revision": MODEL_REVISION,
+                "source_revision": SOURCE_REVISION, "voice_consent_required": True}
+
+    @app.get("/lite/migration/preview")
+    def migration_dry_run():
+        try:
+            database, voices_dir = legacy_sources()
+            return migration_preview(database, voices_dir)
+        except (OSError, ValueError, sqlite3.Error):
+            return {"configured": False, "eligible": [], "invalid": [],
+                    "issue": "LEGACY_SOURCE_UNAVAILABLE"}
+
+    @app.post("/lite/migration/apply")
+    async def migration_selected(selection: MigrationSelection):
+        def mutation():
+            database, voices_dir = legacy_sources()
+            return migration_apply(database, voices_dir, settings, selection.voice_id)
+        try:
+            return await owned_mutation(mutation, invalidate_voice=selection.voice_id)
+        except (OSError, ValueError, sqlite3.Error):
+            return failure(409, "LEGACY_IMPORT_FAILED")
+
     @app.get("/profiles")
     def profiles():
-        return app.state.store.list()
+        return [public_profile(row) for row in app.state.store.list()]
 
     @app.get("/v1/audio/voices")
     def voices():
@@ -308,7 +381,7 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     @app.get("/profiles/{voice_id}")
     def get_voice(voice_id: str):
         row = app.state.store.get(voice_id)
-        return row if row else failure(404, "PROFILE_NOT_FOUND")
+        return public_profile(row) if row else failure(404, "PROFILE_NOT_FOUND")
 
     @app.post("/profiles/{voice_id}/integrity/verify")
     async def verify_owned_reference(voice_id: str):
@@ -354,7 +427,7 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         except (ProfileError, OSError, AudioError):
             return failure(409, "REFERENCE_INVALID")
 
-    async def owned_mutation(fun, invalidate_voice=None):
+    async def owned_mutation(fun, invalidate_voice=None, *, invalidate=True):
         """Keep admission owned until cache invalidation and acknowledgment."""
         if app.state.admission.locked() or app.state.service.lock.locked():
             return failure(409,"PROFILE_ACTIVE")
@@ -375,6 +448,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                         raise TurboError("MUTATION_COMMITTED_CLEANUP_REQUIRED") from exc
                     raise
                 voice=invalidate_voice or (changed.get("id") if isinstance(changed,dict) else None)
+                if not invalidate:
+                    return changed
                 try:
                     await app.state.service.invalidate(voice)
                 except BaseException:
@@ -417,7 +492,7 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                 normalized = Path(folder) / "normalized.wav"
                 original.write_bytes(content)
                 try:
-                    info = convert_reference(original, normalized, ffmpeg=shutil.which("ffmpeg") or "",
+                    info = convert_reference(original, normalized, ffmpeg=ffmpeg_path() or "",
                                              max_seconds=settings.max_ref_seconds)
                 except (AudioError, OSError) as exc:
                     raise ProfileError("INVALID_AUDIO") from exc
@@ -434,7 +509,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                 name=name_local, ref_text=ref_text, language="en", source=content,
                 suffix=suffix, consent="confirmed", profile_id=voice_id)
         try:
-            return await owned_mutation(mutation,invalidate_voice=voice_id)
+            result = await owned_mutation(mutation,invalidate_voice=voice_id)
+            return public_profile(result) if isinstance(result, dict) else result
         except TurboError as exc:
             return failure(503,exc.code)
         except KeyError:
@@ -452,8 +528,17 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
 
     @app.put("/profiles/{voice_id}/audio")
     async def replace_voice(voice_id: str, ref_audio: UploadFile = File(...),
-                            ref_text: str = Form(...), consent: str = Form(...)):
-        return await import_voice("", ref_text, "en", ref_audio, consent, voice_id)
+                            ref_text: str | None = Form(None), consent: str = Form(...),
+                            same_words: bool = Form(False)):
+        previous = app.state.store.get(voice_id)
+        if not previous:
+            return failure(404, "PROFILE_NOT_FOUND")
+        if same_words and ref_text and ref_text.strip() != previous["ref_text"].strip():
+            return failure(422, "TRANSCRIPT_CONFIRMATION_CONFLICT")
+        transcript = previous["ref_text"] if same_words else ref_text
+        if not transcript:
+            return failure(422, "TRANSCRIPT_REQUIRED")
+        return await import_voice("", transcript, "en", ref_audio, consent, voice_id)
 
     @app.put("/profiles/{voice_id}")
     async def edit_voice(voice_id: str, change: ProfilePatch):
@@ -461,8 +546,11 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
         if data.get("language", "en") != "en" or data.get("consent", "confirmed") != "confirmed":
             return failure(422, "INVALID_PROFILE")
         try:
-            return await owned_mutation(lambda: app.state.store.update(voice_id,data),
-                                        invalidate_voice=voice_id)
+            identity_change = bool(set(data) - {"name"})
+            changed = await owned_mutation(
+                lambda: app.state.store.update(voice_id,data), invalidate_voice=voice_id,
+                invalidate=identity_change)
+            return public_profile(changed) if isinstance(changed, dict) else changed
         except TurboError as exc:
             return failure(503,exc.code)
         except KeyError:
@@ -490,12 +578,22 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     async def speech(body: Speech, request: Request):
         try:
             script = parse_pause_script(body.input)
+            parts = script.parts if script is not None else ()
+            spoken_parts = [part.text for part in parts if hasattr(part, "text")] or [body.input]
+            for spoken in spoken_parts:
+                segment_text(spoken, body.seed)
         except PauseError as exc:
             return failure(422, exc.code)
+        except SegmentationError as exc:
+            return failure(422, exc.code)
+        except ValueError as exc:
+            return failure(422, str(exc) if str(exc) == "UNSUPPORTED_PARALINGUISTIC_TAG" else "INVALID_TEXT")
         if not app.state.cache_trusted or not app.state.settings_consistent:
             return failure(503,"SERVICE_RECOVERY_REQUIRED")
         if app.state.admission.locked() or app.state.service.lock.locked():
-            return failure(429,"NATIVE_BUSY")
+            response = failure(429,"WORKER_BUSY")
+            response.headers["Retry-After"] = "1"
+            return response
         async with app.state.admission:
             row = app.state.store.get(body.voice)
             if not row:
@@ -523,12 +621,16 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                         return failure(499, "CLIENT_DISCONNECTED")
                     await asyncio.wait({task}, timeout=0.1)
                 data, info = await task
-                if app.state.store.reference(row).resolve(strict=True) != reference.resolve(strict=True):
+                latest = app.state.store.get(body.voice)
+                if (latest is None or reference_binding(latest, body.voice) != reference_binding(row, body.voice)
+                    or app.state.store.reference(latest).resolve(strict=True) != reference.resolve(strict=True)):
                     return failure(409, "REFERENCE_CHANGED")
                 words = len(speech_text(script, body.input).split())
                 speech_wpm = words * 60 / info["speech_s"]
                 final_wpm = words * 60 / info["audio_s"]
-                meta = {"X-TTS-Engine": "chatterbox-turbo", "X-TTS-Backend": "CUDA0",
+                proof = hashlib.sha256((MODEL_ID + "\0" + MODEL_REVISION + "\0" +
+                    reference_binding(row, body.voice) + "\0" + hashlib.sha256(data).hexdigest()).encode()).hexdigest()
+                meta = {"X-TTS-Engine": MODEL_ID, "X-TTS-Backend": "CUDA0",
                         "X-TTS-Model-Revision": MODEL_REVISION,
                         "X-TTS-Voice-Version": str(row["version"]),
                         "X-TTS-Elapsed-S": str(info["elapsed_s"]), "X-TTS-Audio-S": str(info["audio_s"]),
@@ -540,8 +642,10 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                         "X-Lite-Pause-S": str(info["pause_frames"] / 24000),
                         "X-Lite-Speech-S": str(info["speech_s"]),
                         "X-Lite-Audio-S": str(info["audio_s"]),
-                        "X-Lite-Speech-Segments": str(info["speech_segments"]),
+                        "X-Lite-Speech-Segments": str(info.get("native_speech_segments", info["speech_segments"])),
                         "X-Lite-Speech-RTF": str(info["speech_rtf"]),
+                        "X-TTS-Execution-Proof": proof,
+                        "X-TTS-Segmentation-Policy": info.get("seed_policy_version", POLICY_VERSION),
                         "Cache-Control": "no-store"}
                 memory = info.get("memory") or {}
                 for key, header in (
@@ -563,9 +667,10 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                 return failure(499, "CANCELLED")
             except TurboError as exc:
                 status = (503 if exc.code in ("ENV_NOT_INSTALLED", "CUDA_UNAVAILABLE",
-                    "CUDA_LOW_MEMORY_STOP_GGUF", "MODEL_MANIFEST_UNAVAILABLE", "MODEL_HASH_MISMATCH",
+                    "CUDA_LOW_MEMORY", "MODEL_MANIFEST_UNAVAILABLE", "MODEL_MANIFEST_INVALID", "MODEL_HASH_MISMATCH",
                     "MODEL_FILES_MISSING", "CUDA_OOM", "GGUF_PROBE_UNAVAILABLE") else 409 if exc.code == "GGUF_WORKER_RESIDENT" else 504 if exc.code == "DEADLINE_EXCEEDED"
-                    else 409 if exc.code in ("REFERENCE_CHANGED", "REFERENCE_TOO_SHORT") else 500)
+                    else 422 if exc.code == "NANO_SEGMENT_SAFE_BOUNDARY_UNAVAILABLE"
+                    else 409 if exc.code in ("REFERENCE_CHANGED", "REFERENCE_TOO_SHORT", "MODEL_IDENTITY_CHANGED") else 500)
                 return failure(status, exc.code)
             except (AudioError, OSError, ValueError):
                 return failure(500, "AUDIO_INTEGRITY_FAILURE")

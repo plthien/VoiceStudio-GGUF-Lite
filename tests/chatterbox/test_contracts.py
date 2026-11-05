@@ -55,6 +55,7 @@ class FakeTurbo(TurboService):
         self.history.append(key)
         self.syntheses+=1
         return {"wav":base64.b64encode(audio()).decode(),"syntheses":self.syntheses,
+                "model_id":"chatterbox-nano","backend":"CUDA0","model_revision":MODEL_REVISION,
                 "cache_hits":self.hits,
                 "memory":{"allocated_bytes":1000,"reserved_bytes":1500,
                           "peak_bytes":2000,"peak_scope":"generation",
@@ -89,7 +90,7 @@ def profile(client,name="Alpha"):
 
 
 def gen(client,id,text="A sentence spoken aloud.",speed=1.0):
-    return client.post("/v1/audio/speech",json={"model":"chatterbox-turbo","voice":id,
+    return client.post("/v1/audio/speech",json={"model":"chatterbox-nano","voice":id,
         "input":text,"language":"en","speed":speed,"response_format":"wav","seed":42})
 
 
@@ -183,7 +184,7 @@ def test_model_and_validation(api):
     c,_,_=api;p=profile(c)
     for override in ({"model":"omnivoice-gguf"},{"speed":1.3},{"language":"vi"},
                       {"response_format":"mp3"},{"input":" "},{"seed":-1}):
-        body={"model":"chatterbox-turbo","voice":p["id"],"input":"Hello"}
+        body={"model":"chatterbox-nano","voice":p["id"],"input":"Hello"}
         body.update(override)
         r=c.post("/v1/audio/speech",json=body)
         assert r.status_code==422,r.text

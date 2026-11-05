@@ -11,7 +11,7 @@ import sys
 import wave
 from pathlib import Path
 
-from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, verify_model_files
+from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, REQUIRED_FILES, verify_model_files
 from .chatterbox_ipc import read_sync, write_sync, ProtocolError
 
 
@@ -47,6 +47,14 @@ class Engine:
         self.hits = 0
         self.device = None
         self.lifetime_peak_bytes = None
+        self.model_snapshot = None
+
+    @staticmethod
+    def _snapshot(folder: Path):
+        names = (*REQUIRED_FILES, "manifest.json")
+        return tuple((name, (folder / name).stat().st_size,
+                      (folder / name).stat().st_mtime_ns,
+                      getattr((folder / name).stat(), "st_ino", 0)) for name in names)
 
     def load(self, model_dir: str):
         if self.model is not None:
@@ -58,6 +66,7 @@ class Engine:
         verified, issues = verify_model_files(settings)
         if not verified:
             raise RuntimeError(issues[0])
+        verified_snapshot = self._snapshot(folder)
         import torch
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA_UNAVAILABLE")
@@ -67,13 +76,16 @@ class Engine:
             available, total = torch.cuda.mem_get_info(index)
             # Refuse when another resident model has consumed most of 4GB.
             if available < 1400 * 1024 * 1024:
-                raise RuntimeError("CUDA_LOW_MEMORY_STOP_GGUF")
+                raise RuntimeError("CUDA_LOW_MEMORY")
             with open(os.devnull, "w") as output, contextlib.redirect_stdout(output):
                 from chatterbox.tts_turbo import ChatterboxTurboTTS
-                model = ChatterboxTurboTTS.from_local(str(folder), device="cuda")
+                model = ChatterboxTurboTTS.from_local(str(folder), device="cuda", nano=True)
             if model is None:
                 raise RuntimeError("MODEL_LOAD_FAILED")
+            if self._snapshot(folder) != verified_snapshot:
+                raise RuntimeError("MODEL_IDENTITY_CHANGED")
             self.model = model
+            self.model_snapshot = verified_snapshot
             self.torch = torch
             self.device = {"name": props.name, "index": index,
                            "total_bytes": total, "free_bytes_on_load": available}
@@ -90,6 +102,12 @@ class Engine:
     def generate(self, request):
         if self.model is None:
             raise RuntimeError("MODEL_UNLOADED")
+        settings = ChatterboxSettings.load()
+        try:
+            if self.model_snapshot is not None and self._snapshot(settings.model_dir) != self.model_snapshot:
+                raise RuntimeError("MODEL_IDENTITY_CHANGED")
+        except OSError as exc:
+            raise RuntimeError("MODEL_IDENTITY_CHANGED") from exc
         # No arbitrary reference path: service provides a store-contained path,
         # and worker re-checks its content hash against the snapshot.
         import hashlib
@@ -153,6 +171,8 @@ class Engine:
             wav = pcm_wav(generated)
             wav_info(wav, max_bytes=100 * 1024 * 1024, max_seconds=600)
             return {"wav": base64.b64encode(wav).decode("ascii"),
+                    "model_id": "chatterbox-nano", "backend": "CUDA0",
+                    "model_revision": MODEL_REVISION,
                     "device": self.device, "memory": memory, "cache_hits": self.hits,
                     "loads": self.loads, "syntheses": self.syntheses}
         except self.torch.cuda.OutOfMemoryError as exc:
@@ -194,9 +214,10 @@ def run():
         except BaseException as exc:
             # No exception message, stack trace, path, reference text or voice ID.
             code = str(exc) if str(exc) in {
-                "CUDA_OOM", "CUDA_UNAVAILABLE", "CUDA_LOW_MEMORY_STOP_GGUF", "MODEL_PATH_UNTRUSTED",
+                "CUDA_OOM", "CUDA_UNAVAILABLE", "CUDA_LOW_MEMORY", "MODEL_PATH_UNTRUSTED",
                 "MODEL_HASH_MISMATCH", "MODEL_FILES_MISSING", "MODEL_REVISION_MISMATCH",
                 "MODEL_MANIFEST_UNAVAILABLE", "REFERENCE_UNTRUSTED", "REFERENCE_CHANGED",
+                "MODEL_MANIFEST_INVALID", "MODEL_IDENTITY_CHANGED",
                 "REFERENCE_INVALID", "REFERENCE_TOO_SHORT", "EMPTY_AUDIO",
                 "MODEL_UNLOADED", "UNKNOWN_COMMAND", "MODEL_LOAD_FAILED", "NONFINITE_AUDIO"} else "WORKER_FAILURE"
             try:

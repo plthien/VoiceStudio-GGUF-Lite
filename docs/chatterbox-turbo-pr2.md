@@ -1,4 +1,6 @@
-# Chatterbox Turbo — isolated local experiment (PR #2)
+# Archived Chatterbox Turbo experiment (PR #2)
+
+> Historical audit material only. The active PR #2 product is Nano-only; see `docs/chatterbox-nano.md`. Deprecated `*-chatterbox-turbo.ps1` filenames are wrappers that invoke Nano and cannot select Turbo.
 
 ## Source, rights and environment
 

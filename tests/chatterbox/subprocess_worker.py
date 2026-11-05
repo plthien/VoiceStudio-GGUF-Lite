@@ -8,6 +8,7 @@ import time
 import wave
 
 from lite.chatterbox_ipc import read_sync, write_sync
+from lite.chatterbox_config import MODEL_REVISION
 
 def wav():
     out=io.BytesIO()
@@ -25,7 +26,8 @@ def main():
         if cmd=="LOAD":
             loads+=1
             result={"loads":loads,"device":{"name":"SYNTHETIC CI WORKER - NOT CUDA",
-                    "index":0,"total_bytes":1,"free_bytes_on_load":1}}
+                    "index":0,"total_bytes":1,"free_bytes_on_load":1},
+                    "model_revision":MODEL_REVISION}
         elif cmd=="SYNTH":
             if msg.get("text")=="__CI_CRASH__":
                 os._exit(2)
@@ -43,6 +45,7 @@ def main():
             if key in cache:hits+=1
             cache.add(key);syntheses+=1
             result={"wav":base64.b64encode(wav()).decode(),
+                    "model_id":"chatterbox-nano","backend":"CUDA0","model_revision":MODEL_REVISION,
                     "syntheses":syntheses,"cache_hits":hits,
                     "memory":{}}
         elif cmd=="INVALIDATE":

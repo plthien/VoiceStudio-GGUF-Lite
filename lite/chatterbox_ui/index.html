@@ -1,49 +1,47 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chatterbox Turbo · Voice Studio</title><link rel="stylesheet" href="/ui/assets/app.css"></head>
+<title>VoiceStudio Nano Lite</title><link rel="stylesheet" href="/ui/assets/app.css"></head>
 <body><main class="shell">
-<header><div class="eyebrow">LOCAL VOICE STUDIO · EXPERIMENTAL</div><h1>Chatterbox Turbo</h1>
-<p class="muted">English cloned voice · CUDA inference · pitch-preserving post-processed speed · local only</p></header>
+<header><div class="eyebrow">LOCAL VOICE STUDIO · NANO 110M</div><h1>VoiceStudio Nano Lite</h1>
+<p class="muted">English voice cloning · Chatterbox-Nano · CUDA0 · local only</p></header>
 <nav role="tablist" aria-label="Studio views">
 <button role="tab" data-tab="clone" aria-selected="true">Voice Cloning</button>
 <button role="tab" data-tab="library" aria-selected="false">Voice Library</button>
-<button role="tab" data-tab="generate" aria-selected="false">Generate</button>
+<button role="tab" data-tab="generate" aria-selected="false">Text to Speech</button>
 <button role="tab" data-tab="runtime" aria-selected="false">Runtime &amp; Settings</button></nav>
-<div id="notice" role="status" aria-live="polite"></div>
-<section data-panel="clone"><h2>Import an owned reference</h2><p>Use a clean 6–15 second recording and the exact words spoken. Reference must be longer than 5 seconds.</p>
+<div class="content"><div id="notice" role="status" aria-live="polite"></div>
+<section data-panel="clone"><span class="overline">OWNED REFERENCE</span><h2>Clone an English voice</h2><p>Choose a clean 6–15 second WAV or MP3 and enter the exact words spoken. Audio must be longer than five seconds.</p>
 <form id="clone-form"><label>Voice name<input name="name" required maxlength="128" placeholder="My narration voice"></label>
 <label>Exact transcript<textarea name="ref_text" required maxlength="4096" rows="3"></textarea></label>
-<label>WAV or MP3<input name="ref_audio" type="file" accept=".wav,.mp3,audio/*" required></label>
-<label class="check"><input type="checkbox" id="consent" required> I confirm that I own this voice or have explicit rights and consent to clone it.</label>
-<button type="submit" class="primary">Import voice</button></form></section>
-<section data-panel="library" hidden><h2>Voice library</h2><button id="refresh-library" type="button">Refresh</button>
+<label>Owned WAV or MP3<input name="ref_audio" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label>
+<label class="check"><input type="checkbox" id="consent" required> I own this voice or have explicit rights and consent to clone it.</label>
+<button type="submit" class="primary">Create voice</button></form></section>
+<section data-panel="library" hidden><span class="overline">SAVED VOICES</span><h2>Voice Library</h2><button id="refresh-library" type="button">Refresh</button>
 <div id="voice-list"></div>
 <div id="replace-panel" hidden><h3>Replace owned reference</h3><form id="replace-form"><input type="hidden" name="voice_id">
-<label>New exact transcript<textarea name="ref_text" required></textarea></label>
-<label>New WAV or MP3<input type="file" name="ref_audio" accept=".wav,.mp3" required></label>
-<label class="check"><input type="checkbox" id="replace-consent" required> I confirm rights and consent for the new reference.</label>
-<button type="submit">Replace reference</button></form></div></section>
-<section data-panel="generate" hidden><h2>Generate narration</h2><form id="generate-form">
-<label>Cloned voice<select id="voice" required></select></label>
-<label>English narration (max 4096 characters)<textarea id="input" required maxlength="4096" rows="7" placeholder="The door opened. [pause 800ms] Something moved."></textarea></label>
-<div class="speed"><label for="speed">Speed <output id="speed-label">1.00×</output></label>
-<input id="speed" type="range" min=".75" max="1.25" step=".05" value="1">
-<small>FFmpeg atempo post-processing. Not native Turbo speed; may affect voice quality.</small></div>
-<div class="preset"><button type="button" data-pause="[pause 250ms]">+ 250 ms pause</button>
-<button type="button" data-pause="[pause 1.5s]">+ 1.5 s pause</button>
-<label for="custom-pause">Custom duration <input type="text" id="custom-pause" placeholder="800ms or 1.5s" aria-label="Custom pause duration" inputmode="text" maxlength="9"></label>
-<button id="insert-custom-pause" type="button">+ custom pause</button></div>
-<div class="actions"><button id="generate" type="submit" class="primary">Generate WAV</button>
-<button id="cancel" type="button" disabled>Cancel</button></div></form>
-<div id="progress" role="status"></div><div id="metrics"></div>
-<audio id="playback" controls></audio><a id="download" download="chatterbox-turbo.wav" hidden>Download WAV</a>
-</section>
-<section data-panel="runtime" hidden><h2>Runtime &amp; Settings</h2>
-<p>Stop/unload the resident GGUF/Vulkan model before loading Chatterbox CUDA on a 4 GB GPU.</p>
-<pre id="runtime-status" aria-live="polite"></pre>
-<label>Idle unload<select id="idle"><option value="60">1 minute</option><option value="300">5 minutes</option>
-<option value="600">10 minutes</option><option value="1800">30 minutes</option><option value="3600">60 minutes</option><option value="never">Never</option></select></label>
-<div class="actions"><button id="save-settings">Save setting</button><button id="unload">Unload Now</button>
-<button id="refresh-runtime">Refresh runtime</button></div></section>
-<footer>Local-only POC · MIT Chatterbox model and source · inherited VoiceStudio application license AGPL-3.0</footer></main>
+<label>New exact transcript<textarea name="ref_text"></textarea></label>
+<label class="check"><input type="checkbox" name="same_words" id="same-words"> The new recording uses exactly the saved words.</label>
+<label>New WAV or MP3<input type="file" name="ref_audio" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label>
+<label class="check"><input type="checkbox" id="replace-consent" required> I confirm rights and consent for this new recording.</label>
+<button type="submit">Replace reference</button></form></div>
+<div class="migration"><h3>Import legacy voice</h3><p>Only the operator-configured read-only source is inspected. Browser paths are never accepted.</p>
+<button id="migration-preview" type="button">Preview migration</button><select id="migration-choice" aria-label="Legacy voice to import"><option value="">Preview first</option></select>
+<button id="migration-apply" type="button" disabled>Import selected voice</button><div id="migration-feedback" role="status"></div></div></section>
+<section data-panel="generate" hidden><span class="overline">NARRATION</span><h2>Text to Speech</h2><form id="generate-form">
+<label>Saved voice<select id="voice" required></select></label>
+<label>English narration (max 4096 characters)<textarea id="input" required maxlength="4096" rows="8" placeholder="The door opened. [pause 800ms] Something moved."></textarea></label>
+<div class="speed"><label for="speed">Speed <output id="speed-label">1.00×</output></label><input id="speed" type="range" min=".75" max="1.25" step=".01" value="1">
+<small>Speed = FFmpeg atempo post-processing (speech only). Authored pauses are unchanged.</small></div>
+<label>Deterministic seed<input id="seed" type="number" min="0" max="2147483647" value="42"></label>
+<div class="preset"><button type="button" data-pause="[pause]">+ 350 ms</button><button type="button" data-pause="[pause 500ms]">+ 500 ms</button>
+<button type="button" data-pause="[pause 1s]">+ 1 s</button><button type="button" data-pause="[pause 1.5s]">+ 1.5 s</button><button type="button" data-pause="[pause 3s]">+ 3 s</button>
+<label for="custom-pause">Custom 1–10000ms<input type="text" id="custom-pause" placeholder="800ms or 1.5s" maxlength="9"></label><button id="insert-custom-pause" type="button">+ custom pause</button></div>
+<div class="actions"><button id="generate" type="submit" class="primary">Generate WAV</button><button id="cancel" type="button" disabled>Cancel</button></div></form>
+<div id="progress" role="status"></div><div id="metrics"></div><audio id="playback" controls></audio><a id="download" download="chatterbox-nano.wav" hidden>Download WAV</a></section>
+<section data-panel="runtime" hidden><span class="overline">LOCAL RUNTIME</span><h2>Runtime &amp; Settings</h2>
+<p>Nano is the only synthesis engine. The port 3900 check only prevents unsafe GGUF co-residency on a 4 GiB GPU.</p><pre id="runtime-status" aria-live="polite"></pre>
+<label>Idle unload<select id="idle"><option value="60">1 minute</option><option value="300">5 minutes</option><option value="600">10 minutes</option><option value="1800">30 minutes</option><option value="3600">60 minutes</option><option value="never">Never</option></select></label>
+<div class="actions"><button id="save-settings">Save setting</button><button id="unload">Unload Now</button><button id="refresh-runtime">Refresh</button><button id="diagnostic">Run 3-request diagnostic</button></div>
+<h3>Rights &amp; provenance</h3><pre id="rights"></pre><div id="diagnostic-status" role="status"></div></section></div>
+<footer>Application: AGPL-3.0 · Chatterbox source/model: MIT · voice consent required</footer></main>
 <script defer src="/ui/assets/app.js"></script></body></html>

@@ -3,7 +3,7 @@
 (() => {
   const $ = s => document.querySelector(s);
   const $$ = s => Array.from(document.querySelectorAll(s));
-  let voices = [], busy = false, currentWav = null;
+  let voices = [], busy = false, currentWav = null, generationToken = 0;
   function notice(msg, error = false) { const el = $('#notice'); el.textContent = msg || ''; el.dataset.error = String(error); }
   async function call(path, opts = {}) {
     const r = await fetch(path, {cache:'no-store', ...opts});
@@ -37,9 +37,11 @@
       const title=document.createElement('strong');title.textContent=safe(v.name)+' · version '+safe(v.version);
       card.append(title, document.createElement('p'));card.lastChild.textContent='English · consent: '+safe(v.consent);
       function button(label, action) {const b=document.createElement('button');b.type='button';b.textContent=label;b.addEventListener('click',()=>action(v).catch(e=>notice(e.message,true)));card.append(b);}
-      button('Preview', async v=>{const response=await call('/profiles/'+encodeURIComponent(v.id)+'/reference'); const blob=await response.blob(); const url=URL.createObjectURL(blob); const player=new Audio(url); player.onended=()=>URL.revokeObjectURL(url); await player.play();});
+      button('Preview', async v=>{const response=await call('/profiles/'+encodeURIComponent(v.id)+'/reference'); const blob=await response.blob(); const url=URL.createObjectURL(blob); const player=new Audio(url); const release=()=>URL.revokeObjectURL(url);player.onended=release;player.onerror=release;try{await player.play();}catch(error){release();throw error;}});
       button('Replace reference',async v=>{const pane=$('#replace-panel');pane.hidden=false;pane.querySelector('[name=voice_id]').value=v.id;pane.scrollIntoView({behavior:'smooth'});});
-      button('Delete', async v=>{if(!confirm('Delete voice '+v.name+'?'))return;await json('/profiles/'+encodeURIComponent(v.id)+'?purge=true',{method:'DELETE'});notice('Voice deleted');await refreshVoices();});
+      button('Edit name', async v=>{const name=prompt('Voice name',v.name);if(!name)return;await json('/profiles/'+encodeURIComponent(v.id),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});notice('Voice updated');await refreshVoices();});
+      button('Delete record', async v=>{if(!confirm('Delete the library record but retain owned files?'))return;await json('/profiles/'+encodeURIComponent(v.id),{method:'DELETE'});notice('Voice record deleted');await refreshVoices();});
+      button('Delete + purge', async v=>{if(!confirm('Permanently purge this voice and owned files?'))return;await json('/profiles/'+encodeURIComponent(v.id)+'?purge=true',{method:'DELETE'});notice('Voice and owned files purged');await refreshVoices();});
       list.append(card);
     });
   }
@@ -52,7 +54,7 @@
   });
   $('#replace-form').addEventListener('submit',async e=>{
     e.preventDefault();const data=new FormData(e.currentTarget);const id=data.get('voice_id');data.delete('voice_id');
-    if(!$('#replace-consent').checked){notice('Explicit consent required',true);return;}data.set('consent','confirmed');
+    if(!$('#replace-consent').checked){notice('Explicit consent required',true);return;}data.set('consent','confirmed');data.set('same_words',String($('#same-words').checked));
     try{await json('/profiles/'+encodeURIComponent(id)+'/audio',{method:'PUT',body:data});notice('Reference replaced');$('#replace-panel').hidden=true;await refreshVoices();}
     catch(ex){notice(ex.message,true);}
   });
@@ -92,35 +94,40 @@
   function setBusy(value){busy=value;$('#generate').disabled=value||voices.length===0;$('#cancel').disabled=!value;$('#progress').textContent=value?'Generating (single CUDA task)...':'';}
   $('#generate-form').addEventListener('submit', async e=>{
     e.preventDefault();if(busy)return;
-    setBusy(true);notice('');
+    const token=++generationToken, frozenVoice=$('#voice').value;setBusy(true);notice('');
     try{
-      const payload={model:'chatterbox-turbo',voice:$('#voice').value,input:$('#input').value,
-        response_format:'wav',language:'en',speed:Number($('#speed').value),seed:42};
+      const payload={model:'chatterbox-nano',voice:$('#voice').value,input:$('#input').value,
+        response_format:'wav',language:'en',speed:Number($('#speed').value),seed:Number($('#seed').value)};
       const response=await call('/v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-      const data=await response.blob();if(currentWav)URL.revokeObjectURL(currentWav);currentWav=URL.createObjectURL(data);
+      const data=await response.blob();if(token!==generationToken||$('#voice').value!==frozenVoice){notice('Result discarded because the selected voice changed',true);return;}if(currentWav)URL.revokeObjectURL(currentWav);currentWav=URL.createObjectURL(data);
       $('#playback').src=currentWav;$('#download').href=currentWav;$('#download').hidden=false;
       const header=k=>response.headers.get(k)||'—';
       $('#metrics').textContent='Speech WPM: '+header('X-TTS-Speech-WPM')+' · Final WPM: '+header('X-TTS-Final-WPM')+
         '\nElapsed: '+header('X-TTS-Elapsed-S')+' s · Audio: '+header('X-TTS-Audio-S')+' s · RTF: '+header('X-TTS-RTF')+
-        '\nPauses: '+header('X-Lite-Pause-Count')+' · Speed mode: '+header('X-TTS-Speed-Mode');
+        '\nSpeech: '+header('X-Lite-Speech-S')+' s · pauses: '+header('X-Lite-Pause-S')+' s · native chunks: '+header('X-Lite-Speech-Segments');
       notice('Generation complete');
     }catch(ex){notice(ex.message,true);}finally{setBusy(false);}
   });
-  $('#cancel').addEventListener('click',async()=>{try{await json('/chatterbox/runtime/cancel',{method:'POST'});notice('Cancellation requested');}catch(e){notice(e.message,true);}});
+  $('#cancel').addEventListener('click',async()=>{generationToken++;try{await json('/lite/worker/cancel',{method:'POST'});notice('Cancellation requested');}catch(e){notice(e.message,true);}});
   async function refreshRuntime(){
-    const [state,settings,ready]=await Promise.all([json('/chatterbox/runtime/status'),json('/chatterbox/runtime/settings'),json('/chatterbox/readiness')]);
+    const [state,settings,ready,rights]=await Promise.all([json('/lite/worker/status'),json('/lite/worker/settings'),json('/lite/readiness'),json('/lite/rights')]);
     $('#runtime-status').textContent=JSON.stringify({state:state.state,cuda:state.cuda,loaded:state.resident,
       pid:state.pid,loads:state.load_count,generations:state.generation_count,cache_hits:state.condition_cache_hits,
       idle_remaining_seconds:state.idle_remaining_seconds,model_revision:state.model_revision,
-      source_revision:ready.source_revision,issues:ready.issues},null,2);
+      source_revision:ready.source_revision,issues:ready.issues},null,2);$('#rights').textContent=JSON.stringify(rights,null,2);
     $('#idle').value=settings.idle_timeout_seconds===null?'never':String(settings.idle_timeout_seconds);
   }
   $('#refresh-runtime').addEventListener('click',()=>refreshRuntime().catch(e=>notice(e.message,true)));
   $('#save-settings').addEventListener('click',async()=>{
     const raw=$('#idle').value,timeout=raw==='never'?null:Number(raw);
-    try{await json('/chatterbox/runtime/settings',{method:'PUT',headers:{'Content-Type':'application/json'},
+    try{await json('/lite/worker/settings',{method:'PUT',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({idle_timeout_seconds:timeout})});notice('Idle setting saved');await refreshRuntime();}catch(ex){notice(ex.message,true);}
   });
-  $('#unload').addEventListener('click',async()=>{try{await json('/chatterbox/runtime/unload',{method:'POST'});notice('Worker unloaded');await refreshRuntime();}catch(e){notice(e.message,true);}});
+  $('#unload').addEventListener('click',async()=>{try{await json('/lite/worker/unload',{method:'POST'});notice('Worker unloaded');await refreshRuntime();}catch(e){notice(e.message,true);}});
+  $('#migration-preview').addEventListener('click',async()=>{try{const result=await json('/lite/migration/preview');const select=$('#migration-choice');select.replaceChildren(new Option('Choose an eligible voice',''));result.eligible.forEach(v=>select.append(new Option(v.name,v.id)));$('#migration-feedback').textContent=result.configured?(result.eligible.length+' eligible · '+result.invalid.length+' invalid'):'Legacy source is not configured';$('#migration-apply').disabled=true;}catch(e){notice(e.message,true);}});
+  $('#migration-choice').addEventListener('change',()=>{$('#migration-apply').disabled=!$('#migration-choice').value;});
+  $('#migration-apply').addEventListener('click',async()=>{try{const id=$('#migration-choice').value;const result=await json('/lite/migration/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice_id:id})});$('#migration-feedback').textContent='Imported '+result.migrated+' profile';await refreshVoices();}catch(e){notice(e.message,true);}});
+  $('#diagnostic').addEventListener('click',async()=>{const out=$('#diagnostic-status');out.textContent='Running three sequential requests…';let passed=0;try{for(let i=0;i<3;i++){const r=await call('/v1/audio/speech',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'chatterbox-nano',voice:$('#voice').value,input:'Nano diagnostic request '+(i+1)+'.',response_format:'wav',language:'en',speed:1,seed:42+i})});await r.blob();passed++;}out.textContent='Diagnostic PASS: '+passed+'/3';}catch(e){out.textContent='Diagnostic failed after '+passed+'/3: '+e.message;}});
+  addEventListener('pagehide',()=>{if(currentWav){URL.revokeObjectURL(currentWav);currentWav=null;}});
   refreshVoices().catch(e=>notice(e.message,true));
 })();

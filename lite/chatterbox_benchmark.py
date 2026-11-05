@@ -21,7 +21,7 @@ def run_case(name, text, voice, base, output):
     started = time.monotonic()
     record = {"case": name, "state": "FAIL", "wall_s": 0.0}
     try:
-        payload = {"model":"chatterbox-turbo","voice":voice,"input":text,
+        payload = {"model":"chatterbox-nano","voice":voice,"input":text,
                    "response_format":"wav","language":"en","speed":1.0,"seed":42}
         req=urllib.request.Request(base+"/v1/audio/speech",json.dumps(payload).encode(),
                                    {"Content-Type":"application/json"},method="POST")
@@ -29,7 +29,9 @@ def run_case(name, text, voice, base, output):
             data=reply.read(100*1024*1024+1)
             headers=reply.headers
         info=wav_info(data)
-        record.update(state="PASS",audio_s=info["seconds"],speech_s=float(headers.get("X-Lite-Speech-S",0)),
+        speech_header=headers.get("X-Lite-Speech-S")
+        speech_s=info["seconds"] if speech_header is None else float(speech_header)
+        record.update(state="PASS",audio_s=info["seconds"],speech_s=speech_s,
                       pause_s=float(headers.get("X-Lite-Pause-S",0)),
                       rtf=(time.monotonic()-started)/info["seconds"],backend=headers.get("X-TTS-Backend"),
                       model_revision=headers.get("X-TTS-Model-Revision"),voice_version=headers.get("X-TTS-Voice-Version"),
@@ -92,7 +94,7 @@ def main():
     p.add_argument("--output",type=Path)
     p.add_argument("--base",default="http://127.0.0.1:3901")
     a=p.parse_args()
-    folder=a.output or Path(os.environ.get("CHATTERBOX_ROOT",r"D:\VoiceStudioBuild\chatterbox-turbo"))/"benchmarks"
+    folder=a.output or Path(os.environ.get("CHATTERBOX_ROOT",r"D:\VoiceStudioBuild\chatterbox-nano"))/"benchmarks"
     folder.mkdir(parents=True,exist_ok=True)
     try:
         with output_job_lock(folder):
@@ -125,7 +127,7 @@ def run_benchmark_locked(a,folder):
             frozen_manifest=run_dir/"frozen-manifest.private.json"
             atomic(frozen_manifest,frozen_bytes)
         def force_cold_start():
-            req=urllib.request.Request(a.base+"/chatterbox/runtime/unload",data=b"{}",
+            req=urllib.request.Request(a.base+"/lite/worker/unload",data=b"{}",
                     headers={"Content-Type":"application/json"},method="POST")
             with urllib.request.urlopen(req,timeout=15) as resp:
                 if resp.status!=200:raise RuntimeError("COLD_UNLOAD_FAILED")
@@ -166,6 +168,8 @@ def run_benchmark_locked(a,folder):
                     elapsed=time.monotonic()-started
                     assessment=evaluate_h07(result["audio_s"],elapsed,True)
                     records.append({"case":"longform","state":"PASS","generation_state":"PASS",
+                                    "duration_sla":assessment["h07_status"],
+                                    "full_manifest_coverage":"PASS" if result.get("full_manifest_coverage") else "FAIL",
                                     "rtf":assessment["end_to_end_rtf"],**result,**assessment})
                 except Exception as exc:
                     records.append({"case":"longform","state":"FAIL","generation_state":"FAIL",

@@ -14,8 +14,9 @@ import time
 from pathlib import Path
 
 from .audio import AudioError, wav_info
-from .chatterbox_audio import stretch_speech_async
+from .chatterbox_audio import stretch_speech_async, concatenate
 from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, IDLE_CHOICES
+from .chatterbox_segmentation import segment_text, SegmentationError, POLICY_VERSION
 from .chatterbox_ipc import send, recv, ProtocolError
 from .pause import PauseScript, SpeechPart, PausePart
 from .pause_audio import assemble_pause_wav
@@ -77,6 +78,7 @@ class TurboService:
         self.syntheses = 0
         self.hits = 0
         self.device = None
+        self.memory = None
 
     def status(self):
         return {"state": self.state, "resident": bool(self.proc and self.proc.returncode is None),
@@ -84,9 +86,12 @@ class TurboService:
                 "busy": self.lock.locked(), "active": self.active_id is not None,
                 "load_count": self.loads, "generation_count": self.syntheses,
                 "condition_cache_hits": self.hits, "last_error": self.last_error,
-                "cuda": self.device if self.device is not None else "OWNER TEST PENDING",
+                "cuda": self.device if self.device is not None else "NOT_MEASURED",
+                "memory": self.memory if self.memory is not None else {"state": "NOT_MEASURED"},
                 "idle_remaining_seconds": max(0, self.idle_deadline - time.monotonic())
                     if self.idle_deadline is not None else None,
+                "model": "chatterbox-nano", "backend": "CUDA0",
+                "idle_timeout_seconds": self.idle_timeout,
                 "model_revision": MODEL_REVISION}
 
     def _cancel_idle(self):
@@ -147,6 +152,7 @@ class TurboService:
                     pass
         finally:
             self.device = None
+            self.memory = None
             self.state = "UNLOADED"
             self.active_id = None
 
@@ -262,6 +268,8 @@ class TurboService:
         except (OSError,ValueError) as exc:
             raise TurboError("WORKER_START_FAILED") from exc
         data = await self._rpc({"cmd": "LOAD", "model_dir": str(self.settings.model_dir)}, deadline)
+        if data.get("model_revision") != MODEL_REVISION:
+            raise TurboError("MODEL_IDENTITY_CHANGED")
         self.loads += int(data["loads"])
         self.device = data.get("device")
         if (not isinstance(self.device,dict) or not isinstance(self.device.get("name"),str)
@@ -293,51 +301,65 @@ class TurboService:
                 await self._ensure_loaded(deadline)
                 parts = script.parts if script is not None else (SpeechPart(text),)
                 speech_wavs = []
+                chunk_hashes = []
                 last_memory = {}
                 max_segment_peak = None
                 measured_segments = 0
                 total_speech_generations = 0
-                for i, part in enumerate(parts):
+                for part in parts:
                     if not isinstance(part, SpeechPart):
                         continue
-                    total_speech_generations += 1
-                    self.state = "GENERATING"
-                    answer = await self._rpc({
-                        "cmd": "SYNTH", "voice": profile["id"], "version": profile["version"],
-                        "reference": str(reference), "reference_sha": profile["ref_sha256"],
-                        "text": part.text, "seed": (seed + i) % 2147483648 if seed is not None else None,
-                    }, deadline)
-                    raw = base64.b64decode(answer["wav"], validate=True)
-                    left=deadline-time.monotonic()
-                    if left<=0: raise TurboError("DEADLINE_EXCEEDED")
                     try:
-                        await asyncio.wait_for(asyncio.to_thread(
-                            wav_info,raw,max_bytes=self.settings.max_output_bytes,
-                            max_seconds=600),left)
-                    except asyncio.TimeoutError as exc:
-                        raise TurboError("DEADLINE_EXCEEDED") from exc
-                    if speed != 1.0:
+                        segments = segment_text(part.text, seed)
+                    except SegmentationError as exc:
+                        raise TurboError(exc.code) from exc
+                    part_wavs = []
+                    for segment in segments:
+                        total_speech_generations += 1
+                        chunk_hashes.append(segment.sha256)
+                        self.state = "GENERATING"
+                        answer = await self._rpc({
+                            "cmd": "SYNTH", "voice": profile["id"], "version": profile["version"],
+                            "reference": str(reference), "reference_sha": profile["ref_sha256"],
+                            "text": segment.text, "seed": segment.seed,
+                        }, deadline)
+                        if (answer.get("model_id") != "chatterbox-nano"
+                                or answer.get("backend") != "CUDA0"
+                                or answer.get("model_revision") != MODEL_REVISION):
+                            raise TurboError("MODEL_IDENTITY_CHANGED")
+                        raw = base64.b64decode(answer["wav"], validate=True)
                         left=deadline-time.monotonic()
                         if left<=0: raise TurboError("DEADLINE_EXCEEDED")
                         try:
-                            raw=await asyncio.wait_for(
-                                stretch_speech_async(raw,speed,left,self.settings.max_output_bytes,
-                                                     self.settings.cache_dir/"tmp"),left)
-                        except (asyncio.TimeoutError,AudioError) as exc:
-                            if (isinstance(exc,asyncio.TimeoutError) or
-                                str(exc)=="ATEMPO_TIMEOUT" or time.monotonic()>=deadline):
-                                raise TurboError("DEADLINE_EXCEEDED") from exc
-                            raise
-                    speech_wavs.append(raw)
-                    if isinstance(answer.get("memory"), dict):
-                        last_memory = answer["memory"].copy()
-                        segment_peak=last_memory.get("peak_bytes")
-                        if (last_memory.get("peak_scope")=="generation"
-                            and type(segment_peak) is int and segment_peak>=0):
-                            max_segment_peak=max(segment_peak,max_segment_peak or 0)
-                            measured_segments+=1
-                    self.hits = answer.get("cache_hits", self.hits)
-                    self.syntheses = answer.get("syntheses", self.syntheses)
+                            await asyncio.wait_for(asyncio.to_thread(
+                                wav_info,raw,max_bytes=self.settings.max_output_bytes,
+                                max_seconds=600),left)
+                        except asyncio.TimeoutError as exc:
+                            raise TurboError("DEADLINE_EXCEEDED") from exc
+                        if speed != 1.0:
+                            left=deadline-time.monotonic()
+                            if left<=0: raise TurboError("DEADLINE_EXCEEDED")
+                            try:
+                                raw=await asyncio.wait_for(
+                                    stretch_speech_async(raw,speed,left,self.settings.max_output_bytes,
+                                                         self.settings.cache_dir/"tmp"),left)
+                            except (asyncio.TimeoutError,AudioError) as exc:
+                                if (isinstance(exc,asyncio.TimeoutError) or
+                                    str(exc)=="ATEMPO_TIMEOUT" or time.monotonic()>=deadline):
+                                    raise TurboError("DEADLINE_EXCEEDED") from exc
+                                raise
+                        part_wavs.append(raw)
+                        if isinstance(answer.get("memory"), dict):
+                            last_memory = answer["memory"].copy()
+                            segment_peak=last_memory.get("peak_bytes")
+                            if (last_memory.get("peak_scope")=="generation"
+                                and type(segment_peak) is int and segment_peak>=0):
+                                max_segment_peak=max(segment_peak,max_segment_peak or 0)
+                                measured_segments+=1
+                        self.hits = answer.get("cache_hits", self.hits)
+                        self.syntheses = answer.get("syntheses", self.syntheses)
+                    speech_wavs.append(part_wavs[0] if len(part_wavs) == 1 else
+                                       await asyncio.to_thread(concatenate, part_wavs))
                 left=deadline-time.monotonic()
                 if left<=0: raise TurboError("DEADLINE_EXCEEDED")
                 try:
@@ -356,6 +378,7 @@ class TurboService:
                     last_memory.pop("peak_bytes",None)
                     last_memory.pop("peak_scope",None)
                 elapsed = time.monotonic() - started
+                self.memory = last_memory or None
                 speech_s = meta["speech_frames"] / 24000
                 audio_s = info["seconds"]
                 self.state = "READY"
@@ -366,6 +389,9 @@ class TurboService:
                               "speech_rtf": elapsed / speech_s,
                               "device": self.device, "memory": last_memory,
                               "speed_mode": "postprocess_atempo",
+                              "native_speech_segments": total_speech_generations,
+                              "chunk_text_sha256": chunk_hashes,
+                              "seed_policy_version": POLICY_VERSION,
                               "model_revision": MODEL_REVISION}
             except BaseException as exc:
                 self.last_error = exc.code if isinstance(exc, TurboError) else "GENERATION_FAILED"
