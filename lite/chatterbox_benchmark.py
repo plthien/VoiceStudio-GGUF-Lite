@@ -10,18 +10,36 @@ import secrets
 from datetime import datetime, timezone
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from .audio import wav_info
-from .chatterbox_assembly import atomic, do_job, load_source, output_job_lock
-from .chatterbox_contract import verify_http_response
+from .chatterbox_assembly import (
+    atomic, do_job, http_json, load_source, output_job_lock, reference_binding,
+)
+from .chatterbox_contract import speed_ascii, verify_http_response
 
 
 def run_case(name, text, voice, base, output):
     started = time.monotonic()
     record = {"case": name, "state": "FAIL", "wall_s": 0.0}
     try:
+        profile = http_json(base, "/profiles/" + urllib.parse.quote(voice, safe=""))
+        binding = reference_binding(profile, voice)
+        integrity_path = ("/profiles/" + urllib.parse.quote(voice, safe="") +
+                          "/integrity/verify")
+
+        def assert_reference_unchanged():
+            proof = http_json(base, integrity_path, method="POST")
+            if (not isinstance(proof, dict) or proof.get("verified") is not True
+                    or proof.get("voice_id") != voice
+                    or proof.get("voice_version") != profile.get("version")
+                    or proof.get("reference_sha256") != profile.get("ref_sha256")
+                    or proof.get("binding") != binding):
+                raise RuntimeError("REFERENCE_CHANGED")
+
+        assert_reference_unchanged()
         payload = {"model":"chatterbox-nano","voice":voice,"input":text,
                    "response_format":"wav","language":"en","speed":1.0,"seed":42}
         req=urllib.request.Request(base+"/v1/audio/speech",json.dumps(payload).encode(),
@@ -30,16 +48,18 @@ def run_case(name, text, voice, base, output):
             data=reply.read(100*1024*1024+1)
             headers=reply.headers
         info=wav_info(data)
-        receipt_verified=False
-        if headers.get("X-TTS-Backend")=="CUDA0":
-            verify_http_response(headers,data)
-            receipt_verified=True
+        verify_http_response(headers,data,expected={
+            "voice_id":voice,"voice_version":profile["version"],
+            "reference_binding":binding,
+            "input_sha256":hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "seed":42,"requested_speed":speed_ascii(1.0)})
+        assert_reference_unchanged()
         speech_header=headers.get("X-Lite-Speech-S")
         speech_s=info["seconds"] if speech_header is None else float(speech_header)
         record.update(state="PASS",audio_s=info["seconds"],speech_s=speech_s,
                       pause_s=float(headers.get("X-Lite-Pause-S",0)),
                       rtf=(time.monotonic()-started)/info["seconds"],backend=headers.get("X-TTS-Backend"),
-                      execution_receipt_verified=receipt_verified,
+                      execution_receipt_verified=True,
                       speech_span_count=headers.get("X-Lite-Speech-Segments"),
                       native_chunk_count=headers.get("X-TTS-Native-Chunks"),
                       model_revision=headers.get("X-TTS-Model-Revision"),voice_version=headers.get("X-TTS-Voice-Version"),
@@ -51,7 +71,9 @@ def run_case(name, text, voice, base, output):
         if output:
             atomic(output/(name+".wav"),data)
     except Exception as exc:
-        record["error"]=type(exc).__name__
+        code=str(exc)
+        record["error"]=(code if code.startswith(("EXECUTION_","REFERENCE_","INVALID_"))
+                         else type(exc).__name__)
     record["wall_s"]=time.monotonic()-started
     print(f"{record['state']} {name} wall={record['wall_s']:.2f}s",flush=True)
     return record

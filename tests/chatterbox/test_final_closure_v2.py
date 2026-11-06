@@ -22,6 +22,7 @@ from lite.chatterbox_assembly import do_job, reference_binding
 from lite.chatterbox_benchmark import evaluate_h07
 from lite.chatterbox_config import ChatterboxSettings, MODEL_REVISION
 from .test_contracts import audio, api
+from .receipt_fixture import nano_response_headers
 
 
 def pcm(seconds, sample=1024):
@@ -82,18 +83,21 @@ def fake_job_endpoint(monkeypatch,section_audio,profile=None,on_speech=None):
                     "reference_sha256":row["ref_sha256"]}
         return dict(row)
     class Response:
-        def __init__(self,data):
+        def __init__(self,data,body):
             self.data=data
-            self.headers={"X-TTS-Backend":"SYNTHETIC-NON-CUDA",
-                          "X-Lite-Pause-Count":"0"}
+            self.headers=nano_response_headers(
+                profile=row,binding=reference_binding(row,row["id"]),
+                text=body["input"],wav=data,seed=body.get("seed"),
+                speed=body.get("speed",1.0))
         def __enter__(self):return self
         def __exit__(self,*args):pass
         def read(self,size):return self.data[:size]
     def post(request,**kwargs):
         body=json.loads(request.data)
         sent.append(body)
+        response=Response(section_audio[len(sent)-1],body)
         if on_speech:on_speech(len(sent),row)
-        return Response(section_audio[len(sent)-1])
+        return response
     monkeypatch.setattr(asm,"http_json",get_json)
     monkeypatch.setattr(asm.urllib.request,"urlopen",post)
     return row,sent

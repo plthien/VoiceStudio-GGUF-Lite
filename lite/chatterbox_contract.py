@@ -24,7 +24,20 @@ RECEIPT_VERSION = "nano_execution_receipt_v1"
 SPEED_POLICY_VERSION = "nano_atempo_speech_only_v1"
 MAX_RECEIPT_JSON_BYTES = 6144
 MAX_RECEIPT_HEADER_BYTES = 8192
+MAX_RESPONSE_HEADER_BYTES = 32768
+MAX_RESPONSE_HEADER_COUNT = 128
+MAX_STORED_ENVELOPE_BYTES = 12288
+HTTP_ENVELOPE_SCHEMA = "nano_http_response_envelope_v1"
 HEX64 = re.compile(r"^[a-f0-9]{64}$")
+
+RESPONSE_ENVELOPE_HEADERS = (
+    "Content-Type", "X-TTS-Execution-Receipt", "X-TTS-Execution-Proof",
+    "X-TTS-Engine", "X-TTS-Backend", "X-TTS-Model-Revision",
+    "X-TTS-Voice-Version", "X-TTS-Requested-Speed", "X-TTS-Effective-Speed",
+    "X-TTS-Audio-S", "X-Lite-Audio-S", "X-Lite-Speech-S",
+    "X-Lite-Pause-S", "X-Lite-Pause-Count", "X-Lite-Speech-Segments",
+    "X-TTS-Native-Chunks", "X-TTS-Segmentation-Policy",
+)
 
 RECEIPT_FIELDS = frozenset({
     "schema_version", "model", "backend", "repo_id", "model_revision",
@@ -211,11 +224,20 @@ def verify_http_response(headers, wav: bytes, *, expected: dict | None = None) -
     are required to agree so a proxy/client cannot silently publish a response
     with altered type, duration, or span/chunk accounting.
     """
+    raw_items = list(headers.raw_items() if hasattr(headers, "raw_items") else headers.items())
+    if (len(raw_items) > MAX_RESPONSE_HEADER_COUNT
+            or sum(len(str(k).encode("utf-8")) + len(str(v).encode("utf-8"))
+                   for k, v in raw_items) > MAX_RESPONSE_HEADER_BYTES):
+        raise ValueError("EXECUTION_HEADERS_TOO_LARGE")
+
     def get_header(name: str):
-        value = headers.get(name)
-        if value is not None:
-            return value
-        return headers.get(name.lower())
+        if hasattr(headers, "get_all"):
+            values = headers.get_all(name) or []
+        else:
+            values = [value for key, value in raw_items if str(key).lower() == name.lower()]
+        if len(values) != 1 or not isinstance(values[0], str):
+            raise ValueError("EXECUTION_HEADER_AMBIGUOUS")
+        return values[0]
 
     content_type = (get_header("Content-Type") or "").split(";", 1)[0].strip().lower()
     if content_type != "audio/wav":
@@ -244,3 +266,42 @@ def verify_http_response(headers, wav: bytes, *, expected: dict | None = None) -
     if any(get_header(name) != value for name, value in required.items()):
         raise ValueError("EXECUTION_HEADER_MISMATCH")
     return receipt
+
+
+def freeze_http_response_envelope(headers) -> dict:
+    """Freeze the original verified security-relevant response headers."""
+    # Validate duplicate/count/size policy before copying anything.
+    raw_items = list(headers.raw_items() if hasattr(headers, "raw_items") else headers.items())
+    if (len(raw_items) > MAX_RESPONSE_HEADER_COUNT
+            or sum(len(str(k).encode("utf-8")) + len(str(v).encode("utf-8"))
+                   for k, v in raw_items) > MAX_RESPONSE_HEADER_BYTES):
+        raise ValueError("EXECUTION_HEADERS_TOO_LARGE")
+    frozen = {}
+    for name in RESPONSE_ENVELOPE_HEADERS:
+        if hasattr(headers, "get_all"):
+            values = headers.get_all(name) or []
+        else:
+            values = [value for key, value in raw_items if str(key).lower() == name.lower()]
+        if len(values) != 1 or not isinstance(values[0], str):
+            raise ValueError("EXECUTION_HEADER_AMBIGUOUS")
+        frozen[name] = values[0]
+    envelope = {"schema": HTTP_ENVELOPE_SCHEMA, "headers": frozen}
+    if len(canonical_json_bytes(envelope)) > MAX_STORED_ENVELOPE_BYTES:
+        raise ValueError("EXECUTION_ENVELOPE_TOO_LARGE")
+    return envelope
+
+
+def verify_stored_http_response(envelope: dict, wav: bytes, *, expected: dict) -> dict:
+    """Re-run the producer verifier against an exact bounded stored envelope."""
+    if (not isinstance(envelope, dict) or set(envelope) != {"schema", "headers"}
+            or envelope.get("schema") != HTTP_ENVELOPE_SCHEMA
+            or not isinstance(envelope.get("headers"), dict)
+            or set(envelope["headers"]) != set(RESPONSE_ENVELOPE_HEADERS)):
+        raise ValueError("RESUME_PROOF_INVALID")
+    try:
+        raw = canonical_json_bytes(envelope)
+    except (TypeError, ValueError):
+        raise ValueError("RESUME_PROOF_INVALID") from None
+    if len(raw) > MAX_STORED_ENVELOPE_BYTES:
+        raise ValueError("RESUME_PROOF_INVALID")
+    return verify_http_response(envelope["headers"], wav, expected=expected)

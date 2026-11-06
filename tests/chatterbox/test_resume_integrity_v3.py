@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from .test_contracts import api, profile, audio
+from .receipt_fixture import nano_response_headers
 from lite.chatterbox_assembly import do_job
 
 
@@ -23,13 +24,21 @@ def wire_http(monkeypatch, client):
             raise RuntimeError("REFERENCE_CHANGED")
         return response.json()
     class Speech:
-        headers={"X-Lite-Pause-Count":"0","X-TTS-Backend":"MOCK"}
+        def __init__(self,body,data):
+            self.data=data
+            row=client.get("/profiles/"+body["voice"]).json()
+            import lite.chatterbox_assembly as asm
+            self.headers=nano_response_headers(
+                profile=row,binding=asm.reference_binding(row,row["id"]),
+                text=body["input"],wav=data,seed=body.get("seed"),
+                speed=body.get("speed",1.0))
         def __enter__(self):return self
         def __exit__(self,*args):pass
-        def read(self,size):return audio(.5)
+        def read(self,size):return self.data[:size]
     def speech(request,**kwargs):
-        posts.append(json.loads(request.data))
-        return Speech()
+        body=json.loads(request.data)
+        posts.append(body)
+        return Speech(body,audio(.5))
     monkeypatch.setattr(asm,"http_json",routed)
     monkeypatch.setattr(asm.urllib.request,"urlopen",speech)
     return posts
@@ -376,7 +385,7 @@ raise SystemExit(1)
     assert len(posts)==2
 
 
-def test_v3_n01_legacy_v2_receiptless_resume_is_migration_free(api,tmp_path,monkeypatch):
+def test_v3_n01_legacy_schema_with_reconstructible_proof_is_verified(api,tmp_path,monkeypatch):
     client,_,_=api
     voice=profile(client)["id"]
     posts=wire_http(monkeypatch,client)
@@ -413,8 +422,8 @@ def test_v3_n01_legacy_forged_summary_cannot_claim_pass(api,tmp_path,monkeypatch
     claim=json.loads(summary.read_text())
     claim["final_sha256"]=hashlib.sha256(changed).hexdigest()
     summary.write_text(json.dumps(claim))
-    # A receiptless legacy pair with matching SHA/summary is not enough:
-    # reassemble verified sections and detect mismatched audio content.
+    # A legacy schema label cannot make the forged final authoritative. The
+    # preserved per-section envelopes are reverified before rebuilding it.
     assert do_job(manifest,out,resume=True)["state"]=="PASS"
     assert hashlib.sha256(final.read_bytes()).hexdigest()!=claim["final_sha256"]
     assert len(posts)==2

@@ -21,7 +21,10 @@ from pathlib import Path
 from .audio import wav_info
 from .chatterbox_audio import concatenate, FINAL_MAX_SECONDS, FINAL_MAX_BYTES
 from .chatterbox_config import MODEL_REVISION
-from .chatterbox_contract import speed_ascii, verify_http_response
+from .chatterbox_contract import (canonical_json_bytes, freeze_http_response_envelope,
+    speed_ascii, verify_http_response, verify_stored_http_response)
+
+MAX_RESUME_MANIFEST_BYTES = 3 * 1024 * 1024
 
 
 def atomic(path: Path, data: bytes):
@@ -161,29 +164,8 @@ def _ensure_public_commit(output: Path, receipt):
         _restore_public(output,receipt)
 
 
-def _trusted_legacy_pair(output: Path, job_key: str, state: dict, seconds: float):
-    """Read pre-V3 job outputs without forcing an owner migration."""
-    wav_path,summary_path=_public_paths(output)
-    if not wav_path.exists() and not summary_path.exists():
-        return None
-    if not wav_path.is_file() or not summary_path.is_file():
-        return None
-    try:
-        wav=wav_path.read_bytes()
-        summary=summary_path.read_bytes()
-        result=_verify_final_bytes(wav,summary)
-        if (result.get("model_revision")!=MODEL_REVISION
-            or result.get("voice_version")!=state["voice_version"]
-            or result.get("sections")!=len(state["sections"])
-            or result.get("audio_s")!=seconds):
-            return None
-        return result
-    except (OSError,RuntimeError,KeyError):
-        return None
-
-
 def _existing_final_result(output: Path, state: dict, job_key: str,
-                           total_frames: int, section_count: int, ordered_ids: list[str]):
+                           total_frames: int, section_count: int):
     old=_read_commit(output,job_key)
     if old is not None:
         receipt,wav,summary,result=old
@@ -194,25 +176,6 @@ def _existing_final_result(output: Path, state: dict, job_key: str,
             raise RuntimeError("FINAL_PUBLICATION_RECOVERY_REQUIRED")
         _ensure_public_commit(output,old)
         return result
-    # Old V1 jobs have no authoritative receipt. Only their independently
-    # verified *complete pair* can be accepted, with matching job/section state.
-    if state.get("schema")=="chatterbox-job-v1":
-        legacy=_trusted_legacy_pair(output,job_key,state,total_frames/24000)
-        if legacy is None:
-            return None
-        # Older V2 jobs have no receipt: only accept when bytes also agree with
-        # the independently checksum-verified ordered section PCM, not merely
-        # a potentially edited final WAV + edited summary.
-        def ordered_legacy():
-            for identifier in ordered_ids:
-                target=output/("section-"+identifier+".wav")
-                if target.is_symlink():
-                    raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
-                yield target.read_bytes()
-        rebuilt=concatenate(ordered_legacy())
-        if hashlib.sha256(rebuilt).hexdigest()!=legacy["final_sha256"]:
-            return None
-        return legacy
     return None
 
 
@@ -320,25 +283,34 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
     },sort_keys=True,separators=(",",":")).encode()).hexdigest()
     if state_path.is_symlink(): raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
     if resume and state_path.exists():
+        if not state_path.is_file() or state_path.stat().st_size>MAX_RESUME_MANIFEST_BYTES:
+            raise RuntimeError("RESUME_MANIFEST_TOO_LARGE")
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        if state.get("voice") != voice or state.get("voice_version") != version or state.get("model_revision") != MODEL_REVISION or state.get("job_key") != job_key or state.get("reference_binding") != binding:
+        if (not isinstance(state,dict) or not isinstance(state.get("sections"),dict)
+                or state.get("voice") != voice or state.get("voice_version") != version
+                or state.get("model_revision") != MODEL_REVISION
+                or state.get("job_key") != job_key
+                or state.get("reference_binding") != binding):
             raise RuntimeError("RESUME_PROVENANCE_CHANGED")
     elif state_path.exists():
         raise RuntimeError("OUTPUT_EXISTS_USE_RESUME")
     else:
-        state = {"schema": "chatterbox-job-v2", "voice": voice, "voice_version": version,
+        state = {"schema": "chatterbox-job-v3", "voice": voice, "voice_version": version,
                  "model_revision": MODEL_REVISION, "job_key":job_key,
                  "reference_binding":binding,"sections": {}}
     def save():
-        atomic(state_path, json.dumps(state, indent=2, sort_keys=True).encode())
+        encoded=json.dumps(state,indent=2,sort_keys=True).encode()
+        if len(encoded)>MAX_RESUME_MANIFEST_BYTES:
+            raise RuntimeError("RESUME_MANIFEST_TOO_LARGE")
+        atomic(state_path,encoded)
     if not (resume and state_path.exists()):
         save()
-    # Validate a previous commit before accepting ANY resume SKIP.
-    existing_commit=_read_commit(output,job_key)
-    if existing_commit is not None:
-        _ensure_public_commit(output,existing_commit)
+    # Parse a previous commit, but never repair/publicly project it until every
+    # current section proof has independently passed resume verification.
+    _read_commit(output,job_key)
     metrics = []
     verified_frames=0
+    verified_proofs=[]
     skipped_all=True
     for order, s in enumerate(sections):
         identifier = str(s["id"])
@@ -347,22 +319,55 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
         record = state["sections"].get(identifier)
         target = output / ("section-" + identifier + ".wav")
         if target.is_symlink(): raise RuntimeError("OUTPUT_PATH_UNTRUSTED")
-        if resume and record and record.get("state") == "PASS" and record.get("key") == key and target.is_file():
-            raw = target.read_bytes()
-            if hashlib.sha256(raw).hexdigest() == record.get("sha256"):
+        expected={"voice_id":voice,"voice_version":version,"reference_binding":binding,
+                  "input_sha256":hashlib.sha256(s["input"].encode("utf-8")).hexdigest(),
+                  "seed":s.get("seed",42),
+                  "requested_speed":speed_ascii(s.get("speed",1.0))}
+        if resume and record and record.get("state") == "PASS" and record.get("key") == key:
+            proof_error=None
+            try:
+                if not target.is_file():
+                    raise RuntimeError("RESUME_WAV_INVALID")
+                raw=target.read_bytes()
+                if hashlib.sha256(raw).hexdigest()!=record.get("sha256"):
+                    raise RuntimeError("RESUME_WAV_INVALID")
                 frame_info=wav_info(raw)
                 if record.get("seconds")!=frame_info["seconds"]:
                     raise RuntimeError("RESUME_WAV_INVALID")
+                envelope=record.get("execution_envelope")
+                if envelope is None:
+                    raise RuntimeError("RESUME_PROOF_MISSING_EXPLICIT_RETRY_REQUIRED")
+                envelope_raw=canonical_json_bytes(envelope)
+                if hashlib.sha256(envelope_raw).hexdigest()!=record.get("execution_envelope_sha256"):
+                    raise RuntimeError("RESUME_PROOF_INVALID_EXPLICIT_RETRY_REQUIRED")
+                receipt=verify_stored_http_response(envelope,raw,expected=expected)
+                if (record.get("input_sha256")!=expected["input_sha256"]
+                        or record.get("seed")!=expected["seed"]
+                        or record.get("requested_speed")!=expected["requested_speed"]
+                        or record.get("voice_version")!=version
+                        or record.get("reference_binding")!=binding
+                        or record.get("model_revision")!=MODEL_REVISION
+                        or record.get("frames")!=frame_info["frames"]
+                        or receipt["audio_frames"]!=frame_info["frames"]):
+                    raise RuntimeError("RESUME_PROOF_INVALID_EXPLICIT_RETRY_REQUIRED")
+            except RuntimeError as exc:
+                proof_error=exc
+            except (OSError,ValueError,TypeError,KeyError):
+                proof_error=RuntimeError("RESUME_PROOF_INVALID_EXPLICIT_RETRY_REQUIRED")
+            if proof_error is None:
                 verified_frames+=frame_info["frames"]
-                print(f"SKIP {order+1}/{len(sections)} {identifier} verified", flush=True)
-                metrics.append({"id": identifier, "state": "SKIP", "seconds": record["seconds"]})
+                verified_proofs.append(record["execution_envelope_sha256"])
+                print(f"SKIP {order+1}/{len(sections)} {identifier} verified",flush=True)
+                metrics.append({"id":identifier,"state":"SKIP","seconds":record["seconds"],
+                                "execution_receipt_verified":True})
                 continue
-            raise RuntimeError("RESUME_WAV_INVALID")
+            if not allow_retry:
+                raise proof_error
         skipped_all=False
-        if record and not allow_retry:
-            raise RuntimeError("UNCERTAIN_OR_CHANGED_SECTION_EXPLICIT_RETRY_REQUIRED")
         if record and record.get("key") != key:
             raise RuntimeError("RESUME_INPUT_CHANGED")
+        if record and not allow_retry:
+            raise RuntimeError("UNCERTAIN_OR_CHANGED_SECTION_EXPLICIT_RETRY_REQUIRED")
         state["sections"][identifier] = {"state": "IN_PROGRESS", "key": key}
         save()
         print(f"START {order+1}/{len(sections)} {identifier}", flush=True)
@@ -377,17 +382,9 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
                 data = reply.read(100*1024*1024+1)
                 headers = reply.headers  # Case-insensitive HTTPMessage; dict conversion loses header lookups.
             info = wav_info(data)
-            backend = headers.get("X-TTS-Backend")
-            receipt_verified = False
-            if backend == "CUDA0":
-                verify_http_response(headers, data, expected={
-                    "voice_id":voice, "voice_version":version,
-                    "reference_binding":binding,
-                    "input_sha256":hashlib.sha256(s["input"].encode("utf-8")).hexdigest(),
-                    "seed":s.get("seed",42),
-                    "requested_speed":speed_ascii(s.get("speed",1.0)),
-                })
-                receipt_verified = True
+            receipt=verify_http_response(headers,data,expected=expected)
+            envelope=freeze_http_response_envelope(headers)
+            envelope_sha=hashlib.sha256(canonical_json_bytes(envelope)).hexdigest()
             assert_reference_unchanged()
             atomic(target, data)
             elapsed = time.monotonic() - started
@@ -395,7 +392,11 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
                      "seconds": info["seconds"], "wall_seconds": elapsed, "rtf": elapsed/info["seconds"],
                      "speed_mode": headers.get("X-TTS-Speed-Mode"),
                      "pause_count": headers.get("X-Lite-Pause-Count"),
-                     "backend": backend, "execution_receipt_verified":receipt_verified,
+                     "backend":receipt["backend"],"execution_receipt_verified":True,
+                     "execution_envelope":envelope,"execution_envelope_sha256":envelope_sha,
+                     "frames":info["frames"],"input_sha256":expected["input_sha256"],
+                     "seed":expected["seed"],"requested_speed":expected["requested_speed"],
+                     "reference_binding":binding,"model_revision":MODEL_REVISION,
                      "speech_span_count":headers.get("X-Lite-Speech-Segments"),
                      "native_chunk_count":headers.get("X-TTS-Native-Chunks"),
                      "cuda_allocated_bytes": headers.get("X-TTS-CUDA-Allocated-Bytes"),
@@ -407,8 +408,10 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
                      "speed": s.get("speed", 1.0), "voice_version": version}
             state["sections"][identifier] = entry
             verified_frames+=info["frames"]
+            verified_proofs.append(envelope_sha)
             save()
-            metrics.append({"id":identifier,**entry})
+            metrics.append({key:value for key,value in {"id":identifier,**entry}.items()
+                            if key not in ("execution_envelope",)})
             mem = entry["cuda_peak_bytes"] or "NOT_MEASURED"
             lifetime=entry["cuda_lifetime_peak_bytes"] or "NOT_MEASURED"
             scope=entry["cuda_peak_scope"] or "NOT_MEASURED"
@@ -416,8 +419,13 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
                   f"speed={entry['speed']} pause={entry['pause_count']} peak_scope={scope} "
                   f"generation_peak_vram_bytes={mem} lifetime_peak_vram_bytes={lifetime}",
                   flush=True)
-        except BaseException:
-            state["sections"][identifier] = {"state": "UNCERTAIN", "key": key}
+        except BaseException as exc:
+            detail=str(exc)
+            safe_error=(detail if detail.startswith(("EXECUTION_","INVALID_EXECUTION_",
+                        "UNVERIFIED_","REFERENCE_","RESUME_"))
+                        else type(exc).__name__)
+            state["sections"][identifier] = {"state":"UNCERTAIN","key":key,
+                                               "error":safe_error}
             save()
             metrics.append({"id":identifier,"state":"FAIL","wall_seconds":time.monotonic()-started})
             print(f"FAIL {identifier} (no automatic retry)", flush=True)
@@ -426,8 +434,13 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
         finally:
             if report: atomic(report, json.dumps(metrics,indent=2).encode())
     assert_reference_unchanged()
+    if len(verified_proofs)!=len(sections):
+        raise RuntimeError("RESUME_PROOF_INVALID_EXPLICIT_RETRY_REQUIRED")
+    if state.get("schema")!="chatterbox-job-v3":
+        state["schema"]="chatterbox-job-v3"
+        save()
     if resume and skipped_all:
-        prior=_existing_final_result(output,state,job_key,verified_frames,len(sections),[str(s["id"]) for s in sections])
+        prior=_existing_final_result(output,state,job_key,verified_frames,len(sections))
         if prior is not None:
             assert_reference_unchanged()
             return prior
@@ -446,6 +459,9 @@ def _do_job_unlocked(source: dict, output: Path, base="http://127.0.0.1:3901",
     result = {"state":"PASS","audio_s":info["seconds"],"final_sha256":info["sha256"],
               "sections":len(sections),"prepared_sections":len(sections),
               "completed_sections":len(sections),"full_manifest_coverage":True,
+              "verified_sections":len(verified_proofs),
+              "ordered_section_proofs_sha256":hashlib.sha256(
+                  canonical_json_bytes(verified_proofs)).hexdigest(),
               "source_characters":sum(len(s["input"]) for s in sections),
               "source_words":sum(len(s["input"].split()) for s in sections),
               "ordered_source_sha256":[hashlib.sha256(s["input"].encode()).hexdigest() for s in sections],
@@ -546,13 +562,20 @@ def main():
         print(json.dumps(do_job(args.manifest,args.output,args.base,args.resume,args.retry_uncertain,args.report),
                          indent=2))
     except Exception as exc:
-        print("FAIL",type(exc).__name__,str(exc) if str(exc) in (
+        detail=str(exc)
+        known=detail in (
             "RESUME_PROVENANCE_CHANGED","RESUME_WAV_INVALID","RESUME_INPUT_CHANGED",
+            "RESUME_PROOF_MISSING_EXPLICIT_RETRY_REQUIRED",
+            "RESUME_PROOF_INVALID_EXPLICIT_RETRY_REQUIRED",
+            "RESUME_MANIFEST_TOO_LARGE",
             "UNCERTAIN_OR_CHANGED_SECTION_EXPLICIT_RETRY_REQUIRED",
             "VOICE_VERSION_CHANGED","WORKER_BUSY","OUTPUT_EXISTS_USE_RESUME",
              "OUTPUT_JOB_BUSY","BENCHMARK_VOICE_MISMATCH","BENCHMARK_VOICE_INVALID",
              "REFERENCE_PROVENANCE_UNAVAILABLE","REFERENCE_CHANGED",
-             "FINAL_PUBLICATION_RECOVERY_REQUIRED") else "JOB_FAILED")
+             "FINAL_PUBLICATION_RECOVERY_REQUIRED")
+        safe=detail if known or detail.startswith(("EXECUTION_","INVALID_EXECUTION_",
+                                                    "UNVERIFIED_")) else "JOB_FAILED"
+        print("FAIL",type(exc).__name__,safe)
         raise SystemExit(1)
 
 

@@ -108,6 +108,29 @@ publication. A 499/504, connection loss, or any transport error after possible
 admission is uncertain and must not be automatically replayed. Long-form retry
 requires explicit owner action and its durable section/receipt fence.
 
+## Long-form publication and resume proof
+
+Long-form jobs use `chatterbox-job-v3`. Every HTTP WAV is admitted only after
+the complete Nano response envelope and its context-bound execution receipt
+pass verification; the backend header never selects a less strict path. The
+exact bounded security-relevant header envelope, its digest, source/output
+identity and exact PCM frame count are committed with each successful section.
+Resume re-verifies that original envelope and the section WAV before `SKIP` or
+before restoring an already committed final projection.
+
+Historical v1/v2 checkpoints without reconstructible per-section proof remain
+untouched but cannot be promoted from WAV hash or duration alone. They fail as
+`RESUME_PROOF_MISSING_EXPLICIT_RETRY_REQUIRED`. After reviewing the uncertain
+submission, an owner may explicitly authorize a new request with:
+
+```text
+python -m lite.chatterbox_assembly --manifest INPUT.json --output OUTPUT --resume --retry-uncertain
+```
+
+Benchmarks apply the same response verifier before reporting `PASS` or writing
+a WAV. A valid synthetic CI receipt proves contract behavior only; it is not
+owner hardware, CUDA, acoustic-quality or performance attestation.
+
 ## Other endpoints
 
 Worker status/settings/unload are `/lite/worker/status`,
