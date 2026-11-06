@@ -374,7 +374,7 @@
     }
     clearOutput(); const epoch = generationEpoch, profile = voices.find(v => v.id === voice);
     const identity = {id: profile.id, version: profile.version, reference: profile.ref_sha256};
-    const cancel = {request_id: crypto.randomUUID ? crypto.randomUUID() : randomToken(18), cancel_token: randomToken()};
+    const cancel = {request_id: crypto.randomUUID ? crypto.randomUUID() : randomToken(18), cancel_token: randomToken(), acknowledged: false};
     activeCancel = cancel; generating = true; busy($('tts-submit'), true); $('tts-cancel').disabled = false;
     generationState('Generating…'); notice('');
     try {
@@ -392,7 +392,7 @@
       const latest = voices.find(v => v.id === identity.id);
       if (epoch !== generationEpoch || activeCancel !== cancel || chosen !== voice || !latest ||
           latest.version !== identity.version || latest.ref_sha256 !== identity.reference) {
-        generationState('Discarded stale result'); notice('Voice, reference or cancellation state changed; discarded stale WAV.', true); return;
+        generationState(cancel.acknowledged ? 'Cancelled' : 'Discarded stale result'); notice('Voice, reference or cancellation state changed; discarded stale WAV.', true); return;
       }
       wavUrl = URL.createObjectURL(new Blob([content], {type: 'audio/wav'}));
       $('tts-player').src = wavUrl; $('tts-player').hidden = false;
@@ -409,7 +409,7 @@
       $('tts-output').hidden = false; generationState('Completed'); notice('Local 24 kHz WAV ready.');
     } catch (error) {
       if (epoch === generationEpoch) { generationState(error.code === 'CANCELLED' ? 'Cancelled' : error.code === 'WORKER_BUSY' ? 'Busy' : 'Failed'); notice(errorText(error), true); }
-      else { generationState('Cancelled / unknown'); }
+      else { generationState(cancel.acknowledged ? 'Cancelled' : 'Unknown'); }
     } finally {
       if (activeCancel === cancel) activeCancel = null;
       generating = false; busy($('tts-submit'), voices.length === 0); $('tts-cancel').disabled = true;
@@ -421,7 +421,7 @@
     try {
       const result = await json('/lite/worker/cancel', jsonOptions('POST', cancel));
       if (activeCancel === cancel && result.cancelled && result.request_id === cancel.request_id) {
-        generationState('Cancelled (cleanup pending)'); notice('Request-owned cancellation acknowledged; no WAV will be published.');
+        cancel.acknowledged = true; generationState('Cancelled (cleanup pending)'); notice('Request-owned cancellation acknowledged; no WAV will be published.');
       } else { generationState('Unknown'); notice('Cancellation not confirmed by worker.', true); }
     } catch (error) { generationState('Unknown'); notice('Cancellation could not be confirmed: ' + errorText(error), true); }
   });
@@ -483,6 +483,9 @@
         $('runtime-checked').textContent = 'Status unavailable: ' + errorText(error);
         $('runtime-summary').replaceChildren(metric('Runtime status', 'Unknown / not verified'));
         $('worker-status').replaceChildren(metric('Worker', 'Unknown'));
+        $('runtime-details').replaceChildren(detail('Runtime evidence', 'Unavailable'));
+        $('rights-details').replaceChildren(detail('Rights evidence', 'Unavailable'));
+        $('worker-unload').disabled = true;
         $('rights-notice').textContent = 'Rights information unavailable.';
         notice(errorText(error), true);
       }
