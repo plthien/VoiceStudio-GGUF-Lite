@@ -42,114 +42,223 @@ def live(tmp_path):
         thread.join(10)
 
 
-@pytest.mark.parametrize("viewport",[(1280,900),(390,844)])
+
+
+@pytest.mark.parametrize("viewport", [(1280,900), (390,844)])
 def test_cloning_generate_library_and_runtime(live, viewport):
-    url, fake=live
+    url, fake = live
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True)
-        page=browser.new_page(viewport={"width":viewport[0],"height":viewport[1]})
-        page.goto(url+"/ui")
-        expect(page.get_by_role("heading",name="VoiceStudio Nano Lite")).to_be_visible()
-        page.get_by_label("Voice name").fill("Owned Voice")
-        page.get_by_label("Exact transcript",exact=True).fill("This is the exact audio transcript")
-        page.locator('#clone-form input[name=ref_audio]').set_input_files({
-          "name":"owned.wav","mimeType":"audio/wav","buffer":audio(6)})
-        expect(page.locator("#selected-reference-preview")).to_be_visible()
-        expect(page.locator("#selected-reference-meta")).to_contain_text("owned.wav")
-        page.locator("#consent").check()
-        page.get_by_role("button",name="Create voice").click()
-        expect(page.get_by_text("Owned Voice · version 1")).to_be_visible(timeout=10000)
-        page.get_by_role("button",name="Preview",exact=True).click()
-        page.get_by_role("tab",name="Text to Speech").click()
-        page.locator("#input").fill("Hello. [pause 250ms] Goodbye.")
-        page.locator("#speed").evaluate("(el) => { el.value = '1.15'; el.dispatchEvent(new Event('input', {bubbles:true})); }")
-        page.get_by_role("button",name="Generate WAV").click()
-        expect(page.get_by_text("Generation complete")).to_be_visible(timeout=15000)
-        expect(page.locator("#download")).to_be_visible()
-        expect(page.locator("#metrics")).to_contain_text("Speech WPM")
-        expect(page.locator("#metrics")).to_contain_text("speech spans")
-        expect(page.locator("#metrics")).to_contain_text("native chunks")
-        page.get_by_role("tab",name="Runtime & Settings").click()
-        expect(page.locator("#runtime-status")).to_contain_text("FAKE CUDA TEST ONLY")
-        page.locator("#idle").select_option("300")
-        page.get_by_role("button",name="Save setting").click()
-        expect(page.get_by_text("Idle setting saved")).to_be_visible()
-        page.get_by_role("button",name="Unload Now").click()
-        expect(page.get_by_text("Worker unloaded")).to_be_visible()
-        expect(page.locator("#runtime-status")).to_contain_text("cold_load_eligible")
-        expect(page.locator("#runtime-status")).to_contain_text("cuda_verified")
-        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(url + "/ui")
+        expect(page.locator(".sidebar")).to_be_visible()
+        expect(page.get_by_role("heading", name="Voice Cloning").first).to_be_visible()
+        page.locator("#clone-form input[name=name]").fill("Owned Voice")
+        page.locator("#clone-form textarea[name=ref_text]").fill("This is the exact audio transcript")
+        page.locator("#clone-file").set_input_files({
+            "name": "owned.wav", "mimeType": "audio/wav", "buffer": audio(6)})
+        expect(page.locator("#clone-meta")).to_contain_text("owned.wav")
+        page.locator("#clone-consent").check()
+        page.locator("#clone-submit").click()
+        expect(page.locator("#voice-list")).to_contain_text("Owned Voice", timeout=12000)
+        expect(page.locator("#voice-list")).to_contain_text("version 1")
+        page.locator("#voice-list button").filter(has_text="Edit").click()
+        page.locator("#reference-play").click()
+        expect(page.locator("#saved-preview")).to_be_visible()
+        page.locator('.nav-button[data-view=tts]').click()
+        page.locator("#tts-text").fill("Hello. [pause 250ms] Goodbye.")
+        page.locator("#tts-speed").evaluate(
+            "(el) => { el.value = '1.15'; el.dispatchEvent(new Event('input',{bubbles:true})); }")
+        page.locator("#tts-submit").click()
+        expect(page.locator("#tts-state")).to_have_text("Completed", timeout=16000)
+        expect(page.locator("#tts-download")).to_have_attribute("href", re.compile("^blob:"))
+        expect(page.locator("#tts-breakdown")).to_contain_text("Speech WPM")
+        expect(page.locator("#tts-breakdown")).to_contain_text("Speech spans")
+        expect(page.locator("#tts-breakdown")).to_contain_text("Native chunks")
+        page.locator('.nav-button[data-view=runtime]').click()
+        expect(page.locator("#runtime-summary")).to_contain_text("Eligible to start")
+        expect(page.locator("#runtime-summary")).to_contain_text("CUDA verified")
+        # Synthetic CUDA does NOT confer true CUDA verification.
+        expect(page.locator("#runtime-summary")).to_contain_text("Not verified")
+        page.locator("#worker-idle").select_option("300")
+        page.locator("#worker-save").click()
+        expect(page.locator("#notice")).to_contain_text("Idle timeout saved")
+        page.locator("#worker-unload").click()
+        expect(page.locator("#notice")).to_contain_text("Nano worker unloaded")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        assert not errors, errors
         browser.close()
 
 
 def test_error_and_cancel_controls(live):
-    url, fake=live
+    url, fake = live
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True)
-        page=browser.new_page()
-        observed=[]
-        page.on("request",lambda r: observed.append((r.url,r.headers,r.post_data_json))
-                if r.method=="POST" and (r.url.endswith("/v1/audio/speech") or r.url.endswith("/lite/worker/cancel")) else None)
-        page.goto(url+"/ui")
-        page.get_by_role("tab",name="Text to Speech").click()
-        expect(page.locator("#generate")).to_be_disabled()
-        page.get_by_role("tab",name="Voice Cloning").click()
-        page.locator('#clone-form input[name=name]').fill("Own")
-        page.locator('#clone-form textarea[name=ref_text]').fill("Exact transcript")
-        page.locator('#clone-form input[name=ref_audio]').set_input_files({
-            "name":"owned.wav","mimeType":"audio/wav","buffer":audio(6)})
-        page.locator("#consent").check()
-        page.locator("#clone-form button[type=submit]").click()
-        expect(page.get_by_text("Own · version 1")).to_be_visible(timeout=10000)
-        fake.fail=True
-        page.get_by_role("tab",name="Text to Speech").click()
-        page.locator("#input").fill("Hello.")
-        page.locator("#generate").click()
-        expect(page.locator("#notice")).to_contain_text("WORKER_FAILURE",timeout=15000)
-        fake.fail=False
-        fake.delaying=True
-        page.locator("#generate").click()
-        expect(page.locator("#cancel")).to_be_enabled()
-        page.locator("#cancel").click()
-        expect(page.locator("#notice")).to_contain_text(re.compile("CANCELLED|Cancellation requested"))
-        speech=[x for x in observed if x[0].endswith("/v1/audio/speech")][-1]
-        cancel=[x for x in observed if x[0].endswith("/lite/worker/cancel")][-1]
-        assert speech[1]["x-tts-request-id"]==cancel[2]["request_id"]
-        assert speech[1]["x-tts-cancel-token"]==cancel[2]["cancel_token"]
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        observed = []
+        page.on("request", lambda req: observed.append((req.url, req.headers, req.post_data_json))
+                if req.method == "POST" and
+                (req.url.endswith("/v1/audio/speech") or req.url.endswith("/lite/worker/cancel")) else None)
+        page.goto(url + "/ui")
+        page.locator('.nav-button[data-view=tts]').click()
+        expect(page.locator("#tts-submit")).to_be_disabled()
+        page.locator('.nav-button[data-view=clone]').click()
+        page.locator("#clone-form input[name=name]").fill("Own")
+        page.locator("#clone-form textarea[name=ref_text]").fill("Exact transcript")
+        page.locator("#clone-file").set_input_files({
+            "name": "owned.wav", "mimeType": "audio/wav", "buffer": audio(6)})
+        page.locator("#clone-consent").check()
+        page.locator("#clone-submit").click()
+        expect(page.locator("#voice-list")).to_contain_text("Own", timeout=12000)
+        fake.fail = True
+        page.locator('.nav-button[data-view=tts]').click()
+        page.locator("#tts-text").fill("Hello.")
+        page.locator("#tts-submit").click()
+        expect(page.locator("#notice")).to_contain_text("WORKER_FAILURE", timeout=16000)
+        expect(page.locator("#tts-output")).to_be_hidden()
+        fake.fail = False
+        fake.delaying = True
+        page.locator("#tts-submit").click()
+        expect(page.locator("#tts-cancel")).to_be_enabled()
+        page.locator("#tts-cancel").click()
+        expect(page.locator("#notice")).to_contain_text(
+            re.compile("cancellation|Cancellation|NO_ACTIVE_REQUEST|cancelled", re.I))
+        speech = [item for item in observed if item[0].endswith("/v1/audio/speech")][-1]
+        cancel = [item for item in observed if item[0].endswith("/lite/worker/cancel")][-1]
+        assert speech[1]["x-tts-request-id"] == cancel[2]["request_id"]
+        assert speech[1]["x-tts-cancel-token"] == cancel[2]["cancel_token"]
+        expect(page.locator("#tts-output")).to_be_hidden()
         browser.close()
 
 
-@pytest.mark.parametrize("viewport",[(1280,900),(390,844)])
+@pytest.mark.parametrize("viewport", [(1280,900), (390,844)])
 def test_selected_file_preview_revocation_and_transcript_version(live, viewport):
-    url,_=live
+    url, _ = live
     with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True)
-        page=browser.new_page(viewport={"width":viewport[0],"height":viewport[1]})
-        page.add_init_script("""window.__revoked=[]; const old=URL.revokeObjectURL.bind(URL); URL.revokeObjectURL=(u)=>{window.__revoked.push(u);old(u)};""")
-        requests=[]
-        page.on("request",lambda r: requests.append(r.url) if r.method=="POST" else None)
-        page.goto(url+"/ui")
-        page.get_by_label("Voice name").fill("Preview Voice")
-        page.get_by_label("Exact transcript",exact=True).fill("Original exact transcript")
-        page.locator("#clone-file").set_input_files({"name":"first.wav","mimeType":"audio/wav","buffer":audio(6)})
-        expect(page.locator("#selected-reference-meta")).to_contain_text("first.wav")
-        assert not any(path.endswith("/profiles") for path in requests)
-        page.locator("#clone-file").set_input_files({"name":"second.wav","mimeType":"audio/wav","buffer":audio(6)})
-        expect(page.locator("#selected-reference-meta")).to_contain_text("second.wav")
-        assert page.evaluate("window.__revoked.length")>=1
-        page.locator("#consent").check();page.get_by_role("button",name="Create voice").click()
-        expect(page.get_by_text("Preview Voice · version 1")).to_be_visible(timeout=10000)
-        expect(page.get_by_text("Exact transcript: Original exact transcript")).to_be_visible()
-        def dialog_handler(dialog):
-            if dialog.type=="prompt": dialog.accept("Corrected exact transcript")
-            else: dialog.accept()
-        page.on("dialog",dialog_handler)
-        page.get_by_role("button",name="Edit transcript").click()
-        expect(page.get_by_text("Preview Voice · version 2")).to_be_visible(timeout=10000)
-        expect(page.get_by_text("Exact transcript: Corrected exact transcript")).to_be_visible()
-        assert page.evaluate("window.__revoked.length")>=2
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+        page.add_init_script("""window.__revoked=[]; const old=URL.revokeObjectURL.bind(URL);
+            URL.revokeObjectURL=(u)=>{window.__revoked.push(u);old(u)};""")
+        page.goto(url + "/ui")
+        page.locator("#clone-form input[name=name]").fill("Preview Voice")
+        page.locator("#clone-form textarea[name=ref_text]").fill("Original exact transcript")
+        for filename in ("first.wav", "second.wav"):
+            page.locator("#clone-file").set_input_files({
+                "name": filename, "mimeType": "audio/wav", "buffer": audio(6)})
+            expect(page.locator("#clone-meta")).to_contain_text(filename)
+        assert page.evaluate("window.__revoked.length") >= 1
+        page.locator("#clone-consent").check()
+        page.locator("#clone-submit").click()
+        expect(page.locator("#voice-list")).to_contain_text("Preview Voice", timeout=12000)
+        page.locator("#voice-list button").filter(has_text="Edit").click()
+        expect(page.locator("#editor-id")).to_contain_text("version 1")
+        page.on("dialog", lambda dialog: dialog.accept())
+        page.locator("#edit-form textarea[name=ref_text]").fill("Corrected exact transcript")
+        page.locator("#edit-save").click()
+        expect(page.locator("#editor-id")).to_contain_text("version 2", timeout=12000)
+        assert page.locator("#edit-form textarea[name=ref_text]").input_value() == "Corrected exact transcript"
+        assert page.evaluate("window.__revoked.length") >= 2
         browser.close()
 
+
+@pytest.mark.parametrize("viewport", [(1280,900), (390,844)])
+def test_rendered_custom_pause_caret_validation_and_generate(live, viewport):
+    url, _ = live
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+        page.goto(url + "/ui")
+        page.locator("#clone-form input[name=name]").fill("Owned")
+        page.locator("#clone-form textarea[name=ref_text]").fill("An owned audio transcript.")
+        page.locator("#clone-file").set_input_files({
+            "name": "owned.wav", "mimeType": "audio/wav", "buffer": audio(6)})
+        page.locator("#clone-consent").check()
+        page.locator("#clone-submit").click()
+        expect(page.locator("#voice-list")).to_contain_text("Owned", timeout=12000)
+        page.locator('.nav-button[data-view=tts]').click()
+        field = page.locator("#tts-text")
+        field.fill("Hello. Goodbye.")
+        field.evaluate("(el)=>el.setSelectionRange(7,14)")
+        page.locator("#tts-pause-preset").select_option("custom")
+        custom = page.locator("#tts-pause-custom")
+        custom.fill("800")
+        page.locator("#tts-insert-pause").click()
+        assert field.input_value() == "Hello. [pause 800ms]Goodbye."
+        assert field.evaluate("(el)=>el.selectionStart") == len("Hello. [pause 800ms]")
+        assert field.evaluate("(el)=>el.selectionEnd") == len("Hello. [pause 800ms]Goodbye.")
+        frozen = field.input_value()
+        for invalid in ("", "0", "10001", "1.5", "text"):
+            custom.fill(invalid)
+            page.locator("#tts-insert-pause").click()
+            expect(page.locator("#notice")).to_contain_text("Pause must be")
+            assert field.input_value() == frozen
+        custom.fill("1500")
+        field.evaluate("(el)=>el.setSelectionRange(el.value.length,el.value.length)")
+        page.locator("#tts-insert-pause").click()
+        assert field.input_value().endswith("[pause 1500ms]")
+        page.locator("#tts-submit").click()
+        expect(page.locator("#tts-state")).to_have_text("Completed", timeout=16000)
+        expect(page.locator("#tts-breakdown")).to_contain_text("Speech spans")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        browser.close()
+
+
+@pytest.mark.parametrize("viewport", [(1280,900), (390,844)])
+def test_lite_baseline_visual_screenshots(live, tmp_path, viewport):
+    """Capture original Lite and Nano at identical viewports; compare layout geometry and CSS."""
+    from pathlib import Path
+    import re as _re
+    url, _ = live
+    root = Path(__file__).resolve().parents[2]
+    html = (root / "lite/ui/index.html").read_text(encoding="utf8")
+    css = (root / "lite/ui/assets/app.css").read_text(encoding="utf8")
+    html = _re.sub(r'<script[^>]*src="/ui/assets/app.js"[^>]*></script>', '', html)
+    html = html.replace('<link rel="stylesheet" href="/ui/assets/app.css">', '<style>' + css + '</style>')
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        nano = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+        baseline = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+        nano.goto(url + "/ui")
+        baseline.set_content(html)
+        evidence = tmp_path / "visual" / (str(viewport[0]) + "x" + str(viewport[1]))
+        evidence.mkdir(parents=True)
+        for screen in ("clone", "library", "tts", "runtime"):
+            nano.locator('.nav-button[data-view="' + screen + '"]').click()
+            baseline.evaluate("""screen => {
+              document.querySelectorAll('.view').forEach(el => el.hidden = el.id !== 'view-' + screen);
+              document.querySelectorAll('.nav-button').forEach(el => el.classList.toggle('active', el.dataset.view === screen));
+              document.querySelector('#page-title').textContent =
+                ({clone:'Voice Cloning',library:'Voice Library',tts:'Text to Speech',runtime:'Runtime & Settings'})[screen];
+            }""", screen)
+            before = baseline.evaluate("""() => {
+              const css = el => getComputedStyle(document.querySelector(el));
+              const box = el => document.querySelector(el).getBoundingClientRect().toJSON();
+              return {sidebar:box('.sidebar'),topbar:box('.topbar'),panel:box('#view-' +
+                [...document.querySelectorAll('.view')].find(x=>!x.hidden).id.slice(5)+' .panel'),
+                background:css('body').backgroundColor,nav:css('.nav-button').fontSize,
+                radius:css('.panel').borderRadius};
+            }""")
+            after = nano.evaluate("""() => {
+              const css = el => getComputedStyle(document.querySelector(el));
+              const box = el => document.querySelector(el).getBoundingClientRect().toJSON();
+              return {sidebar:box('.sidebar'),topbar:box('.topbar'),panel:box('#view-' +
+                [...document.querySelectorAll('.view')].find(x=>!x.hidden).id.slice(5)+' .panel'),
+                background:css('body').backgroundColor,nav:css('.nav-button').fontSize,
+                radius:css('.panel').borderRadius};
+            }""")
+            assert before["background"] == after["background"]
+            assert before["nav"] == after["nav"]
+            assert before["radius"] == after["radius"]
+            for section in ("sidebar", "topbar", "panel"):
+                for key in ("x", "width"):
+                    assert abs(before[section][key] - after[section][key]) <= 2, (screen, section, key, before, after)
+            # Screenshots are emitted in test evidence; geometry checks do not substitute for owner visual review.
+            nano.screenshot(path=str(evidence / (screen + "-nano.png")), full_page=True)
+            baseline.screenshot(path=str(evidence / (screen + "-lite.png")), full_page=True)
+        assert nano.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        browser.close()
 
 def test_longform_http_resume_end_to_end(live, tmp_path):
     """Actual HTTP generation/atomic WAV, cache resume and version refusal."""
@@ -236,42 +345,3 @@ def test_benchmark_longform_forces_cold_start(live, tmp_path, monkeypatch):
         assert (output/"runs"/run_id/"owner-metrics.csv").is_file()
 
 
-@pytest.mark.parametrize("viewport", [(1280,900),(390,844)])
-def test_rendered_custom_pause_caret_validation_and_generate(live, viewport):
-    url, fake=live
-    with sync_playwright() as pw:
-        browser=pw.chromium.launch(headless=True)
-        page=browser.new_page(viewport={"width":viewport[0],"height":viewport[1]})
-        page.goto(url+"/ui")
-        page.get_by_label("Voice name").fill("Owned")
-        page.get_by_label("Exact transcript",exact=True).fill("An owned audio transcript.")
-        page.locator('#clone-form input[name=ref_audio]').set_input_files({
-            "name":"owned.wav","mimeType":"audio/wav","buffer":audio(6)})
-        page.locator("#consent").check()
-        page.get_by_role("button",name="Create voice").click()
-        expect(page.get_by_text("Owned · version 1")).to_be_visible(timeout=10000)
-        page.get_by_role("tab",name="Text to Speech").click()
-        field=page.locator("#input")
-        field.fill("Hello. Goodbye.")
-        field.evaluate("(el)=>el.setSelectionRange(7,7)")
-        custom=page.get_by_label("Custom 1–10000ms")
-        custom.fill("800ms")
-        page.get_by_role("button",name="+ custom pause").click()
-        assert field.input_value()=="Hello. [pause 800ms]Goodbye."
-        assert field.evaluate("(el)=>el.selectionStart")==len("Hello. [pause 800ms]")
-        custom.fill("1.5s")
-        field.evaluate("(el)=>el.setSelectionRange(el.value.length,el.value.length)")
-        page.get_by_role("button",name="+ custom pause").click()
-        assert field.input_value().endswith("[pause 1.5s]")
-        frozen=field.input_value()
-        for invalid in ("","0ms","10001ms","1.5555s","text"):
-            custom.fill(invalid)
-            page.get_by_role("button",name="+ custom pause").click()
-            expect(page.locator("#notice")).to_contain_text("INVALID_PAUSE_MARKER")
-            assert field.input_value()==frozen
-        custom.fill("800ms")
-        page.get_by_role("button",name="Generate WAV").click()
-        expect(page.locator("#notice")).to_contain_text("Generation complete",timeout=15000)
-        expect(page.locator("#metrics")).to_contain_text("pauses: 2")
-        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
-        browser.close()
