@@ -26,7 +26,7 @@ jobs:
     env:
       CHATTERBOX_ALLOW_TEST_ROOT: '1'
       CHATTERBOX_ROOT: ${{ github.workspace }}/.nano-test-root
-      NANO_VISUAL_EVIDENCE_DIR: ${{ github.workspace }}/.nano-visual-evidence
+      NANO_VISUAL_EVIDENCE_DIR: ${{ github.workspace }}/nano-visual-evidence
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -54,7 +54,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nano-lite-visual-${{ matrix.os }}
-          path: .nano-visual-evidence/**
+          path: nano-visual-evidence/**
           if-no-files-found: warn
           retention-days: 7
       - name: Original Lite regression
