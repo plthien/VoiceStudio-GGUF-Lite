@@ -368,8 +368,10 @@
       notice('Select a saved English voice and enter text.', true); return;
     }
     try { parsePause(text); } catch (error) { notice(errorText(error), true); return; }
-    const seed = Number($('tts-seed').value), speed = Number($('tts-speed').value);
-    if (!Number.isInteger(seed) || seed < 0 || seed > 2147483647 || speed < .75 || speed > 1.25) {
+    const seedRaw = $('tts-seed').value.trim(), seed = seedRaw === '' ? null : Number(seedRaw);
+    const speed = Number($('tts-speed').value);
+    if ((seed !== null && (!Number.isInteger(seed) || seed < 0 || seed > 2147483647)) ||
+        speed < .75 || speed > 1.25) {
       notice('Invalid seed or speech speed.', true); return;
     }
     clearOutput(); const epoch = generationEpoch, profile = voices.find(v => v.id === voice);
