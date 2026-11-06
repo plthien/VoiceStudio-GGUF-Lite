@@ -258,8 +258,70 @@ def test_lite_baseline_visual_screenshots(live, tmp_path, viewport):
             # Screenshots are emitted in test evidence; geometry checks do not substitute for owner visual review.
             nano.screenshot(path=str(evidence / (screen + "-nano.png")), full_page=True)
             baseline.screenshot(path=str(evidence / (screen + "-lite.png")), full_page=True)
+            # Exact screenshot comparison of the stable, shared sidebar/navigation region.
+            # Screen-specific Nano content and runtime metrics are intentionally excluded.
+            clip = {"x": 0, "y": 0,
+                    "width": viewport[0] if viewport[0] <= 600 else 250,
+                    "height": 80 if viewport[0] <= 600 else 290}
+            assert nano.screenshot(clip=clip) == baseline.screenshot(clip=clip), (
+                "Lite sidebar pixel parity mismatch", screen, viewport)
+
         assert nano.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
         browser.close()
+
+
+def test_library_crud_reference_and_migration(live):
+    url, _ = live
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(url + "/ui")
+        page.locator("#clone-form input[name=name]").fill("Initial Voice")
+        page.locator("#clone-form textarea[name=ref_text]").fill("Initial exact owned words")
+        page.locator("#clone-file").set_input_files({
+            "name": "owned.wav", "mimeType": "audio/wav", "buffer": audio(6)})
+        page.locator("#clone-consent").check()
+        page.locator("#clone-submit").click()
+        expect(page.locator("#voice-list")).to_contain_text("Initial Voice", timeout=12000)
+        page.locator("#voice-list button").filter(has_text="Edit").click()
+        page.locator("#edit-form input[name=name]").fill("Updated Voice")
+        page.locator("#edit-save").click()
+        expect(page.locator("#voice-list")).to_contain_text("Updated Voice")
+        page.locator("#replace-file").set_input_files({
+            "name": "new.wav", "mimeType": "audio/wav", "buffer": audio(6.5)})
+        expect(page.locator("#replace-preview")).to_be_visible()
+        page.locator("#replace-text").fill("The new recording's exact words")
+        page.locator("#replace-consent").check()
+        page.locator("#replace-submit").click()
+        expect(page.locator("#editor-id")).to_contain_text("version 2", timeout=12000)
+        expect(page.locator("#edit-form textarea[name=ref_text]")).to_have_value(
+            "The new recording's exact words")
+        page.locator("#migration-preview").click()
+        expect(page.locator("#migration-feedback")).not_to_be_empty()
+        page.locator("#delete-only").click()
+        expect(page.locator("#library-empty")).to_be_visible(timeout=12000)
+        browser.close()
+
+
+def test_nano_ui_no_gguf_requests_and_no_false_cuda_verified(live):
+    url, _ = live
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        requests = []
+        page.on("request", lambda req: requests.append(req.url))
+        page.goto(url + "/ui")
+        page.locator('.nav-button[data-view=runtime]').click()
+        expect(page.locator("#runtime-summary")).to_contain_text("CUDA verified")
+        expect(page.locator("#runtime-summary")).to_contain_text("Not verified")
+        page.locator('.nav-button[data-view=library]').click()
+        page.locator("#migration-preview").click()
+        expect(page.locator("#migration-feedback")).not_to_be_empty()
+        assert all("/models/" not in path for path in requests), requests
+        assert all("vulkan" not in path.lower() for path in requests), requests
+        assert all("gguf" not in path.lower() for path in requests), requests
+        browser.close()
+
 
 def test_longform_http_resume_end_to_end(live, tmp_path):
     """Actual HTTP generation/atomic WAV, cache resume and version refusal."""
