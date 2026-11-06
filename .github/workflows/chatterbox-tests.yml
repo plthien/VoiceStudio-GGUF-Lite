@@ -26,6 +26,7 @@ jobs:
     env:
       CHATTERBOX_ALLOW_TEST_ROOT: '1'
       CHATTERBOX_ROOT: ${{ github.workspace }}/.nano-test-root
+      NANO_VISUAL_EVIDENCE_DIR: ${{ github.workspace }}/.nano-visual-evidence
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,8 +45,18 @@ jobs:
         run: choco install ffmpeg -y --no-progress
       - name: Compile
         run: python -m compileall -q lite tests/chatterbox scripts/internal/download-chatterbox-model.py
+      - name: Nano UI JavaScript parse check
+        run: node --check lite/chatterbox_ui/app.js
       - name: Chatterbox mock tests
         run: python -m pytest tests/chatterbox -vv -ra --timeout=35
+      - name: Upload synthetic Nano vs Lite screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nano-lite-visual-${{ matrix.os }}
+          path: .nano-visual-evidence/**
+          if-no-files-found: warn
+          retention-days: 7
       - name: Original Lite regression
         run: python -m pytest tests/lite -vv -ra --timeout=35
       - name: PowerShell 7 parser and VerifyOnly negative behavior
