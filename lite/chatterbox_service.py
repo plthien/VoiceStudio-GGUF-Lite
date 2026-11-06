@@ -207,6 +207,7 @@ class TurboService:
         if remaining <= 0:
             raise TurboError("DEADLINE_EXCEEDED")
         outer_budget = min(GGUF_PROBE_OUTER_TIMEOUT_S, remaining)
+        deadline_limits_probe = remaining <= GGUF_PROBE_OUTER_TIMEOUT_S
         # urlopen has its own socket timeout. Give it enough time to observe
         # delayed Windows refusal, but leave grace for parsing/thread dispatch.
         http_budget = min(GGUF_HTTP_TIMEOUT_S,
@@ -241,7 +242,10 @@ class TurboService:
             conflict = await asyncio.wait_for(
                 asyncio.to_thread(probe), timeout=outer_budget)
         except asyncio.TimeoutError as exc:
-            if time.monotonic() >= deadline:
+            # wait_for may wake a few scheduler ticks before the absolute
+            # monotonic deadline on Windows. If the request deadline selected
+            # this timeout budget, it remains the authoritative error.
+            if deadline_limits_probe or time.monotonic() >= deadline:
                 raise TurboError("DEADLINE_EXCEEDED") from exc
             raise TurboError("GGUF_PROBE_UNAVAILABLE") from exc
         except (OSError, ValueError, urllib.error.URLError) as exc:
