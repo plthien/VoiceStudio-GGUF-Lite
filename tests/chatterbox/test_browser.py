@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import re
 import json
+import os
 import httpx
 import threading
 import time
@@ -222,7 +223,7 @@ def test_lite_baseline_visual_screenshots(live, tmp_path, viewport):
         baseline = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
         nano.goto(url + "/ui")
         baseline.set_content(html)
-        evidence = tmp_path / "visual" / (str(viewport[0]) + "x" + str(viewport[1]))
+        evidence = Path(os.environ.get("NANO_VISUAL_EVIDENCE_DIR", str(tmp_path / "visual"))) / (str(viewport[0]) + "x" + str(viewport[1]))
         evidence.mkdir(parents=True)
         for screen in ("clone", "library", "tts", "runtime"):
             nano.locator('.nav-button[data-view="' + screen + '"]').click()
