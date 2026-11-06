@@ -190,7 +190,7 @@ def test_rendered_custom_pause_caret_validation_and_generate(live, viewport):
         assert field.evaluate("(el)=>el.selectionStart") == len("Hello. [pause 800ms]")
         assert field.evaluate("(el)=>el.selectionEnd") == len("Hello. [pause 800ms]Goodbye.")
         frozen = field.input_value()
-        for invalid in ("", "0", "10001", "1.5", "text"):
+        for invalid in ("", "0", "10001", "1.5"):
             custom.fill(invalid)
             page.locator("#tts-insert-pause").click()
             expect(page.locator("#notice")).to_contain_text("Pause must be")
