@@ -286,20 +286,37 @@
   $('migration-preview').addEventListener('click', async () => {
     try {
       const data = await json('/lite/migration/preview'), select = $('migration-choice');
+      const eligible = data.eligible || [], invalid = data.invalid || [];
       select.replaceChildren(new Option('Choose eligible voice', ''));
-      (data.eligible || []).forEach(v => select.add(new Option(v.name + ' · ' + v.id, v.id)));
-      $('migration-feedback').textContent = data.configured ? (data.eligible.length + ' eligible · ' + (data.invalid || []).length + ' invalid') : 'Legacy source not configured';
+      const list = $('migration-list'); list.replaceChildren();
+      eligible.forEach(v => {
+        select.add(new Option(v.name + ' · ' + v.id, v.id));
+        const row = document.createElement('div'); row.className = 'voice-item';
+        row.textContent = v.name + ' · ' + v.id + ' · English · eligible'; list.append(row);
+      });
+      invalid.forEach(v => {
+        const row = document.createElement('div'); row.className = 'voice-item';
+        row.textContent = (v.id || 'Unknown ID') + ' · invalid: ' + (v.reason || 'Not eligible');
+        list.append(row);
+      });
+      $('migration-feedback').textContent = data.configured ?
+        (eligible.length + ' eligible · ' + invalid.length + ' invalid · no import performed') :
+        'Legacy source not configured; no import performed';
       $('migration-apply').disabled = true;
     } catch (error) { notice(errorText(error), true); }
   });
   $('migration-choice').addEventListener('change', () => { $('migration-apply').disabled = !$('migration-choice').value; });
   $('migration-apply').addEventListener('click', async () => {
     const id = $('migration-choice').value; if (!id) return;
+    if (!confirm('Import only voice ' + id + ' from the trusted server-configured legacy source?')) return;
     const button = $('migration-apply'); busy(button, true);
     try {
       const result = await json('/lite/migration/apply', jsonOptions('POST', {voice_id: id}));
-      $('migration-feedback').textContent = 'Migration applied · ' + asText(result.migrated) + ' profile(s)';
-      await loadVoices(); notice('Legacy voice imported.');
+      $('migration-feedback').textContent = result.migrated ? 'Imported ' + id :
+        (result.skipped ? 'Already imported: ' + id : 'No profile imported');
+      await loadVoices();
+      if (result.migrated || result.skipped) { setVoice(id); notice('Legacy voice selected.'); }
+      else notice('No new profile imported.', true);
     } catch (error) { notice(errorText(error), true); } finally { $('migration-choice').value = ''; button.disabled = true; }
   });
   $('tts-pause-preset').addEventListener('change', () => {
