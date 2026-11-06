@@ -298,6 +298,7 @@ def test_library_crud_reference_and_migration(live):
             "The new recording's exact words")
         page.locator("#migration-preview").click()
         expect(page.locator("#migration-feedback")).not_to_be_empty()
+        page.on("dialog", lambda dialog: dialog.accept())
         page.locator("#delete-only").click()
         expect(page.locator("#library-empty")).to_be_visible(timeout=12000)
         browser.close()
