@@ -420,10 +420,11 @@
     generationEpoch++; clearOutput(); $('tts-cancel').disabled = true; generationState('Cancelling…');
     try {
       const result = await json('/lite/worker/cancel', jsonOptions('POST', cancel));
-      if (activeCancel === cancel && result.cancelled && result.request_id === cancel.request_id) {
+      if (activeCancel !== cancel) return;
+      if (result.cancelled && result.request_id === cancel.request_id) {
         cancel.acknowledged = true; generationState('Cancelled (cleanup pending)'); notice('Request-owned cancellation acknowledged; no WAV will be published.');
       } else { generationState('Unknown'); notice('Cancellation not confirmed by worker.', true); }
-    } catch (error) { generationState('Unknown'); notice('Cancellation could not be confirmed: ' + errorText(error), true); }
+    } catch (error) { if (activeCancel === cancel) { generationState('Unknown'); notice('Cancellation could not be confirmed: ' + errorText(error), true); } }
   });
   async function refreshRuntime() {
     const sequence = ++runtimeSequence, button = $('runtime-refresh');
