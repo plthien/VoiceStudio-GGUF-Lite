@@ -2,8 +2,14 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
+# This program is the explicit installer download boundary.  huggingface_hub
+# reads its offline flag while importing, so clear stale VerifyOnly/runtime
+# settings before that import as defense in depth for direct invocation too.
+os.environ["HF_HUB_OFFLINE"] = "0"
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
 from huggingface_hub import snapshot_download
 
 SOURCE = "ab55923c27757c90cfcc407baa57dc25a7d25217"
@@ -43,7 +49,7 @@ def run(root):
                         "model_id":"chatterbox-nano","repo_id":REPO,
                         "loader_mode":"nano=True","revision":REV,
                         "source_revision":SOURCE,"sha256":files},sort_keys=True,indent=2).encode()
-    import os,tempfile
+    import tempfile
     fd,temp=tempfile.mkstemp(prefix=".manifest-",dir=target)
     try:
         with os.fdopen(fd,"wb") as f:

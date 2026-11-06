@@ -24,6 +24,7 @@ if ($path -ne 'D:\VoiceStudioBuild\chatterbox-nano') {throw 'NANO_D_DRIVE_ROOT_R
 $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'internal\chatterbox-sha256.ps1')
 . (Join-Path $PSScriptRoot 'internal\chatterbox-verify-model.ps1')
+. (Join-Path $PSScriptRoot 'internal\chatterbox-environment.ps1')
 $model=Join-Path $path ('models\'+$ModelSha)
 $cache=Join-Path $path 'cache'
 $venv=Join-Path $path '.venv-chatterbox'
@@ -72,8 +73,9 @@ if($LASTEXITCODE -ne 0) {throw 'PINNED_CHATTERBOX_FAILED'}
 & $py (Join-Path $repo 'scripts\internal\chatterbox-dependency-inventory.py') --output (Join-Path $path 'private-dependency-inventory.json')
 if ($LASTEXITCODE -ne 0) {throw 'DEPENDENCY_INVENTORY_FAILED'}
 if (!$SkipDownload) {
-  & $py (Join-Path $repo 'scripts\internal\download-chatterbox-model.py') --root $path
-  if ($LASTEXITCODE -ne 0) {throw 'PINNED_MODEL_DOWNLOAD_FAILED'}
+  Invoke-ChatterboxOnlineCommand -FailureCode 'PINNED_MODEL_DOWNLOAD_FAILED' -Command {
+    & $py (Join-Path $repo 'scripts\internal\download-chatterbox-model.py') --root $path
+  }
 }
 Verify-Files
 $env:PYTHONPATH=$repo
