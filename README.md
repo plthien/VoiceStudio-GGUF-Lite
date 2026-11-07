@@ -1,5 +1,7 @@
 # VoiceStudio GGUF Lite
 
+PR #2 adds the stacked Nano-only application documented in [docs/chatterbox-nano.md](docs/chatterbox-nano.md). Its installed runtime is isolated at `D:\VoiceStudioBuild\chatterbox-nano`, serves `127.0.0.1:3901`, and does not launch or import the inherited GGUF runtime.
+
 Independent localhost-only FastAPI service for pinned Q8_0 OmniVoice on Windows 10 NVIDIA GTX 1650 Vulkan0. Includes a bundled local-only vanilla JavaScript Web UI at `http://127.0.0.1:3900/ui`. No Electron, React/Bun, Torch, other TTS engines, ASR or cloud.
 
 Install: `scripts/install-gguf-lite.ps1`; pinned native Vulkan-only build: `scripts/build-gguf-lite-vulkan.ps1`; preflight: `scripts/run-gguf-lite.ps1 -Preflight`; launch: `scripts/run-gguf-lite.ps1`.

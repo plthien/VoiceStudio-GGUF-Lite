@@ -12,7 +12,20 @@ from pathlib import Path
 from threading import RLock
 
 from .audio import AudioError, convert_reference
-from .config import Settings, require_owned_path
+from .chatterbox_config import ffmpeg_path
+from typing import TYPE_CHECKING, Any
+if TYPE_CHECKING:
+    from .config import Settings
+else:
+    Settings = Any
+
+
+def require_owned_path(path: Path, root: Path) -> Path:
+    resolved = path.resolve(strict=True)
+    owned = root.resolve(strict=True)
+    if path.is_symlink() or not resolved.is_relative_to(owned) or not resolved.is_file():
+        raise ValueError("Reference is outside owned voice store")
+    return resolved
 
 class ProfileError(ValueError):
     pass
@@ -56,7 +69,7 @@ class Store:
 
     def import_audio(self, *, name: str, ref_text: str, language: str,
                      source: bytes, suffix: str, profile_id: str | None = None,
-                     consent: str | None = None) -> dict:
+                     consent: str | None = None, create_with_id: bool = False) -> dict:
         if not name.strip() or len(name) > 128 or not ref_text.strip() or len(ref_text) > 4096:
             raise ProfileError("Name and explicit reference transcript are required")
         if suffix.lower() not in (".wav", ".mp3"):
@@ -69,7 +82,7 @@ class Store:
             raise ProfileError("Unsafe voice identifier")
         with self.lock:
             existing = self.get(profile_id) if profile_id else None
-            if profile_id is not None and existing is None:
+            if profile_id is not None and existing is None and not create_with_id:
                 raise KeyError(profile_id)
             identity = profile_id or str(uuid.uuid4())
             version = (existing["version"] + 1) if existing else 1
@@ -80,8 +93,7 @@ class Store:
             normalized = target_dir / "reference.wav"
             try:
                 source_file.write_bytes(source)
-                import shutil as _shutil
-                ffmpeg = _shutil.which("ffmpeg")
+                ffmpeg = ffmpeg_path()
                 if not ffmpeg:
                     raise ProfileError("FFmpeg unavailable")
                 convert_reference(source_file, normalized, ffmpeg=ffmpeg,
@@ -114,10 +126,18 @@ class Store:
                (k != "consent" and not v.strip()) for k, v in updates.items()):
             raise ProfileError("Invalid profile fields")
         with self.lock, self.connect() as db:
-            if not db.execute("SELECT 1 FROM profiles WHERE id=?", (profile_id,)).fetchone():
+            current = db.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
+            if not current:
                 raise KeyError(profile_id)
+            # Transcript/language/consent belong to the immutable acoustic and
+            # rights identity.  Never rewrite them under an existing version.
+            identity_changed = any(
+                key in updates and updates[key] != current[key]
+                for key in ("ref_text", "language", "consent")
+            )
             columns = ", ".join(f"{key}=?" for key in updates)
-            db.execute(f"UPDATE profiles SET {columns}, updated=? WHERE id=?",
+            version_sql = ", version=version+1" if identity_changed else ""
+            db.execute(f"UPDATE profiles SET {columns}{version_sql}, updated=? WHERE id=?",
                        [*updates.values(), time.time(), profile_id])
         return self.get(profile_id)
 

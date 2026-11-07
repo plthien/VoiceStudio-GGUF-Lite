@@ -1,0 +1,196 @@
+# Archived Chatterbox Turbo experiment (PR #2)
+
+> Historical audit material only. The active PR #2 product is Nano-only; see `docs/chatterbox-nano.md`. Deprecated `*-chatterbox-turbo.ps1` filenames are wrappers that invoke Nano and cannot select Turbo.
+
+## Source, rights and environment
+
+The containing VoiceStudio-GGUF-Lite application preserves its inherited **AGPL-3.0** licence. The separate Resemble AI Chatterbox Turbo model and upstream source are **MIT** (source commit `5de7a54aa4e5e2baadb0182dde554908b48b85c2`; model snapshot `74971fa28ff1cdf9a2cf4b41d102cb31fd32d411`). Do not treat this application as MIT. This PoC does not import the OmniVoice GGUF licence acceptance/provenance rules. Voice cloning requires permission and explicit confirmation for each import or replacement. Do not upload or commit private reference recordings, transcripts, WAVs, or voice IDs. Model inference is localhost-only. This experiment does not qualify as a production or YouTube Studio provider until owner H gates pass.
+
+Dependency sources: standalone FastAPI/uvicorn/pydantic, PyTorch CUDA 2.6.0/torchaudio 2.6.0, Resemble Chatterbox source, pinned Resemble Perth source, FFmpeg, s3tokenizer, transformers, diffusers, conformer, librosa, safetensors and tokenizer dependencies. See `requirements-chatterbox.txt`, source and install scripts; the actual resolved transitive versions are frozen to `private-dependency-lock.txt` on the owner's D: drive after installation, never committed. Wheel compatibility and actual model load are **OWNER TEST PENDING**.
+
+Model files downloaded explicitly: `t3_turbo_v1.safetensors`, `s3gen_meanflow.safetensors`, `ve.safetensors`, `added_tokens.json`, `merges.txt`, `vocab.json`, `special_tokens_map.json`, `tokenizer_config.json`. No `s3gen.safetensors`, no `conds.pt`, and no remote inference/trust_remote_code. Every downloaded file is hashed into a private manifest, with independently expected SHA256 for the two large weights. Worker load revalidates the complete local set. No GitHub Actions downloads weights or PyTorch.
+
+## Owner installation (Windows 10 / GTX 1650 4 GiB)
+
+```powershell
+cd D:\VoiceStudio
+git switch feat/chatterbox-turbo-provider
+# Stop GGUF Lite / unload its persistent Vulkan0 worker before CUDA load.
+.\scripts\install-chatterbox-turbo.ps1 -Root 'D:\VoiceStudioBuild\chatterbox-turbo'
+.\scripts\install-chatterbox-turbo.ps1 -VerifyOnly
+.\scripts\run-chatterbox-turbo.ps1 -Root 'D:\VoiceStudioBuild\chatterbox-turbo' -Port 3901
+```
+
+Visit `http://127.0.0.1:3901/ui` and import an authorized reference longer than five seconds (recommended 6–15 seconds). Store data lives in `D:\VoiceStudioBuild\chatterbox-turbo\data`, not in GGUF Lite data or a legacy OmniVoice database. Only the dedicated `.venv-chatterbox` imports Torch; no background CUDA model loads for health/readiness/status calls. Stop the service when leaving the PoC; the worker is reaped on cancellation or service shutdown.
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:3901/chatterbox/readiness | ConvertTo-Json -Depth 5
+Invoke-RestMethod http://127.0.0.1:3901/chatterbox/runtime/status | ConvertTo-Json -Depth 5
+.\scripts\benchmark-chatterbox-turbo.ps1 -VoiceId '<OWNED_VOICE_ID>' -Mode Smoke
+.\scripts\benchmark-chatterbox-turbo.ps1 -VoiceId '<OWNED_VOICE_ID>' -Mode ColdWarm
+.\scripts\benchmark-chatterbox-turbo.ps1 -VoiceId '<OWNED_VOICE_ID>' -Mode Pause
+.\scripts\benchmark-chatterbox-turbo.ps1 -VoiceId '<OWNED_VOICE_ID>' -Mode LongForm -Manifest 'D:\private\narration-sections.json'
+```
+
+The last command needs a private JSON manifest such as:
+
+```json
+{"voice":"YOUR_VOICE_ID","sections":[
+  {"id":"sec_001","input":"Narration one. [pause 250ms] More text.","speed":1.0,"seed":42},
+  {"id":"sec_002","input":"Narration two.","speed":1.0,"seed":43}
+]}
+```
+
+Sections must stay within 4,096 chars, 16 markers and 60 seconds of pause per request. **Single speech requests remain capped at 600 seconds**, while the **assembled long-form WAV has a distinct 900-second (15-minute) maximum**, with canonical 24 kHz mono PCM16 validation, frame/byte bounds and atomic publication. Any final output exceeding 900 seconds fails without a successful final WAV or summary. The long-form CLI writes each section, SHA and sanitized resume manifest atomically, then final WAV only after all sections pass. It refuses automatic retry of an uncertain request; re-execution requires explicit `--resume --retry-uncertain` through `python -m lite.chatterbox_assembly`, and never reuses mismatched source hash, voice version, model revision, or output WAV digest.
+
+Speed `0.75–1.25` is **postprocess_atempo** on speech spans, not Chatterbox native inference speed. Silence markers are inserted as exact 24k zero frames afterwards. Token `[laugh]` is passed through to Chatterbox unmodified. WPM is measured from final output duration; automatic verification of English transcript coverage is **not** performed by tests. CUDA determinism across different drivers is not promised.
+
+## Metrics and GO/NO-GO
+
+Each fresh `LongForm` or `All` benchmark creates a new private `benchmarks/runs/<UTC-and-random-run-id>/` directory with its own WAVs, `longform/final.wav`, `sections.json`, `owner-metrics.json` and `owner-metrics.csv`. The validated input is frozen once into `frozen-manifest.private.json` inside the run directory before any HTTP synthesis/unload; reports include only its SHA256 digest, so later edits to the owner's original file cannot change the current run. Every `Smoke`, `ColdWarm` and `Pause` run is also archived independently; top-level `owner-metrics.json` and `.csv` are atomic **latest-run** summaries. Two fresh LongForm runs always unload before measuring, never silently resume the first run or overwrite its files. The `run_id` and relative `run_directory` in the reports identify archives. No raw private voice identifiers, transcripts or reference checksums are printed in public benchmark logs. The benchmark reports `owner-metrics.json` and `owner-metrics.csv` even on failures. Inspect model load, VRAM/peak, cold/warm wall, pause sample counts, voice likeness, intonation and sentence coverage by listening. The actual SLA is **600 seconds of final narration in <= 1,800 seconds wall, final RTF <= 3**, including cold model load, reference conditioning, all section requests, atempo, pauses and assembly; run twice including cold. Repeated warm success alone is not a pass.
+
+H01–H08 (GTX1650 VRAM/inference, cloning quality, A→B→A, ten sections, pauses, speed quality, 600s SLA and release of VRAM after idle unload) are **OWNER TEST PENDING** until measured. If official CUDA fails with `CUDA_OOM`, do not auto-fallback to CPU or label it CUDA0 success. CPU diagnosis, future ONNX/native runtime comparison are separately approved experiments, not active production engines. Stop rather than replacing Turbo with another model without owner consent.
+
+## CI without GPU
+
+```powershell
+python -m pip install -r requirements-lite-dev.txt -r requirements-lite-ui-test.txt
+python -m playwright install chromium
+python -m pytest tests/chatterbox -vv -ra --timeout=35
+python -m pytest tests/lite -vv -ra --timeout=35
+```
+
+Both Windows and Ubuntu exercise fake workers, FastAPI and browser workflows without downloading the CUDA runtime. These results do **not** substantiate real acoustics, RTF, torch CUDA installation, or 4 GiB compatibility. Revert PR #2 branch to roll back this PoC; no files or API on GGUF Lite port 3900 need changing.
+
+## Explicit CPU-only fallback diagnosis (not a backend switch)
+
+If and only if owner CUDA tests fail (including CUDA_OOM), an optional CLI can compare this **same pinned Turbo** model on CPU. It does not automatically run, cannot satisfy H01/H07, does not expose an HTTP CPU fallback, and requires adequate system RAM.
+
+```powershell
+# With original :3901 service stopped, explicit user opt-in:
+$env:CHATTERBOX_ROOT='D:\VoiceStudioBuild\chatterbox-turbo'
+$env:PYTHONPATH=(Get-Location).Path
+& 'D:\VoiceStudioBuild\chatterbox-turbo\.venv-chatterbox\Scripts\python.exe' -m lite.chatterbox_cpu_diagnostic --voice-id '<OWNED_VOICE_ID>' --text-file 'D:\private\short-english-input.txt' --output 'D:\VoiceStudioBuild\chatterbox-turbo\benchmarks\cpu-diagnostic.wav'
+```
+
+Output metrics explicitly label `CPU_DIAGNOSTIC_ONLY`, never `CUDA0`. GPU inference requires owner verification; a future optimized Turbo runtime (such as ONNX/native) needs its own evidence and approved follow-up, and is not shipped here. CUDA/no-CUDA mode must not silently change model identity, voice profile or speed/pause contract.
+
+Installer notes: Resemble Perth is installed from pinned commit `ff1c8ac55a976971245cdd53c18d6131ca00d993` with `--no-deps`, and its runtime dependencies (PyYAML, pydub, soundfile, torch/torchaudio, librosa, numpy) are provided explicitly in the isolated environment. Inspect `private-dependency-lock.txt` generated on D:; a successful CI mock run does not verify every Windows CUDA binary wheel.
+
+## Installer evidence and GPU memory
+
+The isolated installer also writes a local `private-dependency-inventory.json` (package name, installed version, publisher-supplied license metadata and classifiers) under D:. The inventory preserves missing/unknown license information without guessing; inspect the exact wheel/FFmpeg build licenses on the owner host before redistribution. This local evidence file is **not committed**.
+
+Use the explicit diagnostics before the first CUDA test:
+
+```powershell
+$env:CHATTERBOX_ROOT = 'D:\VoiceStudioBuild\chatterbox-turbo'
+$env:PYTHONPATH = (Get-Location).Path
+& 'D:\VoiceStudioBuild\chatterbox-turbo\.venv-chatterbox\Scripts\python.exe' -m lite.chatterbox_config --verify --cuda-probe
+Invoke-RestMethod http://127.0.0.1:3900/lite/worker/status | ConvertTo-Json -Depth 4
+```
+
+For a safe cold load, PR #1 should show `resident=false` and `busy=false` (or be completely stopped). Turbo checks PR #1 at port 3900 before CUDA model load and refuses if it observes a resident/busy worker or an untrusted response; a connection-refused port is treated as PR #1 stopped. This one-way check cannot stop a separately started PR #1 after Turbo has loaded; do not run both simultaneously. Shut down the other service or explicitly unload its worker first.
+
+Owner metrics include CUDA allocated/reserved/free byte counts when provided by the real worker. The worker resets CUDA max-allocation counters at the serial **generation** boundary. `X-TTS-CUDA-Peak-Bytes` is therefore per generation for one speech segment; a request with several speech segments reports their maximum with `X-TTS-CUDA-Peak-Scope=max_generation_in_request`. `X-TTS-CUDA-Lifetime-Peak-Bytes` captures the process high-water observed across model loading, conditioning and generations. Per-section and benchmark JSON/CSV preserve peak scope and lifetime peak separately. Unknown values remain `NOT_MEASURED`/absent, never zero. CI fake-worker values are synthetic and **not** GTX 1650 evidence.
+
+The `-Mode LongForm` benchmark **forces a Turbo worker unload before starting its clock**, even if earlier Smoke/Pause/ColdWarm modes warmed the model. If unload fails, the run records `COLD_UNLOAD_FAILED` instead of silently measuring warm inference. The first section's model load is therefore included in the measured end-to-end elapsed time.
+
+**Qualification vs synthesis:** `generation_state=PASS` reports a fully verified output, independently of whether it qualifies for the 10-minute H07 workload. `h07_status=NOT_VERIFIED` and `h07_reason=AUDIO_UNDER_600_SECONDS` mean a short operational smoke test generated successfully but do not qualify; LongForm/All will return a nonzero exit code. `h07_status=FAIL` means a cold-inclusive run with at least 600 seconds final audio exceeded 1,800 seconds elapsed or end-to-end RTF 3.0. Only `h07_status=PASS` meets these **measurement-only** thresholds; human review of voice quality/transcript completeness and all other owner H gates are still mandatory. Check `owner-metrics.json` and `owner-metrics.csv` on failure, not only on success. Benchmark `--voice-id` must match the LongForm manifest `voice` exactly, or the tool fails with `BENCHMARK_VOICE_MISMATCH` before contacting the runtime.
+
+LongForm output and the benchmark folder are protected by separate kernel-owned exclusive locks to prevent concurrent writers, resume overwrites or parallel benchmark GPU unloads. `OUTPUT_JOB_BUSY` means another process owns the directory: allow that run to finish; do **not** delete the lock path manually. Resume requires identical ordered section membership and content, voice version, speed, seed, model revision, and a private opaque binding derived from both normalized-reference SHA256 and original-source SHA256. The CLI re-checks that binding before/after sections, during resume, and before final publication; a changed reference/source fails closed rather than silently mixing recordings. The private resume manifest holds only the digest binding, never the raw reference/source checksums. A changed manifest requires a different output directory.
+
+## Offline verification semantics
+
+`python -m lite.chatterbox_config --verify` exits **nonzero** if the model manifest, pinned hash, isolated Python environment or required FFmpeg preflight fails. A valid offline hash check returns exit 0 but does not imply that a CUDA worker has loaded: `installation_preflight_ready` and live `ready` are separate states. `--cuda-probe` is an explicit owner-side action and returns a failing exit code if unavailable. Windows `-VerifyOnly` requires both pinned files and offline prerequisites; it does not download/install weights. The PowerShell SHA256 implementation is in `scripts/internal/chatterbox-sha256.ps1` and uses .NET SHA256 without relying on module autoload. Never interpret synthetic CI manifest hash tests as verification of the two immutable official model weight pins.
+
+
+## V3 — Resume integrity and committed final publication
+
+**Read-only local reference attestation.** The endpoint
+`POST http://127.0.0.1:3901/profiles/{voice_id}/integrity/verify`
+requires an owned, consented English profile and checks the **actual normalized
+reference WAV bytes** through the existing SQLite-backed `Store.reference`
+path-containment and SHA256 validation. It returns
+`{"verified":true,"binding":"<opaque private digest>"}` only when the
+current profile snapshot remains unchanged under profile admission. Missing
+profile: 404 `PROFILE_NOT_FOUND`; missing, modified, symlink-escaped or
+invalid reference: 409 `REFERENCE_CHANGED`; concurrent mutation or worker
+busy: 503 `REFERENCE_VERIFICATION_BUSY`; unsafe recovery state: 503
+`SERVICE_RECOVERY_REQUIRED`. Errors reveal neither reference paths, content,
+transcripts nor raw hashes. This endpoint neither downloads the reference to
+the CLI nor imports/loads Torch or CUDA.
+
+The LongForm CLI requires this server attestation *as well as* the version,
+original-source checksum, normalized-reference checksum and model revision
+binding, before accepting an existing section SKIP, beginning a new section,
+after synthesis and before reusing or publishing any final WAV. A fully PASS
+`--resume` still verifies real reference bytes. An unavailable attestation
+fails closed (`REFERENCE_CHANGED`), with zero automatic synthesis replay.
+
+**Final output authority.** The private `final-commit.json` is a single
+atomically replaced receipt containing the frozen job key and SHA256s for
+immutable per-version files in `.chatterbox-final-versions/<id>/`. The
+owner-facing `final.wav` and `summary.json` are two **projections**, not a
+jointly atomic pair. New version WAV and summary are written and fsynced
+before changing projections; only after both projections agree is the new
+receipt published. If an intermediate write fails, restore the old projections
+from the previous committed version; if restoration itself fails, return typed
+`FINAL_PUBLICATION_RECOVERY_REQUIRED` and keep the immutable old snapshot
+and receipt for recovery. A process killed between two projection replacements
+must be recovered from the last committed receipt on restart. A finished clean
+`--resume` returns the same summary without rewriting a correct final pair
+or resynthesizing a section.
+
+Older `chatterbox-job-v1` resumes remain readable **without migration**.
+They lack a receipt and may be treated as previously complete only when
+all section checksums/order and the independently reassembled final PCM
+exactly agree with the old final WAV and summary; a pair of editable files
+whose SHA fields happen to agree is never independently authoritative.
+Interrupted new `chatterbox-job-v2` jobs require a proper committed receipt
+before claiming completion. The output job OS-lock still serializes writers.
+The file-storage transaction is crash-recoverable at receipt boundaries, not
+a claim that two `os.replace` operations are a single atomic OS operation.
+An uncoordinated out-of-band filesystem mutation can race any HTTP check,
+so the CLI reattests at each trustworthy boundary and stops on mismatch.
+
+No protocol or changes to the GGUF port 3900 are required. Real owner
+GTX 1650 CUDA, acoustic quality and 600s/1800s throughput H01–H08 remain
+`OWNER TEST PENDING`.
+
+
+## Windows GGUF probe: delayed TCP refusal vs indeterminate status
+
+Before a cold Turbo CUDA worker load, the local read-only interlock checks
+`GET http://127.0.0.1:3900/lite/worker/status`. Windows 10 may delay
+a definitive WinError 10061/ConnectionRefusedError by approximately 2 seconds
+despite no listener on 3900. The Chatterbox service therefore applies a
+**4.5-second HTTP socket timeout** and an independent **5.5-second maximum
+coroutine deadline**, each additionally bounded by the remaining overall
+generation deadline. The coroutine deadline includes local scheduling,
+HTTP body read and JSON verification. These are separate limits, not a
+nonterminating retry loop or a new background probe.
+
+Only a definite TCP *connection refused* means "no GGUF listener", allowing
+the rest of the **existing** CUDA cold-load preflight to proceed. A valid
+HTTP 200 response must contain literal JSON booleans for both `resident`
+and `busy`; either `true` prevents Turbo CUDA with
+`GGUF_WORKER_RESIDENT`. Connect/read timeout, HTTP 500, incomplete/malformed
+status, connection reset, cancelled/expired probe or an unrelated socket
+error **never** means the GPU is free. The service fails closed with
+`GGUF_PROBE_UNAVAILABLE` or, if the overall generation clock expired,
+`DEADLINE_EXCEEDED`. Client cancellation propagates; a cancelled
+read-only thread can finish after the caller exits, but cannot start CUDA,
+change GGUF state or bypass the serial-worker isolation guard.
+
+For owner diagnostics, inspect the listener on Windows with:
+
+```powershell
+Get-NetTCPConnection -LocalPort 3900 -State Listen -ErrorAction SilentlyContinue
+```
+
+No matching listener should ultimately yield connection refusal, even if
+the refusal is delayed. A **timeout is not proof of no listener**; inspect
+the local networking, loopback firewall or stalled GGUF service before
+retrying. Never bypass this interlock to force GPU inference or activate
+CPU fallback. Real performance/VRAM gates H01–H08 remain owner tests.

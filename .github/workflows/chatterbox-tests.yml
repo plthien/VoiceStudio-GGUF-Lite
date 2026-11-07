@@ -1,0 +1,87 @@
+name: Chatterbox Nano mock CI
+on:
+  pull_request:
+    paths:
+      - 'lite/chatterbox*'
+      - 'scripts/*chatterbox*'
+      - 'scripts/internal/download-chatterbox-model.py'
+      - 'scripts/internal/chatterbox-sha256.ps1'
+      - 'scripts/internal/chatterbox-verify-model.ps1'
+      - 'tests/chatterbox/**'
+      - 'requirements-chatterbox.txt'
+      - 'docs/chatterbox-turbo-pr2.md'
+      - 'docs/chatterbox-nano.md'
+      - 'docs/integrations/youtube-studio-nano-api-v1.md'
+      - 'docs/integrations/pr26-nano-reconciliation.md'
+      - 'tests/fixtures/nano_api_v1/**'
+      - '.github/workflows/chatterbox-tests.yml'
+  workflow_dispatch:
+jobs:
+  mock:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    env:
+      CHATTERBOX_ALLOW_TEST_ROOT: '1'
+      CHATTERBOX_ROOT: ${{ github.workspace }}/.nano-test-root
+      NANO_VISUAL_EVIDENCE_DIR: ${{ github.workspace }}/nano-visual-evidence
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Mock-only dependencies (never download weights or Torch)
+        run: python -m pip install -r requirements-lite-dev.txt -r requirements-lite-ui-test.txt
+      - name: Playwright Chromium
+        run: python -m playwright install chromium
+      - name: FFmpeg Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: FFmpeg Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
+      - name: Compile
+        run: python -m compileall -q lite tests/chatterbox scripts/internal/download-chatterbox-model.py
+      - name: Nano UI JavaScript parse check
+        run: node --check lite/chatterbox_ui/app.js
+      - name: Chatterbox mock tests
+        run: python -m pytest tests/chatterbox -vv -ra --timeout=35
+      - name: Upload synthetic Nano vs Lite screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nano-lite-visual-${{ matrix.os }}
+          path: nano-visual-evidence/**
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Original Lite regression
+        run: python -m pytest tests/lite -vv -ra --timeout=35
+      - name: PowerShell 7 parser and VerifyOnly negative behavior
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $err=@()
+          Get-ChildItem scripts -Recurse -File -Filter '*chatterbox*.ps1' | ForEach-Object {
+            $tok=$null;$parseErrors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tok,[ref]$parseErrors) | Out-Null
+            if($parseErrors){$err+=$parseErrors}
+          }
+          if($err.Count){throw ($err|Out-String)}
+          try { & .\scripts\install-chatterbox-nano.ps1 -VerifyOnly; throw 'EXPECTED_VERIFY_FAILURE' }
+          catch { if($_.Exception.Message -notmatch 'MODEL_MANIFEST_INVALID'){ throw } }
+      - name: Windows PowerShell 5.1 parser and VerifyOnly negative behavior
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $err=@()
+          Get-ChildItem scripts -Recurse -File -Filter '*chatterbox*.ps1' | ForEach-Object {
+            $tok=$null;$parseErrors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tok,[ref]$parseErrors) | Out-Null
+            if($parseErrors){$err+=$parseErrors}
+          }
+          if($err.Count){throw ($err|Out-String)}
+          try { & .\scripts\install-chatterbox-nano.ps1 -VerifyOnly; throw 'EXPECTED_VERIFY_FAILURE' }
+          catch { if($_.Exception.Message -notmatch 'MODEL_MANIFEST_INVALID'){ throw } }
