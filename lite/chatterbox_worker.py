@@ -36,6 +36,46 @@ def pcm_wav(audio) -> bytes:
     return out.getvalue()
 
 
+
+_TRUNCATION_STOPS = frozenset({
+    "length", "max_length", "max_tokens", "max_new_tokens",
+    "token_limit", "token_limit_reached", "truncated", "out_of_tokens",
+})
+_COMPLETION_STOPS = frozenset({"eos", "eos_token", "end_of_sequence", "stop", "completed", "complete"})
+
+
+def checked_generated_audio(output):
+    """Reject explicit incomplete native outputs before WAV conversion/publication.
+
+    The pinned Nano runtime normally returns a bare waveform tensor, which
+    provides no token-exhaustion evidence. Do not infer completion from length.
+    Structured future/native return values must fail closed on stop metadata.
+    """
+    if isinstance(output, dict):
+        metadata, audio = output, output.get("audio")
+    elif isinstance(output, tuple) and len(output) == 2 and isinstance(output[1], dict):
+        audio, metadata = output
+    else:
+        audio = output
+        metadata = {key: getattr(output, key, None) for key in (
+            "finish_reason", "stop_reason", "completion_reason", "truncated",
+            "is_truncated", "token_limit_reached", "failed", "success", "error")}
+    reason = next((metadata[key] for key in (
+        "finish_reason", "stop_reason", "completion_reason")
+        if metadata.get(key) is not None), None)
+    if (any(metadata.get(key) is True for key in (
+            "truncated", "is_truncated", "token_limit_reached"))
+            or (isinstance(reason, str) and reason.lower() in _TRUNCATION_STOPS)):
+        raise RuntimeError("NANO_GENERATION_TRUNCATED")
+    if (metadata.get("failed") is True or metadata.get("success") is False
+            or metadata.get("error")
+            or (reason is not None and (
+                not isinstance(reason, str) or reason.lower() not in _COMPLETION_STOPS))
+            or (isinstance(output, (tuple, dict)) and audio is None)):
+        raise RuntimeError("NANO_GENERATION_FAILED")
+    return audio
+
+
 class Engine:
     def __init__(self):
         self.model = None
@@ -155,7 +195,7 @@ class Engine:
                 reset_peak()
             with self.torch.inference_mode():
                 with open(os.devnull, "w") as output, contextlib.redirect_stdout(output):
-                    generated = self.model.generate(request["text"])
+                    generated = checked_generated_audio(self.model.generate(request["text"]))
             self.syntheses += 1
             free_bytes, _ = self.torch.cuda.mem_get_info()
             memory = {
@@ -175,7 +215,8 @@ class Engine:
                     "model_id": "chatterbox-nano", "backend": "CUDA0",
                     "model_revision": MODEL_REVISION,
                     "device": self.device, "memory": memory, "cache_hits": self.hits,
-                    "loads": self.loads, "syntheses": self.syntheses}
+                    "loads": self.loads, "syntheses": self.syntheses,
+                    "generation_complete": True}
         except self.torch.cuda.OutOfMemoryError as exc:
             raise RuntimeError("CUDA_OOM") from exc
 
@@ -220,7 +261,8 @@ def run():
                 "MODEL_MANIFEST_UNAVAILABLE", "REFERENCE_UNTRUSTED", "REFERENCE_CHANGED",
                 "MODEL_MANIFEST_INVALID", "MODEL_IDENTITY_CHANGED",
                 "REFERENCE_INVALID", "REFERENCE_TOO_SHORT", "EMPTY_AUDIO",
-                "MODEL_UNLOADED", "UNKNOWN_COMMAND", "MODEL_LOAD_FAILED", "NONFINITE_AUDIO"} else "WORKER_FAILURE"
+                "MODEL_UNLOADED", "UNKNOWN_COMMAND", "MODEL_LOAD_FAILED", "NONFINITE_AUDIO",
+                "NANO_GENERATION_TRUNCATED", "NANO_GENERATION_FAILED"} else "WORKER_FAILURE"
             try:
                 write_sync({"ok": False, "error": code})
             except BaseException:

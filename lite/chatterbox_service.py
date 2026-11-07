@@ -344,6 +344,16 @@ class TurboService:
                             "reference": str(reference), "reference_sha": profile["ref_sha256"],
                             "text": segment.text, "seed": segment.seed,
                         }, deadline)
+                        # Reject explicit incomplete native output before WAV assembly.
+                        if (answer.get("generation_complete") is False
+                                or answer.get("truncated") is True
+                                or answer.get("finish_reason") in (
+                                    "length", "max_length", "max_tokens", "max_new_tokens",
+                                    "token_limit", "truncated")):
+                            raise TurboError("NANO_GENERATION_TRUNCATED")
+                        if (answer.get("generation_complete") not in (None, True)
+                                or answer.get("failed") is True or answer.get("error")):
+                            raise TurboError("NANO_GENERATION_FAILED")
                         if (answer.get("model_id") != "chatterbox-nano"
                                 or answer.get("backend") != "CUDA0"
                                 or answer.get("model_revision") != MODEL_REVISION):
