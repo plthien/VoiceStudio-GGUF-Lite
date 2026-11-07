@@ -10,7 +10,7 @@ HARD_CHARS = 600
 POLICY_VERSION = "nano_sentence_v2"
 _BOUNDARY = re.compile(r"(?<=[.!?\u3002\uff01\uff1f])(?:[\"'\u2019\u201d\)\]]*)\s+")
 _ABBREVIATION = re.compile(r"(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc)|(?:\b[A-Z]\.){1,4})\.$", re.I)
-_FALLBACK = re.compile(r"[,;:\u2014\u2013]\s*|\s+")
+_FALLBACK = re.compile(r"[.,;:!?\u3002\uff01\uff1f\u2014\u2013]\s*|\s+")
 _TAG = re.compile(r"\[[^\]\r\n]{1,64}\]")
 SUPPORTED_TAGS = frozenset({"[chuckle]"})
 

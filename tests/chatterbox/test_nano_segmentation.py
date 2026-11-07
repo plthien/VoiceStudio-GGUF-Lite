@@ -88,3 +88,10 @@ def test_defensive_fail_closed_guards_and_empty_generator(monkeypatch):
     monkeypatch.setattr(mod, "_bounded_sentences", lambda *args: iter(()))
     with pytest.raises(RuntimeError, match="SEGMENTATION_INTEGRITY_FAILURE"):
         mod.segment_text("valid", 1)
+
+def test_punctuation_without_whitespace_is_soft_boundary():
+    text = "A" * 518 + "." + "B" * 100
+    pieces = segment_text(text, 1)
+    assert pieces[0].text.endswith(".")
+    assert "".join(p.text for p in pieces) == text
+
