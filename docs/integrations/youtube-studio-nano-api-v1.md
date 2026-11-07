@@ -17,7 +17,10 @@ SHA-256 of UTF-8 JSON for that map using sorted keys and separators `,` and
 There is no `loader_revision`, scalar weights hash, Vulkan or native-speed
 claim.
 
-Native segmentation is `nano_sentence_v1`, target 240/hard 300 characters.
+Native segmentation is `nano_sentence_v2`, target 520/hard 600 characters.
+The target is soft: full sentences may run to the hard cap. Longer unbroken spans
+are split deterministically; punctuation and whitespace are preferred. Token-limit
+or truncated signals fail closed rather than publishing incomplete WAVs.
 The API input maximum is 4096 and is segmented before worker admission.
 `definite_429_nonadmission=true` means the atomic admission gate did not queue
 or run the rejected request.

@@ -42,9 +42,9 @@ def test_capability_v1_is_truthful_and_manifest_digest_tamper_sensitive(api):
     assert capability["weights_sha256"] == MODEL_HASHES
     assert capability["weights_manifest_sha256"] == weights_manifest_sha256()
     assert capability["loader_mode"] == "nano=True"
-    assert capability["segmentation_policy"] == "nano_sentence_v1"
-    assert capability["native_segment_target_chars"] == 240
-    assert capability["native_segment_hard_chars"] == 300
+    assert capability["segmentation_policy"] == "nano_sentence_v2"
+    assert capability["native_segment_target_chars"] == 520
+    assert capability["native_segment_hard_chars"] == 600
     assert capability["api_max_input_characters"] == 4096
     assert capability["definite_429_nonadmission"] is True
     changed = dict(MODEL_HASHES)
@@ -80,7 +80,7 @@ def test_receipt_golden_shape_spans_chunks_and_exact_frames(api):
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("audio/wav")
     assert response.headers["x-lite-speech-segments"] == "1"
-    assert response.headers["x-tts-native-chunks"] == "3"
+    assert response.headers["x-tts-native-chunks"] == "1"
     assert response.headers["x-lite-pause-count"] == "0"
     assert response.headers["x-lite-pause-s"] == "0.000000000"
     token = response.headers["x-tts-execution-receipt"]
@@ -91,7 +91,7 @@ def test_receipt_golden_shape_spans_chunks_and_exact_frames(api):
         "requested_speed":"1.150000", "seed":7,
     })
     assert set(receipt) == RECEIPT_FIELDS
-    assert receipt["speech_span_count"] == 1 and receipt["native_chunk_count"] == 3
+    assert receipt["speech_span_count"] == 1 and receipt["native_chunk_count"] == 1
     assert receipt["audio_frames"] == receipt["speech_frames"]
     assert receipt["authored_pause_frames"] == 0
     assert len(token.encode("ascii")) <= 8192 and "=" not in token
