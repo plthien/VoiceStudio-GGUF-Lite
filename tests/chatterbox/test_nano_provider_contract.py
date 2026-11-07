@@ -40,15 +40,15 @@ def test_wrong_engine_rejected_before_worker_and_proof_is_truthful(api):
 def test_multi_sentence_native_accounting_and_pre_admission_rejection(api):
     client, service, _ = api
     owned = profile(client)
-    text = ("A short sentence. " * 18).strip()
+    text = ("A short sentence. " * 36).strip()
     result = gen(client, owned["id"], text)
     assert result.status_code == 200
     assert result.headers["x-lite-speech-segments"] == "1"
     assert int(result.headers["x-tts-native-chunks"]) > 1
     loads = service.loads
-    rejected = gen(client, owned["id"], "x" * 301)
+    rejected = gen(client, owned["id"], "Invalid [laugh] marker.")
     assert rejected.status_code == 422
-    assert rejected.json()["error"]["code"] == "NANO_SEGMENT_SAFE_BOUNDARY_UNAVAILABLE"
+    assert rejected.json()["error"]["code"] == "UNSUPPORTED_PARALINGUISTIC_TAG"
     assert service.loads == loads
 
 

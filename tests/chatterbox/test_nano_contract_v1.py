@@ -216,7 +216,7 @@ def test_atomic_429_and_invalid_422_never_enter_worker(api):
         assert active.result(timeout=10).status_code == 200
     assert service.syntheses == 1
     before = service.syntheses
-    invalid = _speech(client, voice, "X" * 301)
+    invalid = _speech(client, voice, "This [laugh] tag is unsupported.")
     assert invalid.status_code == 422 and service.syntheses == before
 
 
