@@ -70,3 +70,21 @@ def test_custom_limits_and_punctuation_branch():
     parts = segment_text(text, 1, target=7, hard=10)
     assert "".join(part.text for part in parts) == text
     assert all(len(part.text) <= 10 for part in parts)
+
+
+def test_defensive_fail_closed_guards_and_empty_generator(monkeypatch):
+    import lite.chatterbox_segmentation as mod
+    with pytest.raises(SegmentationError):
+        mod.segment_text("[chuckle]" + "Z" * 12, 1, target=3, hard=5)
+    assert "".join(x.text for x in mod.segment_text("A " + "B" * 610, 1)) == "A " + "B" * 610
+    assert "".join(x.text for x in mod.segment_text("A" * 400 + "[chuckle]" + "B" * 300, 1)) == "A" * 400 + "[chuckle]" + "B" * 300
+    assert "".join(x.text for x in mod.segment_text("Hello. ", 1)) == "Hello. "
+    monkeypatch.setattr(mod, "_bounded_sentences", lambda *args: iter(["Z" * 601]))
+    with pytest.raises(SegmentationError):
+        mod.segment_text("valid", 1)
+    monkeypatch.setattr(mod, "_bounded_sentences", lambda *args: iter(["altered"]))
+    with pytest.raises(RuntimeError, match="SEGMENTATION_INTEGRITY_FAILURE"):
+        mod.segment_text("valid", 1)
+    monkeypatch.setattr(mod, "_bounded_sentences", lambda *args: iter(()))
+    with pytest.raises(RuntimeError, match="SEGMENTATION_INTEGRITY_FAILURE"):
+        mod.segment_text("valid", 1)

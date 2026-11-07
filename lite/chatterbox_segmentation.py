@@ -62,8 +62,7 @@ def _bounded_sentences(text: str, target: int, hard: int):
             cut = _safe_cut(sentence, target, hard)
             yield sentence[:cut]
             sentence = sentence[cut:]
-        if sentence:
-            yield sentence
+        yield sentence
 
 
 def segment_text(text: str, seed: int | None, *, target: int = TARGET_CHARS,
