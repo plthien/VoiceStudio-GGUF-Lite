@@ -5,11 +5,12 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-TARGET_CHARS = 240
-HARD_CHARS = 300
-POLICY_VERSION = "nano_sentence_v1"
+TARGET_CHARS = 520
+HARD_CHARS = 600
+POLICY_VERSION = "nano_sentence_v2"
 _BOUNDARY = re.compile(r"(?<=[.!?\u3002\uff01\uff1f])(?:[\"'\u2019\u201d\)\]]*)\s+")
 _ABBREVIATION = re.compile(r"(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc)|(?:\b[A-Z]\.){1,4})\.$", re.I)
+_FALLBACK = re.compile(r"[,;:\u2014\u2013]\s*|\s+")
 _TAG = re.compile(r"\[[^\]\r\n]{1,64}\]")
 SUPPORTED_TAGS = frozenset({"[chuckle]"})
 
@@ -39,18 +40,41 @@ def _sentences(text: str) -> list[str]:
     return [piece for piece in pieces if piece]
 
 
+def _safe_cut(text: str, target: int, hard: int) -> int:
+    """Find a non-destructive soft boundary; cut hard only for unbroken text."""
+    candidates = [m.end() for m in _FALLBACK.finditer(text[:hard]) if m.end() > 0]
+    viable = [pos for pos in candidates if pos >= max(1, target // 2)]
+    cut = min(viable, key=lambda pos: (abs(pos - target), -pos)) if viable else (
+        candidates[-1] if candidates else hard)
+    # A supported paralinguistic token is indivisible even across a hard cut.
+    for token in _TAG.finditer(text):
+        if token.start() < cut < token.end():
+            cut = token.start() if token.start() > 0 else token.end()
+            break
+    if not 0 < cut <= hard:
+        raise SegmentationError()
+    return cut
+
+
+def _bounded_sentences(text: str, target: int, hard: int):
+    for sentence in _sentences(text):
+        while len(sentence) > hard:
+            cut = _safe_cut(sentence, target, hard)
+            yield sentence[:cut]
+            sentence = sentence[cut:]
+        if sentence:
+            yield sentence
+
+
 def segment_text(text: str, seed: int | None, *, target: int = TARGET_CHARS,
                  hard: int = HARD_CHARS) -> tuple[Segment, ...]:
     if not (1 <= target <= hard <= HARD_CHARS):
         raise ValueError("INVALID_SEGMENT_LIMIT")
     if any(tag.group(0).lower() not in SUPPORTED_TAGS for tag in _TAG.finditer(text)):
         raise ValueError("UNSUPPORTED_PARALINGUISTIC_TAG")
-    sentences = _sentences(text)
-    if any(len(sentence) > hard for sentence in sentences):
-        raise SegmentationError()
     chunks: list[str] = []
     current = ""
-    for sentence in sentences:
+    for sentence in _bounded_sentences(text, target, hard):
         if current and len(current) + len(sentence) > target:
             chunks.append(current)
             current = sentence
