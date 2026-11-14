@@ -5,7 +5,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-TARGET_CHARS = 520
+TARGET_CHARS = 320
 HARD_CHARS = 600
 POLICY_VERSION = "nano_sentence_v2"
 _BOUNDARY = re.compile(r"(?<=[.!?\u3002\uff01\uff1f])(?:[\"'\u2019\u201d\)\]]*)\s+")
