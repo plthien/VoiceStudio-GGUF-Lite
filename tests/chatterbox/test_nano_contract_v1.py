@@ -43,7 +43,7 @@ def test_capability_v1_is_truthful_and_manifest_digest_tamper_sensitive(api):
     assert capability["weights_manifest_sha256"] == weights_manifest_sha256()
     assert capability["loader_mode"] == "nano=True"
     assert capability["segmentation_policy"] == "nano_sentence_v2"
-    assert capability["native_segment_target_chars"] == 520
+    assert capability["native_segment_target_chars"] == 320
     assert capability["native_segment_hard_chars"] == 600
     assert capability["api_max_input_characters"] == 4096
     assert capability["definite_429_nonadmission"] is True
