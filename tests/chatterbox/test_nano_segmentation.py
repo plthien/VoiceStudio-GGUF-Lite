@@ -1,4 +1,4 @@
-"""Nano-only deterministic target-520/hard-600 segmentation branch coverage."""
+"""Nano-only deterministic target-320/hard-600 segmentation branch coverage."""
 import hashlib
 
 import pytest
@@ -50,7 +50,7 @@ def test_fallback_punctuation_and_whitespace_prefer_target():
     assert len(pieces) >= 2
     assert "".join(p.text for p in pieces) == text
     assert all(len(p.text) <= 600 for p in pieces)
-    assert 450 <= len(pieces[0].text) <= 600
+    assert 280 <= len(pieces[0].text) <= 360
 
 
 def test_supported_token_indivisible_on_hard_boundary():
@@ -95,3 +95,43 @@ def test_punctuation_without_whitespace_is_soft_boundary():
     assert pieces[0].text.endswith(".")
     assert "".join(p.text for p in pieces) == text
 
+
+
+def test_target_320_preserves_exact_477_char_section7_and_seed_lineage():
+    # Regression from owner-observed Nano text omission on an earlier
+    # 477-character single native inference call.
+    text = (
+        "\n\nFirst question: this man is talking to your partner. How jealous are you?\n\n"
+        "Our big caveman takes one look at the skinny stranger.\n\n"
+        "That's it. In his head, they're already sharing a cave. The stranger is raising his children. "
+        "He's been demoted to the guy who delivers firewood.\n\n"
+        "Nobody has even introduced themselves.\n\n"
+        "Second question: this man wants to fight you. How threatened do you feel?\n\n"
+        "Now the big guy rolls up his sleeves.\n\n"
+        "Finally. A problem he knows how to solve.\n\n"
+    )
+    assert (TARGET_CHARS, HARD_CHARS, POLICY_VERSION) == (320, 600, "nano_sentence_v2")
+    assert len(text) == 477
+    chunks = segment_text(text, 817514548)
+    assert [len(chunk.text) for chunk in chunks] == [320, 157]
+    assert chunks[1].text.startswith("Second question:")
+    assert "Finally. A problem he knows how to solve." in chunks[1].text
+    assert "".join(chunk.text for chunk in chunks) == text
+    assert all(len(chunk.text) <= HARD_CHARS for chunk in chunks)
+    assert [chunk.sha256 for chunk in chunks] == [
+        hashlib.sha256(chunk.text.encode("utf-8")).hexdigest() for chunk in chunks
+    ]
+    assert [(c.text, c.seed) for c in chunks] == [
+        (c.text, c.seed) for c in segment_text(text, 817514548)
+    ]
+    assert [c.seed for c in chunks] != [
+        c.seed for c in segment_text(text, 817514549)
+    ]
+
+
+def test_short_target_keeps_long_whole_sentence_up_to_hard_600():
+    # Target is soft: never cut a sentence at 320 unless it exceeds hard 600.
+    text = "A" * 450 + ". Next sentence."
+    chunks = segment_text(text, 42)
+    assert [len(chunk.text) for chunk in chunks] == [452, 14]
+    assert "".join(chunk.text for chunk in chunks) == text
