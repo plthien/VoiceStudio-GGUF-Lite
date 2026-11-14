@@ -21,7 +21,13 @@ Native segmentation remains `nano_sentence_v2`, now target 320/hard 600 characte
 The target is soft: full sentences may run to the hard cap. Longer unbroken spans
 are split deterministically; punctuation and whitespace are preferred. Token-limit
 or truncated signals fail closed rather than publishing incomplete WAVs.
-The API input maximum is 4096 and is segmented before worker admission.\nThe 320-character target is a soft sentence-aware threshold, not a hard cap:\nlong sentences may still exceed 320, up to 600. This changes native chunk\nboundaries and derived seeds for some identical requests while retaining\n`nano_sentence_v2`; consumers pinning `native_segment_target_chars=520` must\nupdate their capability expectation before using the revised producer.\nNew synthesis must not silently reuse prior per-chunk outputs.
+The API input maximum is 4096 and is segmented before worker admission.
+The 320-character target is a soft sentence-aware threshold, not a hard cap:
+long sentences may still exceed 320, up to 600. This changes native chunk
+boundaries and derived seeds for some identical requests while retaining
+`nano_sentence_v2`; consumers pinning `native_segment_target_chars=520` must
+update their capability expectation before using the revised producer.
+New synthesis must not silently reuse prior per-chunk outputs.
 `definite_429_nonadmission=true` means the atomic admission gate did not queue
 or run the rejected request.
 
