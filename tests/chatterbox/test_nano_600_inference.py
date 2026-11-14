@@ -1,4 +1,4 @@
-"""Nano 520/600 inference, pause, API and incomplete native output smoke tests."""
+"""Nano 320/600 inference, pause, API and incomplete native output smoke tests."""
 import pytest
 
 from lite.chatterbox_worker import checked_generated_audio
@@ -67,6 +67,45 @@ def test_real_service_calls_worker_with_native_boundaries(api, length, expected)
                              proof=response.headers["X-TTS-Execution-Proof"], wav=response.content)
     assert receipt["native_chunk_count"] == len(expected)
     assert receipt["segmentation_policy"] == "nano_sentence_v2"
+
+
+def test_320_target_reaches_worker_as_two_native_chunks(api):
+    # A 477-character section previously went to one inference call, which
+    # owner hardware produced with three missing spoken words.
+    client, service, _ = api
+    row = profile(client)
+    original_rpc = service._rpc
+    observed = []
+
+    async def capture(msg, deadline):
+        observed.append((msg["text"], msg["seed"]))
+        return await original_rpc(msg, deadline)
+
+    service._rpc = capture
+    text = (
+        "\n\nFirst question: this man is talking to your partner. How jealous are you?\n\n"
+        "Our big caveman takes one look at the skinny stranger.\n\n"
+        "That's it. In his head, they're already sharing a cave. The stranger is raising his children. "
+        "He's been demoted to the guy who delivers firewood.\n\n"
+        "Nobody has even introduced themselves.\n\n"
+        "Second question: this man wants to fight you. How threatened do you feel?\n\n"
+        "Now the big guy rolls up his sleeves.\n\n"
+        "Finally. A problem he knows how to solve.\n\n"
+    )
+    assert len(text) == 477
+    response = gen(client, row["id"], text, speed=1.0)
+    assert response.status_code == 200, response.text
+    assert [len(part) for part, _ in observed] == [320, 157]
+    assert observed[1][0].startswith("Second question:")
+    assert "A problem he knows how to solve." in observed[1][0]
+    assert "".join(part for part, _ in observed) == text
+    assert all(isinstance(seed, int) for _, seed in observed)
+    assert response.headers["X-TTS-Native-Chunks"] == "2"
+    receipt = decode_receipt(response.headers["X-TTS-Execution-Receipt"],
+                             proof=response.headers["X-TTS-Execution-Proof"],
+                             wav=response.content)
+    assert receipt["segmentation_policy"] == "nano_sentence_v2"
+    assert receipt["native_chunk_count"] == 2
 
 
 def test_pause_script_keeps_exact_order_and_frames_through_multiple_chunks(api):
