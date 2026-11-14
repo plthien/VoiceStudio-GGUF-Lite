@@ -18,3 +18,7 @@ benchmarks/
 native-build-*/
 
 ui-test-artifacts/
+
+# Local Nano debug logs may contain private narration text.
+logs/
+nano_native_trace.jsonl
