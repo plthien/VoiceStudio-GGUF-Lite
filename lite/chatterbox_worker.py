@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, REQUIRED_FILES, verify_model_files
 from .chatterbox_ipc import read_sync, write_sync, ProtocolError
+from .chatterbox_trace import record as trace_record, wav_sha256
 
 
 def pcm_wav(audio) -> bytes:
@@ -193,6 +194,19 @@ class Engine:
                 inherited_peak=int(self.torch.cuda.max_memory_allocated())
                 self.lifetime_peak_bytes=max(inherited_peak,self.lifetime_peak_bytes or 0)
                 reset_peak()
+            trace_id = request.get("trace_id")
+            if isinstance(trace_id, str) and len(trace_id) == 24 and all(
+                char in "0123456789abcdef" for char in trace_id
+            ):
+                trace_record(
+                    "worker_model_generate_input", trace_id=trace_id,
+                    chunk_index=request.get("trace_chunk_index"),
+                    chunk_text=request["text"],
+                    chunk_text_sha256=hashlib.sha256(request["text"].encode("utf-8")).hexdigest(),
+                    derived_seed=seed, model_revision=MODEL_REVISION,
+                )
+            else:
+                trace_id = None
             with self.torch.inference_mode():
                 with open(os.devnull, "w") as output, contextlib.redirect_stdout(output):
                     generated = checked_generated_audio(self.model.generate(request["text"]))
@@ -210,7 +224,16 @@ class Engine:
                               lifetime_peak_bytes=self.lifetime_peak_bytes)
             from .audio import wav_info
             wav = pcm_wav(generated)
-            wav_info(wav, max_bytes=100 * 1024 * 1024, max_seconds=600)
+            native_info = wav_info(wav, max_bytes=100 * 1024 * 1024, max_seconds=600)
+            if trace_id is not None:
+                trace_record(
+                    "worker_model_generate_output", trace_id=trace_id,
+                    chunk_index=request.get("trace_chunk_index"),
+                    native_wav_sha256=wav_sha256(wav),
+                    native_wav_bytes=len(wav),
+                    native_duration_seconds=native_info["seconds"],
+                    generation_complete=True,
+                )
             return {"wav": base64.b64encode(wav).decode("ascii"),
                     "model_id": "chatterbox-nano", "backend": "CUDA0",
                     "model_revision": MODEL_REVISION,
