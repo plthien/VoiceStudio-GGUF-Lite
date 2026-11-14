@@ -12,7 +12,7 @@ PR #2 ships one active synthesis engine: `chatterbox-nano` (Chatterbox-Nano 110M
 
 The installer pins source `ab55923c27757c90cfcc407baa57dc25a7d25217` and model revision `71ccd1d0081b430592cea481f4307e764e07bc64` from `ResembleAI/chatterbox-nano`. Verification is offline, hashes all eight allowlisted files and rejects missing or changed receipts. Runtime loads only the verified local directory with `from_local(..., device="cuda", nano=True)`. There is no CPU or Turbo fallback.
 
-Native Nano inference uses 520-character target / 600-character hard chunks
+Native Nano inference uses 320-character target / 600-character hard chunks
 (`nano_sentence_v2`), independent of the 4096-character API request guard.
 A runtime-reported truncated/failed generation is rejected, not published as WAV.
 Bare tensor output cannot by itself prove full narration coverage; owner listening
