@@ -69,3 +69,14 @@ python -m pytest -q tests/chatterbox/test_vieneu_local_acceptance.py -s
 After the local acceptance script, **restart the app** and manually verify that a saved cloned profile still synthesizes and that Chatterbox CUDA0 speech/receipts and the existing YouTube AI Studio consumer remain unchanged. Additionally test the complete 3-minute and 8-minute outputs by listening, assess any missing syllables, test modified model hashes, missing FFmpeg, actual worker kill and timeout, verify no internet access during generation, and measure load/RTF/CPU/peak RAM/VRAM on the user's own machine.
 
 Only after all relevant K01–K15 gates are genuinely passed, the local record may be changed to `IMPLEMENTED_AND_VERIFIED`. Otherwise retain `INCOMPLETE_WITH_BLOCKERS` and report exact failures without fabricating results.
+
+
+## Local feedback and targeted repair — 2026-11-20
+
+Owner-provided Windows verify `-Smoke` printed `LOCAL_MODEL_AND_CLONING_GRAPHS_LOADED; presets=11` and `VIENEU_V3NANO_VERIFY_OK`, then raised `VIENEU_DEPENDENCY_LOCK_CHANGED` on the installer PowerShell comparison. The old comparison joined pip output with LF and read Windows serialized lock text with CRLF, causing a false mismatch even for identical packages. Verification now compares individual, trimmed, case-sensitive requirement entries independent of line ordering/newline serialization. The check still FAILS for actual package/version/VCS drift, with an explicit differential report, and now runs before costly model smoke checks.
+
+Owner-provided `pytest -q tests/chatterbox/test_vieneu_provider.py` yielded **4 passed, 2 failed** at that revision:
+1. Mock VieNeu receipt did not include required `end_to_end_rtf` field that the real runtime now produces. Fake receipt was updated to mirror production and test the HTTP RTF header.
+2. A new test read UTF-8 HTML using Windows cp1252 default, producing `UnicodeDecodeError`. New fixture/source reads now specify `encoding="utf-8"`.
+
+**Retest pending:** the patched branch has not yet been executed with Windows PowerShell or pytest in this environment; no post-repair PASS is claimed.

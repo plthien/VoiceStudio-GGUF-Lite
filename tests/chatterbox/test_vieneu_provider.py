@@ -119,7 +119,9 @@ class FakeVieNeuRuntime:
             return blob, {"receipt": {"audio_seconds": frames["audio_frames"] / 24000,
                 "audio_frames": frames["audio_frames"], "output_sha256": hashlib.sha256(blob).hexdigest(),
                 "voice_id": voice_id, "model_revision": config.MODEL_REVISION,
-                "pause_frames": job.script.pause_frames}}
+                "pause_frames": job.script.pause_frames,
+                "elapsed_seconds": 0.25,
+                "end_to_end_rtf": 0.25 / (frames["audio_frames"] / 24000)}}
 
 def test_router_contract_cpu_receipts_and_vietnamese_text(tmp_path, monkeypatch):
     fake = FakeVieNeuRuntime(tmp_path)
@@ -140,6 +142,7 @@ def test_router_contract_cpu_receipts_and_vietnamese_text(tmp_path, monkeypatch)
         assert "x-tts-execution-receipt" not in response.headers  # Chatterbox contract is not reused
         assert response.headers["x-vieneu-contract"] == config.CONTRACT
         assert response.headers["x-vieneu-receipt"]
+        assert float(response.headers["x-tts-rtf"]) > 0
         assert response.content.startswith(b"RIFF") and fake.calls == 1
         invalid = client.post("/vieneu/v1/audio/speech", json={**data, "language": "en"})
         assert invalid.status_code == 422 and fake.calls == 1
@@ -147,14 +150,16 @@ def test_router_contract_cpu_receipts_and_vietnamese_text(tmp_path, monkeypatch)
 
 def test_windows_installer_and_single_ui_have_isolated_contracts():
     root = Path(__file__).resolve().parents[2]
-    install = (root / "scripts/install-vieneu-v3nano.ps1").read_text()
+    install = (root / "scripts/install-vieneu-v3nano.ps1").read_text(encoding="utf-8")
     assert ".venv-vieneu" in install and "check-sdk" in install
     assert "download" in install and "verify" in install
-    assert "torch==2" not in (root / "requirements-vieneu.txt").read_text()
-    html = (root / "lite/chatterbox_ui/index.html").read_text()
-    js = (root / "lite/chatterbox_ui/vieneu.js").read_text()
+    assert "Compare-Object -ReferenceObject $pinned -DifferenceObject $current -CaseSensitive" in install
+    assert "VIENEU_DEPENDENCY_LOCK_CHANGED" in install
+    assert "torch==2" not in (root / "requirements-vieneu.txt").read_text(encoding="utf-8")
+    html = (root / "lite/chatterbox_ui/index.html").read_text(encoding="utf-8")
+    js = (root / "lite/chatterbox_ui/vieneu.js").read_text(encoding="utf-8")
     assert 'id="provider-select"' in html
     assert 'id="vi-tts-form"' in html
     assert "/vieneu/v1/audio/speech" in js
     assert "/vieneu/worker/cancel" in js
-    assert "/v1/audio/speech" in (root / "lite/chatterbox_app.py").read_text()
+    assert "/v1/audio/speech" in (root / "lite/chatterbox_app.py").read_text(encoding="utf-8")

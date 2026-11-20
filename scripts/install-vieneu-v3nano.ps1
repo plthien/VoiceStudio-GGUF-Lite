@@ -23,15 +23,30 @@ if($VerifyOnly){
     if(!(Test-Path -LiteralPath $py -PathType Leaf)){throw 'ENV_NOT_INSTALLED'}
     $env:HF_HUB_OFFLINE='1'
     $env:TRANSFORMERS_OFFLINE='1'
+    # Compare pinned packages/versions/VCS revisions, not PowerShell line endings.
+    # Windows PowerShell 5.1 serializes text as UTF-8 BOM + CRLF while pip
+    # freeze returns a line array. Keep exact case-sensitive entries and fail closed.
+    $lock=Join-Path $path 'private-dependency-lock.txt'
+    if(!(Test-Path -LiteralPath $lock -PathType Leaf)){throw 'VIENEU_DEPENDENCY_LOCK_MISSING'}
+    $pinned=@(Get-Content -LiteralPath $lock -Encoding UTF8 |
+      ForEach-Object { $_.Trim().TrimStart([char]0xFEFF) } |
+      Where-Object { $_ -ne '' } | Sort-Object -CaseSensitive)
+    $current=@(& $py -m pip freeze)
+    if($LASTEXITCODE -ne 0){throw 'VIENEU_PIP_FREEZE_FAILED'}
+    $current=@($current | ForEach-Object { $_.Trim().TrimStart([char]0xFEFF) } |
+      Where-Object { $_ -ne '' } | Sort-Object -CaseSensitive)
+    if($pinned.Count -eq 0){throw 'VIENEU_DEPENDENCY_LOCK_EMPTY'}
+    $difference=@(Compare-Object -ReferenceObject $pinned -DifferenceObject $current -CaseSensitive)
+    if($difference.Count -gt 0){
+      # <= appears only in saved lock, => appears only in live environment.
+      Write-Warning ("VieNeu dependency differences:" + [Environment]::NewLine +
+        (($difference | ForEach-Object { $_.SideIndicator + ' ' + $_.InputObject }) -join [Environment]::NewLine))
+      throw 'VIENEU_DEPENDENCY_LOCK_CHANGED'
+    }
     $args=@('-m','lite.vieneu_install','verify')
     if($Smoke){$args+='--smoke'}
     & $py @args
     if($LASTEXITCODE -ne 0){throw 'VIENEU_OFFLINE_VERIFICATION_FAILED'}
-    $lock=Join-Path $path 'private-dependency-lock.txt'
-    if(!(Test-Path -LiteralPath $lock)){throw 'VIENEU_DEPENDENCY_LOCK_MISSING'}
-    $current=(& $py -m pip freeze) -join "`n"
-    $pinned=(Get-Content -LiteralPath $lock -Raw).Trim()
-    if($current.Trim() -ne $pinned){throw 'VIENEU_DEPENDENCY_LOCK_CHANGED'}
     Write-Output 'VieNeu v3 Nano verified OFFLINE'
     exit 0
 }
