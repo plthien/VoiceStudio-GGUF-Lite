@@ -256,6 +256,9 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
 
     @app.exception_handler(RequestValidationError)
     async def request_error(_request, _exc):
+        if _request.url.path.startswith("/vieneu/"):
+            from .vieneu_routes import fail
+            return fail(422, "INVALID_REQUEST")
         return failure(422, "INVALID_REQUEST")
 
     @app.get("/")
@@ -268,7 +271,7 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
 
     @app.get("/ui/assets/{name}")
     def asset(name: str):
-        kinds = {"app.js": "text/javascript", "app.css": "text/css"}
+        kinds = {"app.js": "text/javascript", "vieneu.js": "text/javascript", "app.css": "text/css"}
         if name not in kinds:
             return Response(status_code=404, headers=HEADERS)
         return Response((UI_DIR / name).read_bytes(), media_type=kinds[name], headers=HEADERS)

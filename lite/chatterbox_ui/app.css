@@ -7,3 +7,16 @@
 
 /* Nano-only metadata, retaining the Lite visual design tokens and responsive grids. */
 #clone-meta,#replace-state,#tts-breakdown{overflow-wrap:anywhere}.audio-meta{margin:7px 0 10px}#clone-clear{margin-bottom:14px}.metric strong{word-break:break-word}.view[hidden],.voice-list[hidden]{display:none!important}
+
+/* Provider-scoped panels keep the canonical Chatterbox UI fully intact. */
+.vieneu-panel{display:none}
+body[data-provider="vieneu"] .vieneu-panel{display:block}
+body[data-provider="vieneu"] #view-clone > .page-grid,body[data-provider="vieneu"] #view-tts > .page-grid{display:none!important}
+body[data-provider="vieneu"] #view-library > .panel:not(.vieneu-panel),body[data-provider="vieneu"] #view-runtime > .panel:not(.vieneu-panel){display:none!important}
+body[data-provider="vieneu"] .sidebar-bottom .selected-voice{color:#b0dfff}
+.provider-choice{font-size:12px;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.provider-choice select{max-width:270px}
+.vieneu-panel{margin-bottom:18px}.vieneu-panel audio{display:block;max-width:100%;margin:10px 0}
+.vieneu-panel [hidden]{display:none!important}
+.vieneu-panel .voice-item{gap:10px;flex-wrap:wrap}
+#vi-tts-text{min-height:160px}#vi-library-status,#vi-clone-status,#vi-tts-status{overflow-wrap:anywhere}
