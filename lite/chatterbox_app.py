@@ -209,6 +209,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     async def lifespan(app):
         yield
         await app.state.service.stop()
+        if hasattr(app.state, 'vieneu'):
+            await app.state.vieneu.stop()
     app = FastAPI(title="VoiceStudio Nano Lite", version="1.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store or Store(settings)
@@ -254,6 +256,9 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
 
     @app.exception_handler(RequestValidationError)
     async def request_error(_request, _exc):
+        if _request.url.path.startswith("/vieneu/"):
+            from .vieneu_routes import fail
+            return fail(422, "INVALID_REQUEST")
         return failure(422, "INVALID_REQUEST")
 
     @app.get("/")
@@ -266,7 +271,7 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
 
     @app.get("/ui/assets/{name}")
     def asset(name: str):
-        kinds = {"app.js": "text/javascript", "app.css": "text/css"}
+        kinds = {"app.js": "text/javascript", "vieneu.js": "text/javascript", "app.css": "text/css"}
         if name not in kinds:
             return Response(status_code=404, headers=HEADERS)
         return Response((UI_DIR / name).read_bytes(), media_type=kinds[name], headers=HEADERS)
@@ -815,6 +820,9 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                     app.state.active_generation = None
         finally:
             app.state.admission.release(admission_owner)
+    # VieNeu routes are mounted without altering any existing Chatterbox contract.
+    from .vieneu_routes import mount_vieneu
+    mount_vieneu(app)
     app.add_middleware(SizeGuard, limit=settings.max_ref_bytes + 65536)
     return app
 

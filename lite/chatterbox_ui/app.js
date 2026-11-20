@@ -82,7 +82,8 @@
     const old = chosen; chosen = voices.some(v => v.id === id) ? id : '';
     $('tts-voice').value = chosen;
     const voice = voices.find(v => v.id === chosen);
-    $('selected-voice').textContent = voice ? voice.name + ' · ' + voice.id : 'No voice selected';
+    if (document.body.dataset.provider !== 'vieneu')
+      $('selected-voice').textContent = voice ? voice.name + ' · ' + voice.id : 'No voice selected';
     if (old !== chosen) clearOutput();
   }
   function openView(page) {
@@ -107,8 +108,10 @@
   async function cheapStatus() {
     try {
       const status = await json('/lite/worker/status');
-      $('status-short').textContent = status.busy || status.admission_busy ? 'Nano worker busy' : 'Local Nano service connected';
-      $('status-dot').className = status.busy ? 'status-dot' : 'status-dot ok';
+      if (document.body.dataset.provider !== 'vieneu')
+        $('status-short').textContent = status.busy || status.admission_busy ? 'Nano worker busy' : 'Local Nano service connected';
+      if (document.body.dataset.provider !== 'vieneu')
+        $('status-dot').className = status.busy ? 'status-dot' : 'status-dot ok';
     } catch (_) { $('status-short').textContent = 'Service unavailable'; $('status-dot').className = 'status-dot bad'; }
   }
   function renderVoices() {

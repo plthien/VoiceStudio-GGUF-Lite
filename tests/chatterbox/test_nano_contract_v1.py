@@ -18,6 +18,7 @@ from lite.chatterbox_contract import (
 )
 from lite.chatterbox_config import MODEL_HASHES, MODEL_REVISION
 from lite.chatterbox_assembly import reference_binding
+from lite.chatterbox_segmentation import segment_text
 from .test_contracts import api, audio, gen, profile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,11 +77,16 @@ def test_receipt_golden_shape_spans_chunks_and_exact_frames(api):
     voice = profile(client)
     sentence = "A" * 119 + ". "
     text = (sentence * 3).rstrip()
+    # Two sentences fit the 320-char native target; the third starts chunk 2.
+    # A speech span is not equivalent to a native inference chunk.
+    native_chunks = segment_text(text, 7)
+    assert [len(chunk.text) for chunk in native_chunks] == [242, 120]
+    assert "".join(chunk.text for chunk in native_chunks) == text
     response = _speech(client, voice["id"], text, speed=1.15, seed=7)
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("audio/wav")
     assert response.headers["x-lite-speech-segments"] == "1"
-    assert response.headers["x-tts-native-chunks"] == "1"
+    assert response.headers["x-tts-native-chunks"] == str(len(native_chunks))
     assert response.headers["x-lite-pause-count"] == "0"
     assert response.headers["x-lite-pause-s"] == "0.000000000"
     token = response.headers["x-tts-execution-receipt"]
@@ -91,7 +97,8 @@ def test_receipt_golden_shape_spans_chunks_and_exact_frames(api):
         "requested_speed":"1.150000", "seed":7,
     })
     assert set(receipt) == RECEIPT_FIELDS
-    assert receipt["speech_span_count"] == 1 and receipt["native_chunk_count"] == 1
+    assert receipt["speech_span_count"] == 1 and receipt["native_chunk_count"] == len(native_chunks)
+    assert receipt["native_chunk_sha256"] == [chunk.sha256 for chunk in native_chunks]
     assert receipt["audio_frames"] == receipt["speech_frames"]
     assert receipt["authored_pause_frames"] == 0
     assert len(token.encode("ascii")) <= 8192 and "=" not in token
