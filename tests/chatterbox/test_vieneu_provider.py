@@ -163,3 +163,52 @@ def test_windows_installer_and_single_ui_have_isolated_contracts():
     assert "/vieneu/v1/audio/speech" in js
     assert "/vieneu/worker/cancel" in js
     assert "/v1/audio/speech" in (root / "lite/chatterbox_app.py").read_text(encoding="utf-8")
+
+
+def test_worker_diagnostic_is_typed_and_private(capsys):
+    from lite import vieneu_worker
+    vieneu_worker.PHASE = "synthesize_segment"
+    try:
+        raise RuntimeError("synthetic ONNX failure")
+    except RuntimeError as exc:
+        code, diagnostic_id = vieneu_worker._failure(exc, {"action": "synthesize"})
+    output = capsys.readouterr()
+    assert code == "SYNTHESIS_FAILED"
+    assert len(diagnostic_id) == 12
+    assert output.out == ""
+    item = json.loads(output.err.strip().removeprefix("VIE-DIAG "))
+    assert item["code"] == code and item["diagnostic_id"] == diagnostic_id
+    assert item["stage"] == "synthesize_segment"
+    assert item["exception_type"] == "RuntimeError"
+
+
+def test_offline_smoke_executes_one_real_api_inference_path(monkeypatch, capsys):
+    import sys
+    from types import SimpleNamespace
+    import numpy as np
+    from lite import vieneu_install
+
+    made = []
+    class MockEngine:
+        def _ensure_clone_sessions(self):
+            made.append("clone_graphs")
+    class MockVieneu:
+        backend = "onnx"
+        sample_rate = 24000
+        engine = MockEngine()
+        def list_preset_voices(self):
+            return [("Giọng Minh", "Minh")]
+        def infer(self, text, **kwargs):
+            assert text == "Xin chào Việt Nam."
+            assert kwargs["voice"] == "Minh"
+            assert kwargs["steps"] == 16 and kwargs["cfg"] == 3.0
+            made.append("infer")
+            return np.zeros(2400, dtype=np.float32)
+        def close(self):
+            made.append("close")
+    monkeypatch.setitem(sys.modules, "vieneu", SimpleNamespace(Vieneu=lambda **kwargs: MockVieneu()))
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "CUDA_VISIBLE_DEVICES"):
+        monkeypatch.setenv(name, "1" if name != "CUDA_VISIBLE_DEVICES" else "")
+    vieneu_install.smoke()
+    assert made == ["clone_graphs", "infer", "close"]
+    assert "LOCAL_VIETNAMESE_INFERENCE_OK" in capsys.readouterr().out

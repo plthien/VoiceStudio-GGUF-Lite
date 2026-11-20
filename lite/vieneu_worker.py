@@ -7,6 +7,8 @@ import json
 import os
 import sys
 import tempfile
+import traceback
+import uuid
 import wave
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from .vieneu_config import MODEL_REVISION, root_dir, model_dir, verify_model
 
 model = None
 PREFIX = "VIE1:"
+PHASE = "idle"
 
 def reply(obj):
     sys.stdout.write(PREFIX + json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -64,7 +67,8 @@ def _atomic(path: Path, payload: bytes):
         temp.unlink(missing_ok=True)
 
 def handle(message: dict) -> dict:
-    global model
+    global model, PHASE
+    PHASE = "dispatch"
     action = message.get("action")
     if action == "ping":
         return {"state": "ready", "resident": model is not None, "model_revision": MODEL_REVISION}
@@ -75,9 +79,11 @@ def handle(message: dict) -> dict:
         return {"unloaded": True}
     # Reject mutated/missing pinned graphs even with a resident worker. Never fall
     # back to HF caches or remote artifacts during cloning or generation.
+    PHASE = "load_model"
     verify_model()
     engine = _load()
     if action == "presets":
+        PHASE = "list_presets"
         return {"presets": [{"id": "preset:" + name, "name": label,
                              "voice_type": "preset", "provider_id": "vieneu-v3-nano"}
                             for label, name in engine.list_preset_voices()]}
@@ -85,6 +91,7 @@ def handle(message: dict) -> dict:
         root = root_dir() / "cache" / "staging"
         src = _within(message["reference"], root)
         dst = _within(message["conditioning"], root, exists=False)
+        PHASE = "encode_reference"
         spk, style = engine.encode_reference(str(src), denoise=False)
         obj = {"speaker_emb": spk.tolist(), "style": style.tolist()}
         payload = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -98,6 +105,7 @@ def handle(message: dict) -> dict:
         folder = root_dir() / "cache" / "jobs" / job_id
         if folder.is_symlink() or not folder.is_dir():
             raise ValueError("INVALID_JOB_PATH")
+        PHASE = "voice_validation"
         voice = message["voice"]
         if isinstance(voice, str) and voice.startswith("preset:"):
             voice = voice[len("preset:"):]
@@ -113,12 +121,15 @@ def handle(message: dict) -> dict:
             raise ValueError("PROFILE_NOT_FOUND")
         paths = []
         for i, text in enumerate(message["segments"]):
+            PHASE = "synthesize_segment"
             samples = engine.infer(text, voice=voice,
                                    speed=message["speed"], steps=message["steps"],
                                    cfg=message["cfg"], sway=message["sway"],
                                    seed=None if message["seed"] is None else message["seed"] + i,
                                    max_chars=140, apply_watermark=False)
+            PHASE = "pcm_encoding"
             payload = _pcm_wav(samples)
+            PHASE = "save_segment"
             target = folder / ("seg-%04d.wav" % i)
             _atomic(target, payload)
             paths.append({"file": target.name, "sha256": hashlib.sha256(payload).hexdigest(),
@@ -126,20 +137,59 @@ def handle(message: dict) -> dict:
         return {"segments": paths, "completed": len(paths)}
     raise ValueError("INVALID_ACTION")
 
+# Detailed diagnostics remain on local worker stderr only; never include
+# narration or reference audio in the IPC/HTTP error payload.
+_KNOWN_CODES = frozenset({
+    "INVALID_JOB_PATH", "INVALID_JOB_ID", "PROFILE_NOT_FOUND",
+    "PROFILE_INTEGRITY_FAILED", "MODEL_MANIFEST_UNAVAILABLE",
+    "MODEL_MANIFEST_INVALID", "MODEL_HASH_MISMATCH",
+    "MODEL_FILES_MISSING", "INVALID_AUDIO", "INVALID_CPU_ONNX_PROVIDER",
+    "INVALID_ACTION",
+})
+_PHASE_ERRORS = {
+    "load_model": "MODEL_LOAD_FAILED",
+    "list_presets": "PRESET_LOAD_FAILED",
+    "encode_reference": "CLONE_ENCODING_FAILED",
+    "synthesize_segment": "SYNTHESIS_FAILED",
+    "pcm_encoding": "AUDIO_ENCODING_FAILED",
+    "save_segment": "SEGMENT_STORAGE_FAILED",
+}
+
+def _failure(exc: Exception, message: dict | None) -> tuple[str, str]:
+    diagnostic_id = uuid.uuid4().hex[:12]
+    frames = traceback.extract_tb(exc.__traceback__)
+    code = str(exc) if str(exc) in _KNOWN_CODES else _PHASE_ERRORS.get(PHASE, "VIENEU_WORKER_FAILED")
+    if code == "SYNTHESIS_FAILED" and any(
+        "phonemiz" in f.name.lower() or "sea_g2p" in f.filename.lower() for f in frames
+    ):
+        code = "PHONEMIZER_FAILED"
+    item = {
+        "event": "VIENEU_WORKER_EXCEPTION",
+        "diagnostic_id": diagnostic_id,
+        "action": message.get("action", "unknown") if isinstance(message, dict) else "invalid_json",
+        "stage": PHASE,
+        "code": code,
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc)[:800],
+        "frames": [f"{Path(f.filename).name}:{f.lineno}:{f.name}" for f in frames[-8:]],
+    }
+    # The file is private on the owner's machine; review/redact messages and
+    # local paths before sharing excerpts. No raw transcript/audio is logged.
+    sys.stderr.write("VIE-DIAG " + json.dumps(item, ensure_ascii=False) + "\n")
+    sys.stderr.flush()
+    return code, diagnostic_id
+
 def main():
+    global PHASE
     for line in sys.stdin:
+        message = None
+        PHASE = "parse_request"
         try:
             message = json.loads(line)
             result = handle(message)
             reply({"ok": True, "result": result})
         except Exception as exc:
-            # No full tracebacks or local file paths in the IPC surface.
-            code = str(exc) if str(exc) in (
-                "INVALID_JOB_PATH", "INVALID_JOB_ID", "PROFILE_NOT_FOUND",
-                "PROFILE_INTEGRITY_FAILED", "MODEL_MANIFEST_UNAVAILABLE",
-                "MODEL_MANIFEST_INVALID", "MODEL_HASH_MISMATCH",
-                "MODEL_FILES_MISSING", "INVALID_AUDIO", "INVALID_CPU_ONNX_PROVIDER",
-                "INVALID_ACTION") else "VIENEU_WORKER_FAILED"
-            reply({"ok": False, "code": code})
+            code, diagnostic_id = _failure(exc, message)
+            reply({"ok": False, "code": code, "diagnostic_id": diagnostic_id})
 if __name__ == "__main__":
     main()

@@ -51,6 +51,7 @@ class VieNeuRuntime:
         self.process = None
         self.stderr_file = None
         self.last_error = None
+        self.last_failure_id = None
         self.generation_count = 0
         self._preset_cache = None
         self._start_time = None
@@ -62,6 +63,7 @@ class VieNeuRuntime:
                 "busy": self.lock.locked(), "pid": p.pid if p and p.returncode is None else None,
                 "cpu_threads": int(os.environ.get("VIENEU_CPU_THREADS", "4")),
                 "generation_count": self.generation_count, "last_error": self.last_error,
+                "last_failure_id": self.last_failure_id,
                 **_ram_status()}
 
     async def stop(self):
@@ -128,7 +130,10 @@ class VieNeuRuntime:
                 raise VieNeuError("WORKER_PROTOCOL_INVALID")
             response = await asyncio.wait_for(receive(), timeout)
             if not response.get("ok"):
+                self.last_failure_id = response.get("diagnostic_id")
                 raise VieNeuError(response.get("code", "VIENEU_WORKER_FAILED"))
+            self.last_error = None
+            self.last_failure_id = None
             return response["result"]
         except asyncio.TimeoutError as exc:
             self.last_error = "WORKER_TIMEOUT"

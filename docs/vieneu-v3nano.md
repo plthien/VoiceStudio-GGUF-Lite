@@ -65,3 +65,21 @@ Run the following additional **manual Windows model/hardware acceptance** agains
 ### Known acceptance dependencies
 
 Windows 10, installed pinned VieNeu SDK, exact ONNX model weights, usable reference recording, browser automation and CPU performance measurements cannot be asserted from a GitHub-only code edit. The absence of direct runtime testing must be reported as **NOT RUN** or **BLOCKED**, not as PASS.
+
+
+## Worker exceptions and synthesis smoke (2026-11-20)
+
+The worker previously converted nearly all SDK inference/clone errors into the unhelpful `VIENEU_WORKER_FAILED`, hiding their origins. Worker exceptions now have a private structured `VIE-DIAG` entry in `D:\VoiceStudioBuild\vieneu-v3nano\logs\vieneu-worker.log` with stage, exception class, message and traceback *frame names*, plus a `diagnostic_id` sent to the HTTP runtime (visible via `GET /vieneu/worker/status` as `last_failure_id`). API responses do not expose exception messages, local paths or source text. Review/redact local messages before sharing logs.
+
+Example local inspection after a failed generate or clone:
+
+```powershell
+Get-Content 'D:\VoiceStudioBuild\vieneu-v3nano\logs\vieneu-worker.log' -Tail 30
+Invoke-RestMethod 'http://127.0.0.1:3901/vieneu/worker/status' | ConvertTo-Json -Depth 5
+```
+
+Exceptions during ONNX synthesis, phonemization, reference enrollment, model loading and segment encoding now have stage-specific response codes and matching private diagnostic entries. These codes identify the *failing stage*, not necessarily the underlying dependency or corrupted artifact. Do not declare the original error solved without reproducing and resolving the actual diagnostic.
+
+`verify-vieneu-v3nano.ps1 -Smoke` now exercises **one real Vietnamese preset inference** with production settings (16 steps, CFG=3), additionally validating the resulting finite nonempty audio samples. The previous smoke only loaded model/cloning graphs and could therefore pass despite runtime synthesis failure. This does not validate owner voice cloning or production audio quality.
+
+**Post-change acceptance:** local Windows inference, cloned voice quality and full pytest have **NOT RUN** here. Do not mark these gates PASS without evidence.

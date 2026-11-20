@@ -94,7 +94,16 @@ def smoke():
         raise VieNeuError("PRESET_VOICES_UNAVAILABLE")
     model.engine._ensure_clone_sessions()
     print("LOCAL_MODEL_AND_CLONING_GRAPHS_LOADED; presets=" + str(len(presets)))
-    model.close()
+    try:
+        # Loading graphs alone misses G2P/ONNX defects during actual synthesis.
+        import numpy as np
+        audio = np.asarray(model.infer("Xin chào Việt Nam.", voice=presets[0][1],
+                         steps=16, cfg=3.0, max_chars=140, apply_watermark=False))
+        if audio.ndim != 1 or audio.size < 2400 or not np.all(np.isfinite(audio)):
+            raise VieNeuError("VIENEU_INFERENCE_SMOKE_FAILED")
+        print("LOCAL_VIETNAMESE_INFERENCE_OK; frames=" + str(audio.size))
+    finally:
+        model.close()
 
 def main():
     parser = argparse.ArgumentParser()

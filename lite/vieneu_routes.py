@@ -69,7 +69,10 @@ def _status(exc: VieNeuError) -> int:
             504 if exc.code == "WORKER_TIMEOUT" else
             503 if exc.code in ("ENV_NOT_INSTALLED", "MODEL_FILES_MISSING",
                "MODEL_HASH_MISMATCH", "MODEL_MANIFEST_INVALID", "MODEL_MANIFEST_UNAVAILABLE",
-               "WORKER_CRASHED", "VIENEU_WORKER_FAILED", "INVALID_CPU_ONNX_PROVIDER") else
+               "WORKER_CRASHED", "VIENEU_WORKER_FAILED", "INVALID_CPU_ONNX_PROVIDER",
+               "MODEL_LOAD_FAILED", "PRESET_LOAD_FAILED", "CLONE_ENCODING_FAILED",
+               "SYNTHESIS_FAILED", "PHONEMIZER_FAILED", "AUDIO_ENCODING_FAILED",
+               "SEGMENT_STORAGE_FAILED") else
             409 if exc.code in ("PROFILE_INTEGRITY_FAILED", "REFERENCE_CHANGED", "REFERENCE_INVALID") else 422)
 
 async def _reference_audio(runtime: VieNeuRuntime, upload: UploadFile) -> bytes:
