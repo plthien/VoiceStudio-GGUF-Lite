@@ -275,6 +275,7 @@ def mount_vieneu(app):
                 "Cache-Control": "no-store", "X-TTS-Engine": PROVIDER,
                 "X-TTS-Backend": "CPUExecutionProvider", "X-TTS-Model-Revision": MODEL_REVISION,
                 "X-TTS-Audio-S": str(round(receipt["audio_seconds"], 4)),
+                "X-TTS-RTF": str(round(receipt["end_to_end_rtf"], 4)),
                 "X-TTS-Approx-Syllables-Per-Minute": str(round(syllables * 60 / spoken_seconds, 2)),
                 "X-VieNeu-Contract": CONTRACT, "X-VieNeu-Receipt": tokenized,
                 "X-VieNeu-Receipt-SHA256": __import__("hashlib").sha256(payload).hexdigest()})

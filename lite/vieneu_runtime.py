@@ -230,6 +230,7 @@ class VieNeuRuntime:
                     "steps": steps, "cfg": cfg, "sway": sway, "speed": speed, "seed": seed,
                     "output_sha256": audio["sha256"], "audio_frames": audio["frames"],
                     "audio_seconds": audio["seconds"], "elapsed_seconds": elapsed,
+                    "end_to_end_rtf": elapsed / audio["seconds"],
                     "pause_frames": job.script.pause_frames}
                 self.generation_count += 1
                 return output, {"receipt": receipt, "audio": audio, "metrics": metrics}
