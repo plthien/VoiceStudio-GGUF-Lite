@@ -82,7 +82,8 @@
     const old = chosen; chosen = voices.some(v => v.id === id) ? id : '';
     $('tts-voice').value = chosen;
     const voice = voices.find(v => v.id === chosen);
-    $('selected-voice').textContent = voice ? voice.name + ' · ' + voice.id : 'No voice selected';
+    if (document.body.dataset.provider !== 'vieneu')
+      $('selected-voice').textContent = voice ? voice.name + ' · ' + voice.id : 'No voice selected';
     if (old !== chosen) clearOutput();
   }
   function openView(page) {

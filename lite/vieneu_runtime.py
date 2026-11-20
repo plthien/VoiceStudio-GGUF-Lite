@@ -24,6 +24,25 @@ MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 MAX_SECONDS = 600
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 
+def _ram_status() -> dict:
+    if os.name != 'nt':
+        return {'ram_total_bytes': None, 'ram_available_bytes': None}
+    try:
+        import ctypes
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
+                ('ullTotalPhys', ctypes.c_ulonglong), ('ullAvailPhys', ctypes.c_ulonglong),
+                ('ullTotalPageFile', ctypes.c_ulonglong), ('ullAvailPageFile', ctypes.c_ulonglong),
+                ('ullTotalVirtual', ctypes.c_ulonglong), ('ullAvailVirtual', ctypes.c_ulonglong),
+                ('ullAvailExtendedVirtual', ctypes.c_ulonglong)]
+        mem = MemoryStatus(); mem.dwLength = ctypes.sizeof(mem)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem)):
+            return {'ram_total_bytes': int(mem.ullTotalPhys), 'ram_available_bytes': int(mem.ullAvailPhys)}
+    except (AttributeError, OSError):
+        pass
+    return {'ram_total_bytes': None, 'ram_available_bytes': None}
+
+
 class VieNeuRuntime:
     def __init__(self, root: Path | None = None):
         self.root = (root or root_dir()).resolve()
@@ -42,7 +61,8 @@ class VieNeuRuntime:
                 "resident": p is not None and p.returncode is None,
                 "busy": self.lock.locked(), "pid": p.pid if p and p.returncode is None else None,
                 "cpu_threads": int(os.environ.get("VIENEU_CPU_THREADS", "4")),
-                "generation_count": self.generation_count, "last_error": self.last_error}
+                "generation_count": self.generation_count, "last_error": self.last_error,
+                **_ram_status()}
 
     async def stop(self):
         p = self.process

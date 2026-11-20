@@ -35,6 +35,8 @@ if($VerifyOnly){
     Write-Output 'VieNeu v3 Nano verified OFFLINE'
     exit 0
 }
+$env:HF_HUB_OFFLINE='0'
+$env:TRANSFORMERS_OFFLINE='0'
 New-Item -ItemType Directory -Force -Path $path,(Join-Path $path 'models'),(Join-Path $path 'cache'),(Join-Path $path 'logs'),(Join-Path $path 'cache\staging'),(Join-Path $path 'cache\jobs') | Out-Null
 if(!(Test-Path -LiteralPath $py)){
     & py -3.11 -m venv $venv

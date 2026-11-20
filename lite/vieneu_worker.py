@@ -73,6 +73,9 @@ def handle(message: dict) -> dict:
             model.close()
         model = None
         return {"unloaded": True}
+    # Reject mutated/missing pinned graphs even with a resident worker. Never fall
+    # back to HF caches or remote artifacts during cloning or generation.
+    verify_model()
     engine = _load()
     if action == "presets":
         return {"presets": [{"id": "preset:" + name, "name": label,
@@ -129,7 +132,7 @@ def main():
             message = json.loads(line)
             result = handle(message)
             reply({"ok": True, "result": result})
-        except (Exception, BaseException) as exc:
+        except Exception as exc:
             # No full tracebacks or local file paths in the IPC surface.
             code = str(exc) if str(exc) in (
                 "INVALID_JOB_PATH", "INVALID_JOB_ID", "PROFILE_NOT_FOUND",

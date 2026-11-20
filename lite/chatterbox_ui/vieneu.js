@@ -246,6 +246,8 @@
     if (state.generation) throw Error('WORKER_BUSY');
     clearSound();
     const owner = newCancel();
+    const startingVoice = selected();
+    const initialIdentity = startingVoice ? [startingVoice.id, startingVoice.voice_version, startingVoice.reference_sha256] : null;
     state.generation = owner;
     $('vi-generate').disabled = true; $('vi-cancel').disabled = false;
     say('vi-tts-status', 'Generating VieNeu CPU audio…');
@@ -263,15 +265,20 @@
         throw Error('INVALID_VIENEU_RECEIPT');
       const bytes = await response.arrayBuffer();
       wavCheck(bytes);
-      if (owner.cancelled || state.generation !== owner ||
-          !state.voices.some(v => v.id === voice)) return;
+      const latest = selected();
+      if (owner.cancelled || state.generation !== owner || state.selected !== voice ||
+          !latest || !initialIdentity || latest.voice_version !== initialIdentity[1] ||
+          latest.reference_sha256 !== initialIdentity[2]) {
+        say('vi-tts-status', 'Discarded: voice selection or reference changed');
+        return;
+      }
       state.sound = URL.createObjectURL(new Blob([bytes], {type:'audio/wav'}));
       $('vi-tts-player').src = state.sound;
       $('vi-download').href = state.sound;
       $('vi-download').download = 'vieneu-' + voice.replace(/[^A-Za-z0-9_-]/g, '-') + '.wav';
       $('vi-tts-output').hidden = false;
       say('vi-output-summary', '24 kHz PCM16 · ' + response.headers.get('X-TTS-Audio-S') +
-          ' s · ' + response.headers.get('X-TTS-Speech-Syllables-Per-Minute') + ' syllables/minute');
+          ' s · approx. ' + response.headers.get('X-TTS-Approx-Syllables-Per-Minute') + ' syllables/minute');
       say('vi-tts-status', 'Complete · independently verified WAV and VieNeu receipt');
       if (isPreview) $('vi-tts-player').play().catch(() => {});
     } catch (error) {

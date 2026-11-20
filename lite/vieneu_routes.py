@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 from .audio import AudioError, convert_reference, wav_info
 from .chatterbox_config import ffmpeg_path
 from .pause import PauseError
+from .vieneu_segmentation import build_job
 from .vieneu_config import (CONTRACT, MODEL_REPO, MODEL_REVISION,
                             SDK_REVISION, SDK_VERSION, PROVIDER, VieNeuError, readiness)
 from .vieneu_runtime import VieNeuRuntime, MAX_UPLOAD_BYTES
@@ -263,12 +264,14 @@ def mount_vieneu(app):
             receipt = info["receipt"]
             payload = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
             tokenized = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+            spoken = build_job(body.input).spoken
+            syllables = sum(len(part.split()) for part in spoken)
+            spoken_seconds = max(receipt["audio_seconds"] - receipt["pause_frames"] / 24000, 0.01)
             return Response(output, media_type="audio/wav", headers={
                 "Cache-Control": "no-store", "X-TTS-Engine": PROVIDER,
                 "X-TTS-Backend": "CPUExecutionProvider", "X-TTS-Model-Revision": MODEL_REVISION,
                 "X-TTS-Audio-S": str(round(receipt["audio_seconds"], 4)),
-                "X-TTS-Speech-Syllables-Per-Minute": str(round(
-                    len(body.input.split()) * 60 / max(receipt["audio_seconds"], 1), 2)),
+                "X-TTS-Approx-Syllables-Per-Minute": str(round(syllables * 60 / spoken_seconds, 2)),
                 "X-VieNeu-Contract": CONTRACT, "X-VieNeu-Receipt": tokenized,
                 "X-VieNeu-Receipt-SHA256": __import__("hashlib").sha256(payload).hexdigest()})
         except asyncio.CancelledError:
