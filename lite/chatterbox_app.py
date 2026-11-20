@@ -209,6 +209,8 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     async def lifespan(app):
         yield
         await app.state.service.stop()
+        if hasattr(app.state, 'vieneu'):
+            await app.state.vieneu.stop()
     app = FastAPI(title="VoiceStudio Nano Lite", version="1.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.store = store or Store(settings)
@@ -815,6 +817,9 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
                     app.state.active_generation = None
         finally:
             app.state.admission.release(admission_owner)
+    # VieNeu routes are mounted without altering any existing Chatterbox contract.
+    from .vieneu_routes import mount_vieneu
+    mount_vieneu(app)
     app.add_middleware(SizeGuard, limit=settings.max_ref_bytes + 65536)
     return app
 
