@@ -212,3 +212,62 @@ def test_offline_smoke_executes_one_real_api_inference_path(monkeypatch, capsys)
     vieneu_install.smoke()
     assert made == ["clone_graphs", "infer", "close"]
     assert "LOCAL_VIETNAMESE_INFERENCE_OK" in capsys.readouterr().out
+
+
+def test_vieneu_ipc_roundtrip_under_windows_cp1252(monkeypatch):
+    """Covers the exact cp1252 stdout and surrogateescape G2P failures."""
+    import sys
+    from lite import vieneu_worker
+
+    text = "Xin chào. Hôm nay trời đẹp, giọng nói Việt Nam và học trò."
+    voice = "preset:Ngọc Hồng"
+    requests = [
+        {"action": "presets"},
+        {"action": "synthesize", "segments": [text], "voice": voice},
+    ]
+    raw = b"".join((json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8") for item in requests)
+    raw += b'{"action":"synthesize","segments":["\\udc9d"]}\n'
+    raw += b'{"action":"synthesize","segments":["\x9d"]}\n'
+    input_stream = io.TextIOWrapper(io.BytesIO(raw), encoding="cp1252", errors="surrogateescape")
+    output_buffer = io.BytesIO()
+    output_stream = io.TextIOWrapper(output_buffer, encoding="cp1252", errors="strict")
+    diagnostics = io.StringIO()
+    received = []
+
+    def fake_handle(message):
+        received.append(message)
+        if message["action"] == "presets":
+            return {"presets": [{"id": voice, "name": "Giọng Ngọc Hồng"}]}
+        return {"spoken": message["segments"][0], "voice": message["voice"]}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vieneu_worker, "handle", fake_handle)
+        patch.setattr(sys, "stdin", input_stream)
+        patch.setattr(sys, "stdout", output_stream)
+        patch.setattr(sys, "stderr", diagnostics)
+        vieneu_worker.main()
+
+    replies = [json.loads(line.removeprefix("VIE1:")) for line in
+               output_buffer.getvalue().decode("utf-8").splitlines()]
+    assert len(replies) == 4
+    assert replies[0]["ok"] and replies[0]["result"]["presets"][0]["name"] == "Giọng Ngọc Hồng"
+    assert replies[1]["ok"] and replies[1]["result"] == {"spoken": text, "voice": voice}
+    assert [r["code"] for r in replies[2:]] == ["INVALID_IPC_ENCODING", "INVALID_IPC_ENCODING"]
+    assert received == requests
+    assert "VIE-DIAG " in diagnostics.getvalue()
+    assert "\udc9d" not in text
+
+
+def test_vieneu_worker_ipc_encoding_is_explicit_and_isolated():
+    from lite import vieneu_worker
+    with pytest.raises(UnicodeDecodeError):
+        vieneu_worker.decode_message(b'{"action":"x","text":"\x9d"}')
+    with pytest.raises(ValueError, match="INVALID_IPC_ENCODING"):
+        vieneu_worker.decode_message(b'{"action":"x","text":"\\udc9d"}')
+    assert vieneu_worker.decode_message(
+        '{"action":"presets","name":"Thọ, Mỹ, Việt"}'.encode("utf-8")
+    )["name"] == "Thọ, Mỹ, Việt"
+    runtime_source = (Path(__file__).resolve().parents[2] /
+                      "lite/vieneu_runtime.py").read_text(encoding="utf-8")
+    assert 'env["PYTHONIOENCODING"] = "utf-8:strict"' in runtime_source
+    assert 'env["PYTHONUTF8"] = "1"' in runtime_source

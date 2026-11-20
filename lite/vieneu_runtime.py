@@ -105,6 +105,10 @@ class VieNeuRuntime:
         env["HF_HUB_DISABLE_TELEMETRY"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
         env["CUDA_VISIBLE_DEVICES"] = ""
+        # The VieNeu subprocess has an independent UTF-8 locale even under
+        # Windows cp1252. IPC additionally uses raw UTF-8 bytes in both directions.
+        env["PYTHONIOENCODING"] = "utf-8:strict"
+        env["PYTHONUTF8"] = "1"
         env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
         self.process = await asyncio.create_subprocess_exec(
             str(py), "-u", "-m", "lite.vieneu_worker",

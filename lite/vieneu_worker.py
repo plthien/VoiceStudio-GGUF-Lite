@@ -24,8 +24,35 @@ PREFIX = "VIE1:"
 PHASE = "idle"
 
 def reply(obj):
-    sys.stdout.write(PREFIX + json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    # IPC is a byte protocol. Python's redirected text streams on Windows can
+    # default to cp1252; emitting Vietnamese text through them corrupts replies.
+    payload = (PREFIX + json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8", "strict")
+    sys.stdout.buffer.write(payload)
+    sys.stdout.buffer.flush()
+
+
+def decode_message(raw: bytes) -> dict:
+    # Reject malformed UTF-8 *before* SDK G2P. On Windows, codepage decoding
+    # previously produced surrogateescape chars (e.g. U+DC9D), which crashed
+    # the Rust sea-g2p normalizer on re-encoding.
+    message = json.loads(raw.decode("utf-8", "strict"))
+
+    def verify(value):
+        if isinstance(value, str):
+            if any(0xD800 <= ord(c) <= 0xDFFF for c in value):
+                raise ValueError("INVALID_IPC_ENCODING")
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                verify(key)
+                verify(item)
+        elif isinstance(value, list):
+            for item in value:
+                verify(item)
+
+    verify(message)
+    if not isinstance(message, dict):
+        raise ValueError("INVALID_ACTION")
+    return message
 
 def _within(path: str, base: Path, *, exists: bool = True) -> Path:
     base = base.resolve()
@@ -144,7 +171,7 @@ _KNOWN_CODES = frozenset({
     "PROFILE_INTEGRITY_FAILED", "MODEL_MANIFEST_UNAVAILABLE",
     "MODEL_MANIFEST_INVALID", "MODEL_HASH_MISMATCH",
     "MODEL_FILES_MISSING", "INVALID_AUDIO", "INVALID_CPU_ONNX_PROVIDER",
-    "INVALID_ACTION",
+    "INVALID_ACTION", "INVALID_IPC_ENCODING",
 })
 _PHASE_ERRORS = {
     "load_model": "MODEL_LOAD_FAILED",
@@ -158,7 +185,9 @@ _PHASE_ERRORS = {
 def _failure(exc: Exception, message: dict | None) -> tuple[str, str]:
     diagnostic_id = uuid.uuid4().hex[:12]
     frames = traceback.extract_tb(exc.__traceback__)
-    code = str(exc) if str(exc) in _KNOWN_CODES else _PHASE_ERRORS.get(PHASE, "VIENEU_WORKER_FAILED")
+    code = ("INVALID_IPC_ENCODING" if isinstance(exc, UnicodeError)
+            else str(exc) if str(exc) in _KNOWN_CODES
+            else _PHASE_ERRORS.get(PHASE, "VIENEU_WORKER_FAILED"))
     if code == "SYNTHESIS_FAILED" and any(
         "phonemiz" in f.name.lower() or "sea_g2p" in f.filename.lower() for f in frames
     ):
@@ -175,17 +204,19 @@ def _failure(exc: Exception, message: dict | None) -> tuple[str, str]:
     }
     # The file is private on the owner's machine; review/redact messages and
     # local paths before sharing excerpts. No raw transcript/audio is logged.
-    sys.stderr.write("VIE-DIAG " + json.dumps(item, ensure_ascii=False) + "\n")
+    # ASCII-safe stderr even when inherited console encoding is cp1252.
+    sys.stderr.write("VIE-DIAG " + json.dumps(item, ensure_ascii=True) + "\n")
     sys.stderr.flush()
     return code, diagnostic_id
 
 def main():
     global PHASE
-    for line in sys.stdin:
+    # Consume raw bytes rather than sys.stdin's locale-dependent decoder.
+    for raw in sys.stdin.buffer:
         message = None
         PHASE = "parse_request"
         try:
-            message = json.loads(line)
+            message = decode_message(raw)
             result = handle(message)
             reply({"ok": True, "result": result})
         except Exception as exc:

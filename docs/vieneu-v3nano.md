@@ -83,3 +83,14 @@ Exceptions during ONNX synthesis, phonemization, reference enrollment, model loa
 `verify-vieneu-v3nano.ps1 -Smoke` now exercises **one real Vietnamese preset inference** with production settings (16 steps, CFG=3), additionally validating the resulting finite nonempty audio samples. The previous smoke only loaded model/cloning graphs and could therefore pass despite runtime synthesis failure. This does not validate owner voice cloning or production audio quality.
 
 **Post-change acceptance:** local Windows inference, cloned voice quality and full pytest have **NOT RUN** here. Do not mark these gates PASS without evidence.
+
+
+## Windows cp1252/UTF-8 IPC repair (2026-11-20)
+
+Owner's private diagnostics provided two concrete failures:
+- `presets`: `UnicodeEncodeError` in `vieneu_worker.reply -> cp1252.encode`, because the redirected stdout text wrapper cannot represent Vietnamese preset labels.
+- `synthesize`: `UnicodeEncodeError: surrogates not allowed` in `sea_g2p.Normalizer.normalize_batch`, with `\\udc9d` already in the input text. This is characteristic of a UTF-8 byte stream incorrectly decoded via the Windows redirected text stream.
+
+The VieNeu worker IPC now reads **raw stdin bytes** and decodes `utf-8/strict`, validates that parsed JSON contains no escaped lone surrogate characters, and writes **raw UTF-8 bytes** to stdout. It bypasses the locale's text wrappers entirely. Worker launch also sets `PYTHONIOENCODING=utf-8:strict` and `PYTHONUTF8=1` **only for the VieNeu subprocess** (not Chatterbox). Unexpected bad UTF-8 or invalid JSON surrogate returns `INVALID_IPC_ENCODING` rather than reaching the G2P. Local diagnostic stderr uses ASCII-safe JSON so the error reporter itself cannot fail under cp1252.
+
+Unit tests simulate cp1252 redirected streams with a Vietnamese voice name and sentence, including malformed bytes and JSON-escaped lone surrogates. **Windows runtime retest is still required**; installation/model weights do not need changes. Fully stop and restart the server to spawn a new UTF-8 VieNeu worker after updating the branch.
