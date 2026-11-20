@@ -65,6 +65,21 @@ def install_snapshot():
         stage.unlink(missing_ok=True)
     verify_model(root)
 
+def inventory():
+    """Capture installed distribution and declared license metadata for owner audit."""
+    records = []
+    for package in sorted(metadata.distributions(), key=lambda d: d.metadata.get("Name", "").lower()):
+        records.append({"package": package.metadata.get("Name", "unknown"),
+                        "version": package.version,
+                        "license_expression": package.metadata.get("License-Expression"),
+                        "license": package.metadata.get("License"),
+                        "classifiers": [v for v in package.metadata.get_all("Classifier", [])
+                                        if v.startswith("License ::")]})
+    target = root_dir() / "private-dependency-license-inventory.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(target)
+
 def smoke():
     # Strictly local: model snapshot + all cloning graphs must already exist.
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -93,6 +108,8 @@ def main():
         verify_model()
     if args.smoke and args.action != "check-sdk":
         smoke()
+    if args.action == "download":
+        inventory()
     print("VIENEU_V3NANO_" + args.action.upper() + "_OK")
 if __name__ == "__main__":
     main()

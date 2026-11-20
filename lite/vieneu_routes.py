@@ -125,6 +125,10 @@ def mount_vieneu(app):
     @router.get("/vieneu/readiness")
     async def ready():
         state = await asyncio.to_thread(readiness)
+        ffmpeg_ready = bool(shutil.which("ffmpeg") or ffmpeg_path())
+        state["cloning_ready"] = state["ready"] and ffmpeg_ready
+        if not ffmpeg_ready:
+            state["issues"] = [*state["issues"], "FFMPEG_UNAVAILABLE"]
         return {**state, "runtime": runtime.status()}
 
     @router.get("/vieneu/worker/status")

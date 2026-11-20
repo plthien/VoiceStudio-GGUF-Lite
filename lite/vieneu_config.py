@@ -52,6 +52,8 @@ def digest(path: Path) -> str:
 def verify_model(root: Path | None = None) -> dict:
     base = model_dir(root)
     manifest = base / "manifest.json"
+    if manifest.is_symlink() or base.is_symlink():
+        raise VieNeuError("MODEL_MANIFEST_INVALID")
     if not manifest.is_file():
         raise VieNeuError("MODEL_MANIFEST_UNAVAILABLE")
     try:
@@ -68,6 +70,8 @@ def verify_model(root: Path | None = None) -> dict:
             raise VieNeuError("MODEL_MANIFEST_INVALID")
         for name, sha in expected.items():
             p = base / name
+            if p.is_symlink():
+                raise VieNeuError("MODEL_MANIFEST_INVALID")
             if not p.is_file():
                 raise VieNeuError("MODEL_FILES_MISSING")
             if digest(p) != sha:
