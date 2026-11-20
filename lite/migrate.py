@@ -13,8 +13,8 @@ import time
 from pathlib import Path
 
 from .audio import convert_reference
-from .config import Settings
 from .profiles import Store
+from .chatterbox_config import ffmpeg_path
 
 def _digest(path:Path)->str:
     h=hashlib.sha256()
@@ -77,7 +77,8 @@ def migrate(dbpath,voices,*,apply=False,only_id=None,settings=None):
     if invalid:
         result["source_unchanged"]=_digest(dbpath)==original_db
         return result
-    settings=settings or Settings.load()
+    if settings is None:
+        raise ValueError("Explicit target settings required")
     # Stage everything and perform FFmpeg before touching existing profile DB.
     settings.data_dir.mkdir(parents=True,exist_ok=True)
     staging=Path(tempfile.mkdtemp(prefix=".migrate-stage-",dir=settings.data_dir))
@@ -95,7 +96,7 @@ def migrate(dbpath,voices,*,apply=False,only_id=None,settings=None):
             if _digest(original)!=digest:
                 raise ValueError("Staged reference hash mismatch")
             normalized=dest/"reference.wav"
-            ffmpeg=shutil.which("ffmpeg")
+            ffmpeg=ffmpeg_path()
             if not ffmpeg:
                 raise RuntimeError("FFmpeg unavailable")
             convert_reference(original,normalized,ffmpeg=ffmpeg,max_seconds=settings.max_ref_seconds)

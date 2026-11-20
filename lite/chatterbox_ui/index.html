@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111925">
+  <title>VoiceStudio Nano Lite — Local Voice Workspace</title>
+  <link rel="stylesheet" href="/ui/assets/app.css">
+  <script type="module" src="/ui/assets/app.js"></script>
+  <script type="module" src="/ui/assets/vieneu.js"></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-icon" aria-hidden="true">◉</div><div><strong>VoiceStudio <span>Lite</span></strong><small>LOCAL VOICE WORKSPACE</small></div></div>
+    <div class="workspace-label">WORKSPACE</div>
+    <nav aria-label="Main navigation" class="navigation">
+      <button type="button" class="nav-button active" data-view="clone" aria-current="page"><span aria-hidden="true">✦</span> Voice Cloning</button>
+      <button type="button" class="nav-button" data-view="library"><span aria-hidden="true">▤</span> Voice Library</button>
+      <button type="button" class="nav-button" data-view="tts"><span aria-hidden="true">◷</span> Text to Speech</button>
+      <button type="button" class="nav-button" data-view="runtime"><span aria-hidden="true">⚙</span> Runtime & Settings</button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="mini-label">CURRENT VOICE</div>
+      <div id="selected-voice" class="selected-voice">No voice selected</div>
+      <div class="line"></div>
+      <div class="sidebar-status"><span id="status-dot" class="status-dot"></span><span id="status-short">Checking local service</span></div>
+      <small>127.0.0.1 · English · CUDA0 · offline</small>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div><span class="eyebrow">CHATTERBOX / NANO 110M</span><h1 id="page-title">Voice Cloning</h1><p id="page-subtitle">Create a voice from an owned reference recording.</p></div>
+      <div class="topbar-actions"><label class="provider-choice">Voice engine <select id="provider-select" aria-label="Voice engine"><option value="chatterbox">English — Chatterbox-Nano</option><option value="vieneu">Tiếng Việt — VieNeu v3 Nano</option></select></label><span class="local-pill">● Local only</span><button type="button" class="secondary small" id="refresh-voices">Refresh voices</button></div>
+    </header>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section id="view-clone" class="view" aria-labelledby="clone-heading">
+      <div class="page-grid">
+        <div class="panel primary-panel">
+          <div class="panel-heading"><span class="step">01</span><div><h2 id="clone-heading">New voice profile</h2><p>Upload your own short recording and enter exactly what was spoken.</p></div></div>
+          <form id="clone-form">
+            <div class="two-col">
+              <label>Voice name<input required name="name" maxlength="128" placeholder="e.g. Studio narrator"></label>
+              <label>Language<input id="clone-language" name="language" value="en" readonly aria-label="English only"></label>
+            </div>
+            <label>Reference recording <span class="hint">WAV or MP3 · max 24 MB</span><input id="clone-file" name="ref_audio" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label>
+            <audio id="clone-preview" controls preload="metadata" hidden aria-label="New reference preview"></audio><p id="clone-meta" class="muted" role="status">No reference selected.</p><button type="button" class="secondary small" id="clone-clear">Clear selected audio</button>
+            <label>Exact reference transcript<textarea name="ref_text" required maxlength="4096" rows="5" placeholder="Write exactly the words spoken in the recording. No automatic transcription is performed."></textarea></label>
+            <label class="check"><input type="checkbox" id="clone-consent" required><span>I confirm I have permission and consent to use this voice recording for local testing.</span></label>
+            <div class="actions"><button type="submit" class="primary" id="clone-submit">Create voice profile</button><span id="clone-result" class="muted" aria-live="polite"></span></div>
+          </form>
+        </div>
+        <div class="side-stack">
+          <div class="panel info-panel"><span class="overline">HOW IT WORKS</span><h3>Reference-conditioned cloning</h3><ol class="steps"><li><strong>Add a recording</strong><span>Use an owned WAV or MP3.</span></li><li><strong>Enter the transcript</strong><span>Exact spoken words are required.</span></li><li><strong>Generate speech</strong><span>Choose your new stable voice ID in TTS.</span></li></ol></div>
+          <div class="panel warning-panel"><span class="overline">IMPORTANT</span><h3>No model training</h3><p>Nano performs zero-shot reference-conditioned synthesis. Nothing is uploaded to external services, and voice ownership is not automatically verified.</p><p>Check applicable rights and obtain explicit consent before cloning.</p></div>
+        </div>
+      </div>
+      <div class="panel vieneu-panel" id="vi-clone-panel">
+        <div class="panel-heading"><div><h2>Clone a Vietnamese voice</h2><p>Own or have permission to use this voice. Clear single-speaker reference, ideally 5–8 seconds (3–30 seconds accepted). The SDK uses the first 5 seconds for style and up to 30 seconds for speaker embedding.</p></div></div>
+        <form id="vi-clone-form">
+          <div class="two-col"><label>Voice name<input id="vi-clone-name" required maxlength="128" placeholder="Giọng kể chuyện"></label><label>Language<input readonly value="Tiếng Việt (vi)"></label></div>
+          <label>Reference WAV/MP3 · up to 24 MB<input id="vi-clone-file" type="file" required accept=".wav,.mp3,audio/wav,audio/mpeg"></label>
+          <audio id="vi-clone-audio" controls hidden aria-label="Reference recording"></audio>
+          <label class="check"><input id="vi-clone-consent" type="checkbox" required><span>I confirm I have permission to clone and use this voice recording locally.</span></label>
+          <div class="actions"><button type="submit" class="primary" id="vi-clone-submit">Encode and save voice</button><span id="vi-clone-status" role="status"></span></div>
+        </form>
+      </div>
+    </section>
+    <section id="view-library" class="view" aria-labelledby="library-heading" hidden>
+      <div class="panel">
+        <div class="panel-heading split"><div><span class="overline">YOUR LOCAL STORAGE</span><h2 id="library-heading">Voice Library</h2><p>Stable IDs and versioned reference recordings.</p></div><button type="button" class="secondary" id="library-refresh">Refresh list</button></div>
+        <div id="voice-list" class="voice-list" aria-live="polite"></div>
+        <div id="library-empty" class="empty" hidden><h3>No saved voices yet</h3><p>Start with an owned reference and its exact transcript.</p><button type="button" class="primary" data-goto="clone">Create a voice</button></div>
+      </div>
+      <div class="panel" id="editor-panel" hidden>
+        <div class="panel-heading"><div><span class="overline">PROFILE DETAILS</span><h2>Edit selected voice</h2></div></div>
+        <p id="editor-id" class="mono muted"></p><p id="editor-consent" class="muted" role="status">Reference permission: not confirmed</p>
+        <form id="edit-form">
+          <div class="two-col"><label>Name<input name="name" required maxlength="128"></label><label>Language<input name="language" required value="en" readonly></label></div>
+          <label>Exact reference transcript<textarea name="ref_text" required rows="4" maxlength="4096"></textarea></label>
+          <div class="actions"><button class="primary" type="submit" id="edit-save">Save profile</button><button class="secondary" type="button" id="reference-play">Preview saved reference</button></div>
+        </form>
+        <audio id="saved-preview" controls hidden aria-label="Stored normalized reference"></audio>
+        <div class="subsection"><h3>Replace reference audio</h3><p class="muted">This increments the reference version without changing the stable voice ID.</p><form id="replace-form"><label>New WAV or MP3<input type="file" id="replace-file" name="ref_audio" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label><audio id="replace-preview" aria-label="Preview new reference before replacement" controls preload="metadata" hidden></audio><label for="replace-text">Exact transcript of the NEW recording<textarea id="replace-text" name="ref_text" rows="4" maxlength="4096" required placeholder="Type exactly the words spoken in the new recording"></textarea></label><label class="check"><input type="checkbox" id="replace-same"><span>New recording says exactly the same words as the current reference (explicit confirmation)</span></label><label class="check"><input type="checkbox" id="replace-consent" required><span>I confirm I have permission to use this <strong>new</strong> reference recording. Consent from the previous recording is not transferred.</span></label><p id="replace-state" role="status" aria-live="polite" class="muted">No new recording selected.</p><button class="secondary" type="submit" id="replace-submit">Replace recording</button></form></div>
+        <div class="subsection danger-area"><h3>Delete voice</h3><p>Delete the selected Nano profile and owned files, or remove only its database record. Original legacy source files are never deleted.</p><button type="button" class="danger" id="delete-purge">Delete profile and owned audio</button><button type="button" class="secondary" id="delete-only">Remove profile only (keep files)</button></div>
+      </div>
+      <div class="panel">
+        <div class="panel-heading split"><div><span class="overline">READ-ONLY SOURCE</span><h2>Import legacy voices</h2><p>Configured locally on the server. No arbitrary browser paths.</p></div><button type="button" class="secondary" id="migration-preview">Preview migration</button></div>
+        <p class="muted">The backend reads only its configured legacy source. Preview never changes source files and browser paths are not accepted.</p>
+        <div id="migration-feedback" role="status" aria-live="polite"></div><div id="migration-list" class="voice-list"></div>
+        <div class="actions"><label for="migration-choice">Choose one eligible voice</label><select id="migration-choice" aria-label="Legacy voice to import"><option value="">Preview sources first</option></select><button type="button" id="migration-apply" class="primary" disabled>Import selected voice</button></div>
+      </div>
+      <div class="panel vieneu-panel" id="vi-library-panel">
+        <div class="panel-heading split"><div><h2>VieNeu Voice Library</h2><p>Preset voices and provider-owned cloned voices. No Chatterbox profile migration.</p></div><button type="button" id="vi-library-refresh" class="secondary">Refresh</button></div>
+        <div id="vi-library-list" class="voice-list" aria-live="polite"></div>
+        <div id="vi-edit" hidden>
+          <h3>Manage cloned voice</h3><p id="vi-edit-id" class="muted"></p>
+          <form id="vi-rename-form"><label>Display name<input id="vi-rename-name" required maxlength="128"></label><div class="actions"><button class="primary" type="submit">Rename</button><button id="vi-verify" class="secondary" type="button">Verify integrity</button><button id="vi-play-reference" class="secondary" type="button">Play reference</button><button id="vi-preview-voice" class="secondary" type="button">Generate voice preview</button></div></form>
+          <audio id="vi-reference-player" controls hidden></audio>
+          <form id="vi-replace-form"><h3>Replace reference (new voice version)</h3><label>New WAV or MP3<input id="vi-replace-file" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" required></label><label class="check"><input id="vi-replace-consent" type="checkbox" required> I have permission to use this new recording</label><button class="secondary" type="submit" id="vi-replace-submit">Encode and replace</button></form>
+          <div class="actions"><button type="button" id="vi-delete" class="danger">Delete voice and owned files</button></div>
+        </div>
+        <p class="muted" id="vi-library-status" role="status"></p>
+      </div>
+    </section>
+    <section id="view-tts" class="view" aria-labelledby="tts-heading" hidden>
+      <div class="page-grid">
+        <div class="panel primary-panel">
+          <div class="panel-heading"><span class="step">02</span><div><h2 id="tts-heading">Generate speech</h2><p>One local Chatterbox-Nano CUDA0 generation at a time.</p></div></div>
+          <form id="tts-form">
+            <label>Saved voice<select id="tts-voice" name="voice" required><option value="">Select a voice</option></select></label>
+            <label>Text to speak<textarea id="tts-text" rows="8" maxlength="4096" required placeholder="Type the words you want to synthesize…"></textarea></label>
+            <div class="actions" aria-label="Insert deterministic pause"><label for="tts-pause-preset">Insert Pause</label><select id="tts-pause-preset" aria-label="Pause duration"><option value="350">350ms</option><option value="500">500ms</option><option value="1000">1s</option><option value="1500">1.5s</option><option value="3000">3s</option><option value="custom">Custom milliseconds</option></select><input id="tts-pause-custom" type="number" min="1" max="10000" step="1" placeholder="1–10000 ms" aria-label="Custom pause in milliseconds" hidden><button type="button" class="secondary" id="tts-insert-pause">Insert at caret</button></div>
+            <p id="tts-pause-help" class="muted">Inline syntax: [pause], [pause 800ms], [pause 1.5s]. Atempo changes speech only, not authored pauses. Insertion before selected text preserves the selection.</p>
+            <div class="two-col"><label>Language <span class="hint">English only</span><input id="tts-language" value="en" readonly></label><label>Seed <span class="hint">Optional</span><input type="number" id="tts-seed" min="0" max="2147483647" step="1" value="42"></label></div>
+            <label for="tts-speed">Speed <strong id="tts-speed-value">1.00×</strong><input id="tts-speed" type="range" min="0.75" max="1.25" step="0.05" value="1.00"></label>
+            <p id="tts-speed-notice" class="muted" role="status">Speech-only FFmpeg atempo post-processing (0.75–1.25×); authored pauses unchanged.</p>
+            <div class="actions"><button type="submit" id="tts-submit" class="primary">Generate WAV</button><button type="button" class="secondary" id="tts-cancel" disabled>Cancel request</button><span id="tts-state" class="muted" role="status">Idle</span></div>
+          </form>
+          <div id="tts-output" class="result-panel" hidden><h3>Generated audio</h3><p id="tts-proof" class="muted"></p><audio id="tts-player" controls preload="metadata"></audio><div class="actions"><a id="tts-download" class="download" download="voice.wav">Download 24 kHz WAV</a><span id="tts-timing" class="muted"></span></div><p id="tts-breakdown" class="muted" aria-live="polite"></p></div>
+        </div>
+        <div class="side-stack"><div class="panel info-panel"><span class="overline">OUTPUT CONTRACT</span><h3>24 kHz · Mono · PCM16</h3><p>Speech-only FFmpeg atempo Speed 0.75–1.25×. Authored pauses remain fixed. No cloud inference.</p></div><div class="panel warning-panel"><span class="overline">VERIFICATION</span><p id="tts-native-summary">CUDA evidence and model verification are displayed only when supplied by the Nano runtime.</p></div></div>
+      </div>
+      <div class="panel vieneu-panel" id="vi-tts-panel">
+        <div class="panel-heading"><div><h2>Vietnamese text to speech</h2><p>VieNeu v3 Nano · CPU/ONNX · native speed · 24 kHz mono PCM16 WAV. Narrations up to 8 minutes.</p></div></div>
+        <form id="vi-tts-form">
+          <label>VieNeu preset or cloned voice<select id="vi-tts-voice" required><option value="">Choose a voice</option></select></label>
+          <label>Vietnamese narration<textarea id="vi-tts-text" maxlength="24000" rows="10" required placeholder="Nhập văn bản tiếng Việt có dấu…"></textarea></label>
+          <div class="actions"><label>Insert pause <select id="vi-pause-length"><option value="350">350ms</option><option value="800">800ms</option><option value="1500">1.5s</option><option value="3000">3s</option></select></label><button type="button" id="vi-insert-pause" class="secondary">Insert at caret</button></div>
+          <div class="two-col"><label>Native speed <strong id="vi-speed-label">1.00×</strong><input id="vi-speed" type="range" min="0.75" max="1.25" step="0.05" value="1"></label><label>Seed (optional)<input id="vi-seed" type="number" min="0" max="2147483647" placeholder="Random"></label></div>
+          <div class="two-col"><label>Euler steps (8 fast, 16 quality)<input id="vi-steps" type="number" min="4" max="32" value="16"></label><label>CFG<input id="vi-cfg" type="number" min="0" max="6" step="0.5" value="3"></label></div>
+          <label>Sway<input id="vi-sway" type="number" min="-1" max="1" step="0.1" value="0"></label>
+          <p class="muted">[pause], [pause 800ms], [pause 1.5s] insert fixed PCM silence after generation. Reported Vietnamese speaking rate is syllables/minute (not English WPM).</p>
+          <div class="actions"><button class="primary" type="submit" id="vi-generate">Generate WAV</button><button class="secondary" id="vi-cancel" type="button" disabled>Cancel generation</button><span id="vi-tts-status" role="status">Idle</span></div>
+        </form>
+        <div id="vi-tts-output" hidden><h3>Verified WAV</h3><audio id="vi-tts-player" controls></audio><div class="actions"><a id="vi-download" download="vieneu-voice.wav" class="download">Download WAV</a><span id="vi-output-summary" class="muted"></span></div></div>
+      </div>
+    </section>
+    <section id="view-runtime" class="view" aria-labelledby="runtime-heading" hidden>
+      <div class="panel">
+        <div class="panel-heading split"><div><span class="overline">PINNED LOCAL ENGINE</span><h2 id="runtime-heading">Runtime &amp; Settings</h2><p>Chatterbox-Nano 110M · CUDA0. Readiness means eligible to attempt generation, not verified GPU execution.</p></div><button type="button" class="primary" id="runtime-refresh">Refresh readiness</button></div>
+        <p id="runtime-checked" class="muted">Not yet checked</p><div id="runtime-summary" class="metric-grid"></div><div id="runtime-details" class="detail-grid"></div>
+      </div>
+      <div class="panel" id="model-residency">
+        <div class="panel-heading"><div><span class="overline">MODEL RESIDENCY</span><h2>Chatterbox-Nano CUDA worker</h2><p>Idle unload preserves local GPU memory; no automatic CPU fallback.</p></div></div>
+        <form id="worker-settings-form"><div class="two-col"><label>Backend<input readonly value="CUDA0 · Chatterbox-Nano"></label><label>Unload after idle<select id="worker-idle"><option value="60">1 minute</option><option value="300">5 minutes</option><option value="600">10 minutes (default)</option><option value="1800">30 minutes</option><option value="3600">60 minutes</option><option value="never">Never</option></select></label></div><div class="actions"><button type="submit" class="primary" id="worker-save">Save residency settings</button><button type="button" class="secondary" id="worker-unload">Unload Now</button><span id="worker-feedback" class="muted" role="status">Loading worker status…</span></div></form>
+        <div id="worker-status" class="metric-grid" aria-live="polite"></div><p class="muted">Verification states are independent: eligible, hash verified, CUDA verified, worker resident, live generation verified.</p>
+      </div>
+      <div class="panel"><div class="panel-heading"><div><span class="overline">MODEL RIGHTS</span><h2>Rights &amp; provenance</h2><p>Local-only application. Reference voice rights and informed consent are required.</p></div></div><div id="rights-details" class="detail-grid"></div><p id="rights-notice" class="warning-text">Rights information has not yet been verified by this UI.</p></div>
+      <div class="panel vieneu-panel" id="vi-runtime-panel">
+        <div class="panel-heading split"><div><h2>VieNeu v3 Nano — CPU/ONNX</h2><p>Independent Python worker and model storage. Chatterbox CUDA settings are unchanged.</p></div><button id="vi-runtime-refresh" class="secondary" type="button">Refresh</button></div>
+        <div id="vi-runtime-summary" class="metric-grid"></div><div id="vi-runtime-details" class="detail-grid"></div>
+        <div class="actions"><button type="button" class="secondary" id="vi-unload">Unload VieNeu CPU worker</button><span id="vi-runtime-status" class="muted" role="status"></span></div>
+        <p class="muted">Model files and cloning graphs must be installed and SHA-256 verified beforehand; generation never downloads model weights.</p>
+      </div>
+    </section>
+    <footer class="footer">VoiceStudio Nano Lite · Local-only development tool · No external telemetry · Explicit voice consent required</footer>
+  </main>
+</div>
+</body>
+</html>
