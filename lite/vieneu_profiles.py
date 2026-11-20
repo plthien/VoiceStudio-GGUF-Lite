@@ -24,7 +24,7 @@ def _atomic(path: Path, data: bytes) -> None:
 class VoiceLibrary:
     def __init__(self, root: Path):
         self.root = root / "data" / "voices"
-        self.root.mkdir(parents=True, exist_ok=True)
+        # Do not touch the optional VieNeu drive at Chatterbox-only server startup.
 
     def _folder(self, voice_id: str) -> Path:
         if not _ID.fullmatch(voice_id):
@@ -48,6 +48,8 @@ class VoiceLibrary:
 
     def list(self) -> list[dict]:
         output = []
+        if not self.root.exists():
+            return output
         for d in sorted(self.root.iterdir()):
             if d.is_dir() and not d.is_symlink() and _ID.fullmatch(d.name):
                 try:
@@ -88,6 +90,7 @@ class VoiceLibrary:
         vid = uuid.uuid4().hex if is_new else voice_id
         folder = self._folder(vid)
         if is_new:
+            self.root.mkdir(parents=True, exist_ok=True)
             folder.mkdir(mode=0o700)
         version = 1 if is_new else old["voice_version"] + 1
         ref = folder / ("reference-v%d.wav" % version)

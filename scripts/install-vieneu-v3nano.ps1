@@ -44,8 +44,8 @@ if(!(Test-Path -LiteralPath $py)){
 if($LASTEXITCODE -ne 0){throw 'VIENEU_DEPENDENCIES_FAILED'}
 & $py -m pip install --no-deps 'git+https://github.com/pnnbao97/VieNeu-TTS.git@6566468cf14974807050495036ab75cd041143f7'
 if($LASTEXITCODE -ne 0){throw 'PINNED_VIENEU_SDK_FAILED'}
-& $py -m lite.vieneu_install verify
-# Install verifies SDK but the snapshot may not have been downloaded yet; allow this first-install state.
+& $py -m lite.vieneu_install check-sdk
+if($LASTEXITCODE -ne 0){throw 'VIENEU_PINNED_SDK_VERIFY_FAILED'}
 if($SkipDownload) {
     Write-Output 'Skipped model download; offline verification is required before generation.'
 } else {

@@ -243,7 +243,7 @@ def mount_vieneu(app):
                 return fail(422, "INVALID_CANCEL_IDENTITY")
             if token is not None and not re.fullmatch(r"[A-Za-z0-9_-]{24,256}", token):
                 return fail(422, "INVALID_CANCEL_IDENTITY")
-            if runtime.lock.locked():
+            if app.state.vieneu_active is not None or runtime.lock.locked():
                 result = fail(429, "WORKER_BUSY")
                 result.headers["Retry-After"] = "1"
                 return result

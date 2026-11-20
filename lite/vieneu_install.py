@@ -19,11 +19,14 @@ def assert_sdk():
         direct = json.loads(package.read_text("direct_url.json") or "{}")
         if direct.get("vcs_info", {}).get("commit_id") != SDK_REVISION:
             raise VieNeuError("SDK_SOURCE_MISMATCH")
-        if metadata.distribution("torch") or metadata.distribution("torchaudio"):
-            raise VieNeuError("TORCH_NOT_ALLOWED")
     except metadata.PackageNotFoundError as exc:
-        if exc.name != "torch" and exc.name != "torchaudio":
-            raise VieNeuError("SDK_NOT_INSTALLED") from exc
+        raise VieNeuError("SDK_NOT_INSTALLED") from exc
+    for forbidden in ("torch", "torchaudio"):
+        try:
+            metadata.distribution(forbidden)
+        except metadata.PackageNotFoundError:
+            continue
+        raise VieNeuError("TORCH_NOT_ALLOWED")
     # Check modules required by cloning without triggering model load.
     import onnxruntime
     if "CPUExecutionProvider" not in onnxruntime.get_available_providers():
@@ -80,15 +83,15 @@ def smoke():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("download", "verify"))
+    parser.add_argument("action", choices=("download", "verify", "check-sdk"))
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
     assert_sdk()
     if args.action == "download":
         install_snapshot()
-    else:
+    elif args.action == "verify":
         verify_model()
-    if args.smoke:
+    if args.smoke and args.action != "check-sdk":
         smoke()
     print("VIENEU_V3NANO_" + args.action.upper() + "_OK")
 if __name__ == "__main__":
