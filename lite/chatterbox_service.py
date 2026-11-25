@@ -7,6 +7,8 @@ import contextlib
 import errno
 import os
 import json
+import hashlib
+import secrets
 import urllib.request
 import urllib.error
 import sys
@@ -17,6 +19,7 @@ from .audio import AudioError, wav_info
 from .chatterbox_audio import stretch_speech_async, concatenate
 from .chatterbox_config import ChatterboxSettings, MODEL_REVISION, IDLE_CHOICES
 from .chatterbox_segmentation import segment_text, SegmentationError, POLICY_VERSION
+from .chatterbox_trace import record as trace_record, wav_snapshot, wav_sha256
 from .chatterbox_ipc import send, recv, ProtocolError
 from .pause import PauseScript, SpeechPart, PausePart
 from .pause_audio import assemble_pause_wav
@@ -317,6 +320,14 @@ class TurboService:
             self._cancel_idle()
             deadline = time.monotonic() + self.settings.timeout
             started = time.monotonic()
+            trace_id = secrets.token_hex(12)
+            trace_record(
+                "request_received", trace_id=trace_id, voice_id=profile["id"],
+                voice_version=profile["version"], input_text=text,
+                input_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                input_characters=len(text), request_seed=seed, speed=speed,
+                segmentation_policy=POLICY_VERSION,
+            )
             try:
                 await self._ensure_loaded(deadline)
                 parts = script.parts if script is not None else (SpeechPart(text),)
@@ -337,12 +348,21 @@ class TurboService:
                     part_wavs = []
                     for segment in segments:
                         total_speech_generations += 1
+                        chunk_index = total_speech_generations
                         chunk_hashes.append(segment.sha256)
+                        trace_record(
+                            "native_chunk_input", trace_id=trace_id,
+                            chunk_index=chunk_index, chunk_text=segment.text,
+                            chunk_text_sha256=segment.sha256,
+                            chunk_characters=len(segment.text),
+                            request_seed=seed, derived_seed=segment.seed,
+                        )
                         self.state = "GENERATING"
                         answer = await self._rpc({
                             "cmd": "SYNTH", "voice": profile["id"], "version": profile["version"],
                             "reference": str(reference), "reference_sha": profile["ref_sha256"],
                             "text": segment.text, "seed": segment.seed,
+                            "trace_id": trace_id, "trace_chunk_index": chunk_index,
                         }, deadline)
                         # Reject explicit incomplete native output before WAV assembly.
                         if (answer.get("generation_complete") is False
@@ -365,11 +385,22 @@ class TurboService:
                         left=deadline-time.monotonic()
                         if left<=0: raise TurboError("DEADLINE_EXCEEDED")
                         try:
-                            await asyncio.wait_for(asyncio.to_thread(
+                            native_info = await asyncio.wait_for(asyncio.to_thread(
                                 wav_info,raw,max_bytes=self.settings.max_output_bytes,
                                 max_seconds=600),left)
                         except asyncio.TimeoutError as exc:
                             raise TurboError("DEADLINE_EXCEEDED") from exc
+                        native_filename = wav_snapshot(
+                            raw, trace_id=trace_id, chunk_index=chunk_index, stage="native",
+                        )
+                        trace_record(
+                            "native_chunk_output", trace_id=trace_id,
+                            chunk_index=chunk_index, native_wav_sha256=wav_sha256(raw),
+                            native_wav_bytes=len(raw), native_duration_seconds=native_info["seconds"],
+                            generation_complete=answer.get("generation_complete"),
+                            finish_reason=answer.get("finish_reason"),
+                            raw_wav_filename=native_filename,
+                        )
                         if speed != 1.0:
                             left=deadline-time.monotonic()
                             if left<=0: raise TurboError("DEADLINE_EXCEEDED")
@@ -382,6 +413,20 @@ class TurboService:
                                     str(exc)=="ATEMPO_TIMEOUT" or time.monotonic()>=deadline):
                                     raise TurboError("DEADLINE_EXCEEDED") from exc
                                 raise
+                            processed_info = wav_info(
+                                raw, max_bytes=self.settings.max_output_bytes, max_seconds=600,
+                            )
+                            processed_filename = wav_snapshot(
+                                raw, trace_id=trace_id, chunk_index=chunk_index,
+                                stage="after_atempo",
+                            )
+                            trace_record(
+                                "chunk_after_atempo", trace_id=trace_id,
+                                chunk_index=chunk_index,
+                                wav_sha256=wav_sha256(raw), wav_bytes=len(raw),
+                                duration_seconds=processed_info["seconds"],
+                                speed=speed, wav_filename=processed_filename,
+                            )
                         part_wavs.append(raw)
                         if isinstance(answer.get("memory"), dict):
                             last_memory = answer["memory"].copy()
@@ -418,6 +463,16 @@ class TurboService:
                 self.state = "READY"
                 self.last_error = None
                 self.live_generation_verified_at = time.time()
+                final_filename = wav_snapshot(
+                    data, trace_id=trace_id, chunk_index=0, stage="final",
+                )
+                trace_record(
+                    "request_completed", trace_id=trace_id,
+                    output_wav_sha256=wav_sha256(data), output_wav_bytes=len(data),
+                    audio_duration_seconds=audio_s, speech_duration_seconds=speech_s,
+                    native_chunk_count=total_speech_generations, speed=speed,
+                    final_wav_filename=final_filename,
+                )
                 return data, {**meta, "audio_s": audio_s, "speech_s": speech_s,
                               "elapsed_s": elapsed, "deadline_at":deadline,
                               "rtf": elapsed / audio_s,
@@ -431,6 +486,10 @@ class TurboService:
                               "model_revision": observed_revision}
             except BaseException as exc:
                 self.last_error = exc.code if isinstance(exc, TurboError) else "GENERATION_FAILED"
+                trace_record(
+                    "request_error", trace_id=trace_id, error_code=self.last_error,
+                    exception_type=type(exc).__name__,
+                )
                 await self._kill()
                 self.state = "ERROR"
                 raise
