@@ -8,6 +8,7 @@ from types import MappingProxyType
 PROVIDER = "pocket-tts"
 CONTRACT = "pocket_cpu_api_v1"
 SDK_VERSION = "4.0.1"
+SDK_WHEEL_SHA256 = "a6baf5fd9195399a632d7ef1cb75d4ee772b8d3534c85b90164b39c687a69961"
 SDK_REVISION = "a922b912dfa366975294afb568d815b305acde5d"
 DEFAULT_UI_LANGUAGE = "es"
 MAX_INPUT_CHARS = 24000
