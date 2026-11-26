@@ -62,6 +62,30 @@ def inspect_wav(data: bytes, *, max_seconds: int = MAX_OUTPUT_SECONDS):
         raise PocketError("AUDIO_INTEGRITY_FAILURE")
     if struct.unpack_from("<I", data, 4)[0] + 8 != len(data):
         raise PocketError("AUDIO_INTEGRITY_FAILURE")
+    offset = 12
+    pcm_size = None
+    fmt_seen = False
+    while offset < len(data):
+        if len(data) - offset < 8:
+            raise PocketError("AUDIO_INTEGRITY_FAILURE")
+        kind, size = struct.unpack_from("<4sI", data, offset)
+        start = offset + 8
+        stop = start + size
+        offset = stop + (size % 2)
+        if offset > len(data):
+            raise PocketError("AUDIO_INTEGRITY_FAILURE")
+        if kind == b"fmt ":
+            if fmt_seen or pcm_size is not None or size < 16:
+                raise PocketError("AUDIO_INTEGRITY_FAILURE")
+            if struct.unpack_from("<HHIIHH", data, start) != (1, 1, SAMPLE_RATE, SAMPLE_RATE * 2, 2, 16):
+                raise PocketError("AUDIO_INTEGRITY_FAILURE")
+            fmt_seen = True
+        elif kind == b"data":
+            if not fmt_seen or pcm_size is not None or size % 2:
+                raise PocketError("AUDIO_INTEGRITY_FAILURE")
+            pcm_size = size
+    if pcm_size is None:
+        raise PocketError("AUDIO_INTEGRITY_FAILURE")
     try:
         with wave.open(io.BytesIO(data), "rb") as reader:
             frames = reader.getnframes()
@@ -71,7 +95,7 @@ def inspect_wav(data: bytes, *, max_seconds: int = MAX_OUTPUT_SECONDS):
             if frames > min(max_seconds * SAMPLE_RATE, MAX_FRAMES):
                 raise PocketError("OUTPUT_LIMIT_EXCEEDED")
             pcm = reader.readframes(frames)
-            if frames <= 0 or len(pcm) != frames * 2:
+            if frames <= 0 or len(pcm) != frames * 2 or len(pcm) != pcm_size:
                 raise PocketError("AUDIO_INTEGRITY_FAILURE")
     except (wave.Error, EOFError, struct.error, OverflowError) as exc:
         raise PocketError("AUDIO_INTEGRITY_FAILURE") from exc
