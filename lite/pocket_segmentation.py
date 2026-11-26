@@ -81,6 +81,9 @@ def build_job(text: str, language: str) -> tuple[Span, ...]:
     validate_text(text)
     # Existing parser is authority for the supported grammar, duration and count.
     parse_pause_script(text)
+    for candidate in re.finditer(r"\[[ \t]*pause(?![A-Za-z0-9_])", text, re.I | re.ASCII):
+        if COMPLETE.match(text, candidate.start()) is None:
+            raise PocketError("INVALID_PAUSE_MARKER")
     spans = []
     start = 0
     for marker in MARKER_START.finditer(text):
