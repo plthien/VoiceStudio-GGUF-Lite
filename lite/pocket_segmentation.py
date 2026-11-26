@@ -47,7 +47,8 @@ def _safe_boundary(text: str, pos: int) -> bool:
         return True
     # Never detach combining marks, variation selectors or joiner sequences.
     return (not unicodedata.category(text[pos]).startswith("M")
-            and text[pos] != "\u200d" and text[pos - 1] != "\u200d")
+            and text[pos] != "\u200d" and text[pos - 1] != "\u200d"
+            and not (text[pos - 1] == "\r" and text[pos] == "\n"))
 
 def _sentence_boundary(prefix: str, language: str) -> bool:
     prefix = prefix.rstrip().rstrip("\"'”’»)]")
