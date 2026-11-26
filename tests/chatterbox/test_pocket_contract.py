@@ -114,3 +114,17 @@ def test_real_ffmpeg_speed():
     slow = inspect_wav(apply_speed(wav, 0.8, shutil.which("ffmpeg")))[0]
     assert 2.2 < fast.seconds < 2.6
     assert 3.5 < slow.seconds < 4.0
+
+
+def test_reject_odd_pcm_data_length():
+    data = bytearray(fixture_wav())
+    struct.pack_into("<I", data, 40, len(data) - 45)
+    with pytest.raises(PocketError, match="AUDIO_INTEGRITY_FAILURE"):
+        inspect_wav(bytes(data))
+
+
+def test_crlf_boundary():
+    source = "x" * 319 + "\r\nHola."
+    spans = build_job(source, "es")
+    assert "".join(s.text for s in spans) == source
+    assert not any(s.text.endswith("\r") for s in spans)
