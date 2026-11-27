@@ -1,5 +1,12 @@
 # Pocket TTS V2 implementation report — PARTIAL / BLOCKED
 
+## Repair round (2026-11-27, after independent audit of this PR)
+
+- **F1 FIXED — INT8 contract hole.** `PocketSpeech` previously accepted `precision="int8"` although the registry policy is FP32-only. The contract now rejects any precision outside the resolved model's registry `precision_policy` with `PRECISION_UNAVAILABLE`. Regression tests cover all seven models.
+- **F2 PARTIALLY FIXED — asset pins.** Registry entries now carry `config_sha256` (SHA256 of the upstream YAML at tag v4.0.1), `weights_sha256`/`weights_size` (HF LFS metadata for `model.safetensors` at the pinned revision) and `tokenizer_sha256`/`tokenizer_size` (SHA256 of the actually downloaded `tokenizer.json` at its pinned revision). Preset pins are in `lite/pocket_pins.py`: 27 preset embeddings per model from the pinned weights revision; preset names are shared across models but **every hash is model-specific** (verified: 27/27 names have 7 distinct hashes). Still outstanding: Windows dependency lock, gated weights *download* verification, and installer-side enforcement (no installer exists yet).
+- **F4 PARTIALLY FIXED — segmentation/normalization record.** Each registry entry now records the pinned config's `sdk_replace_characters` map verbatim (e.g. Spanish SDK strips `¡`/`¿`, French maps `:` to `,`, English only normalizes curly apostrophes). Tests assert the application ledger preserves the original text (SDK normalization is recorded, never applied by the app), plus golden word-count fixtures (de/fr/es) and an abbreviation-integrity case. Still outstanding: a true sentence segmenter, larger per-language abbreviation sets, WPM receipt reporting.
+- Tests: `tests/chatterbox/test_pocket_contract.py` is now **45 tests** (40 + 5 repair tests), all passing in the audit sandbox (pydantic 2.14.4, pytest 9.2.0, FFmpeg 8.1.2). Gate impact: P02 moves from BLOCKED to PARTIAL (pins verified; lock/download open); M02 asset-distinctness evidence now exists for weights and presets. All other gate statuses below are unchanged.
+
 Plan: VOICESTUDIO_POCKET_TTS_MULTILINGUAL_ONE_ROUND_IMPLEMENTATION_PLAN_V2.md.
 Base: feat/chatterbox-turbo-provider at 53cccb2a8d9da24b48b591eec36c3a75cd2affed (exact match to reviewed baseline).
 Branch: feat/pocket-tts-provider, created from that SHA. Tested source head before this report: 0a1bd33a9d7043879b1047972aa519e3f4a7e1d0.

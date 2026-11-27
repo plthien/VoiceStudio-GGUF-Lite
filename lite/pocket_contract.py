@@ -38,7 +38,13 @@ class PocketSpeech(BaseModel):
 
     @model_validator(mode="after")
     def match_model(self):
-        resolve_model(self.language, self.model_variant)
+        spec = resolve_model(self.language, self.model_variant)
+        # INT8 stays unavailable until that exact model/precision tuple has
+        # its own acceptance evidence (plan sections 0 and 7). The registry
+        # precision policy is the authority; do not accept it here and rely
+        # on a later layer that may not exist.
+        if self.precision not in spec.precision_policy:
+            raise ValueError("PRECISION_UNAVAILABLE")
         return self
 
 class PocketCancel(BaseModel):

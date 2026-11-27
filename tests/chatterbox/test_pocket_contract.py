@@ -128,3 +128,62 @@ def test_crlf_boundary():
     spans = build_job(source, "es")
     assert "".join(s.text for s in spans) == source
     assert not any(s.text.endswith("\r") for s in spans)
+
+
+# --- Repair round (audit PR #5 findings F1/F2/F4) ---
+
+from lite.pocket_registry import REGISTRY as _REG
+from lite.pocket_pins import PRESET_SHA256
+
+def test_precision_gate():
+    base = {"language": "es", "model_variant": "spanish_24l",
+            "voice": "fixture", "input": "Hola."}
+    assert PocketSpeech.model_validate(base).precision == "fp32"
+    for code, (variant, _, _) in EXPECTED.items():
+        with pytest.raises(ValidationError, match="PRECISION_UNAVAILABLE"):
+            PocketSpeech.model_validate({"language": code, "model_variant": variant,
+                                         "voice": "fixture", "input": "Hola.",
+                                         "precision": "int8"})
+
+def test_asset_pins():
+    weights = set()
+    for code, spec in _REG.items():
+        for digest in (spec.config_sha256, spec.weights_sha256, spec.tokenizer_sha256):
+            assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+        assert spec.weights_size > 0 and spec.tokenizer_size > 0
+        weights.add(spec.weights_sha256)
+        presets = PRESET_SHA256[spec.model_variant]
+        assert len(presets) == 27
+        assert spec.preset_names == tuple(presets)
+    assert len(weights) == 7  # every model has distinct weights
+    # Same preset name, different model: hashes must never validate cross-model.
+    for name in PRESET_SHA256["spanish_24l"]:
+        assert len({PRESET_SHA256[v][name] for v in PRESET_SHA256}) == 7
+
+def test_sdk_normalization_recorded_not_applied():
+    es = dict(_REG["es"].sdk_replace_characters)
+    assert es["¡"] == "" and es["¿"] == ""  # upstream SDK strips these
+    assert dict(_REG["fr"].sdk_replace_characters)[":"] == ","
+    assert dict(_REG["en"].sdk_replace_characters) == {"’": "'", "‘": "'"}
+    # The application ledger preserves the original text regardless.
+    source = "¿Cómo estás? ¡Muy bien!" * 30
+    spans = build_job(source, "es")
+    assert "".join(s.text for s in spans) == source
+
+def test_word_count_golden_fixtures():
+    cases = [
+        ("de", "Dr. Müller bleibt. Die Überlebensstrategie gilt.", 6),
+        ("fr", "M. Noël dit: l’été commence.", 5),
+        ("es", "El Sr. Núñez llegó. ¿Vino Ud.?", 6),
+    ]
+    for code, text, expected in cases:
+        assert word_count(build_job(text, code)) == expected
+
+def test_abbreviation_token_never_split():
+    source = ("palabra " * 35) + "Sr. Núñez " + ("palabra " * 40)
+    spans = build_job(source, "es")
+    assert "".join(s.text for s in spans) == source
+    # Golden case: the abbreviation and the name it belongs to stay together,
+    # and no span ever cuts through the "Sr." token itself.
+    assert any("Sr. Núñez" in s.text for s in spans)
+    assert not any(s.text.endswith("Sr") for s in spans)
