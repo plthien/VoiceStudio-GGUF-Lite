@@ -187,3 +187,7 @@ def test_abbreviation_token_never_split():
     # and no span ever cuts through the "Sr." token itself.
     assert any("Sr. Núñez" in s.text for s in spans)
     assert not any(s.text.endswith("Sr") for s in spans)
+
+def test_unknown_preset_raises_typed_error():
+    with pytest.raises(PocketError, match="VOICE_NOT_FOUND"):
+        _REG["es"].preset_sha256("no-such-voice")

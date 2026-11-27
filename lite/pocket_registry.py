@@ -69,7 +69,10 @@ class ModelSpec:
 
     def preset_sha256(self, name: str) -> str:
         from .pocket_pins import PRESET_SHA256
-        return PRESET_SHA256[self.model_variant][name]
+        try:
+            return PRESET_SHA256[self.model_variant][name]
+        except KeyError:
+            raise PocketError("VOICE_NOT_FOUND") from None
 
 _MODELS = (
     ModelSpec("es", "spanish_24l", 24, "Español", "La supervivencia nunca fue fácil.", "7622362fd6073c32b7088702d4647455139a68a0", "hf://kyutai/pocket-tts/languages/spanish_24l/model.safetensors@2dd944b099d06bb9edbd221fef138685711d9bf0", "hf://kyutai/pocket-tts-without-voice-cloning/languages/spanish_24l/tokenizer.json@4e1e0a3e611c51c0b4ed8174fc10f32a54644303", "2fb7fc04acc8fb750c8ce47ff99fc73e26102266e40ffd50be7021a873121508", "c5ce7e8b8fa3cf0e59d4dc2befa301ed73a49e2506dcc73a6470fc298d034840", 672178676, "9ade09bbdc64ab2b59952b90773fa0890b780ece4fd5aef0d36a00c6ad5f0531", 246610, tuple({"\"": "", "“": "", "”": "", "„": "", "«": "", "»": "", "’": "'", "‘": "'", "(": "", ")": "", "[": "", "]": "", "¡": "", "¿": "", "–": ","}.items())),
