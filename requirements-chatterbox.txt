@@ -1,4 +1,6 @@
 # Separate, owner-host CUDA environment. PyTorch CUDA wheels installed first.
+# torchaudio from that step also powers lite/alignment_engine.py (Wav2Vec2
+# forced alignment); no additional dependency is required for it.
 # Source/model revisions pinned in installer. Resolved transitive lock is private D:.
 fastapi==0.115.12
 uvicorn==0.34.2
