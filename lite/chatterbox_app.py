@@ -823,6 +823,9 @@ def create_app(settings: ChatterboxSettings | None = None, store=None, service=N
     # VieNeu routes are mounted without altering any existing Chatterbox contract.
     from .vieneu_routes import mount_vieneu
     mount_vieneu(app)
+    # Wav2Vec2 forced-alignment routes, likewise additive only.
+    from .alignment_routes import mount_alignment
+    mount_alignment(app)
     app.add_middleware(SizeGuard, limit=settings.max_ref_bytes + 65536)
     return app
 
